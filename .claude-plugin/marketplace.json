@@ -1,0 +1,14 @@
+{
+  "name": "pensieve",
+  "owner": {
+    "name": "Pensieve",
+    "url": "https://pensieve.uk"
+  },
+  "plugins": [
+    {
+      "name": "pensieve",
+      "source": "./pensieve",
+      "description": "Role skills for agents working from a company's Pensieve context layer"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pensieve": {
+      "type": "http",
+      "url": "https://mcp.pensieve.uk/mcp"
+    }
+  }
+}
