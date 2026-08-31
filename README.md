@@ -21,7 +21,7 @@ The plugin carries every role skill and the connection to your context layer, so
 
 Scheduled tasks inherit installed skills, so a role can run on a cadence — a Monday operating brief, a weekly customer-signal review — with the destination and schedule named in the task, never in the skill.
 
-Other routes: `npx skills add pensieve.uk` reads the same skills from [`/.well-known/agent-skills/`](https://pensieve.uk/.well-known/agent-skills/index.json), and any MCP client connected to the [Pensieve server](https://docs.pensieve.uk/mcp-server/clients) is offered each skill as a prompt and a `skill://` resource.
+Other routes: `npx skills add pensieve-io/skills` installs the skill files alone into any harness that reads Agent Skills (checksums are published at [`/.well-known/agent-skills/`](https://pensieve.uk/.well-known/agent-skills/index.json)), and any MCP client connected to the [Pensieve server](https://docs.pensieve.uk/mcp-server/clients) is offered each skill as a prompt and a `skill://` resource.
 
 ## Docs
 
