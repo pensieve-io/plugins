@@ -2,6 +2,8 @@
 
 A skill is a team member. Each one describes a role — what that person holds in their head, how they judge, the shifts they run and when they write something back — and leaves the company itself to [Pensieve](https://pensieve.uk), the context layer curated from your company's own sources. Give the skill to an agent connected to your context layer and you have someone who reasons about your business the way a senior hire would after years inside it, from the first run.
 
+This is a growing collection: new roles and shifts ship to this same plugin, and installed copies pick them up automatically. The current roster:
+
 | Skill | Role | What it does |
 | --- | --- | --- |
 | `chief-of-staff` | Chief of Staff | Reads the whole company and tells the leadership team what changed, what needs deciding, and who owes what by when. |
