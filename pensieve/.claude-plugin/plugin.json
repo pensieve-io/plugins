@@ -2,13 +2,12 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "pensieve",
   "displayName": "Pensieve",
-  "version": "1.0.0",
   "description": "Role skills for agents working from a company's Pensieve context layer",
   "author": {
     "name": "Pensieve",
     "url": "https://pensieve.uk"
   },
-  "homepage": "https://docs.pensieve.uk/skills",
+  "homepage": "https://docs.pensieve.uk/agents",
   "license": "Proprietary",
   "keywords": [
     "pensieve",

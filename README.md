@@ -12,7 +12,9 @@ This is a growing collection: new roles and shifts ship to this same plugin, and
 
 ## Install
 
-In Claude Code, Claude Desktop or Claude Cowork:
+In claude.ai or Claude Desktop: open **Settings → Plugins → Add → Add marketplace**, paste `https://github.com/pensieve-io/skills`, **Sync**, then install **Pensieve** from the card that appears.
+
+In Claude Code:
 
 ```
 /plugin marketplace add pensieve-io/skills
@@ -29,10 +31,10 @@ Other routes: `npx skills add pensieve-io/skills` installs the skill files alone
 
 Each skill's page shows the file in full, with setup for the scheduled agent step by step:
 
-- [How role skills work](https://docs.pensieve.uk/skills)
-- [Hire a Chief of Staff](https://docs.pensieve.uk/use-cases/chief-of-staff)
-- [Hire a Head of Product](https://docs.pensieve.uk/use-cases/head-of-product)
-- [Hire a Head of Growth](https://docs.pensieve.uk/use-cases/head-of-growth)
+- [Build your AI team](https://docs.pensieve.uk/agents)
+- [Hire a Chief of Staff](https://docs.pensieve.uk/agents/chief-of-staff)
+- [Hire a Head of Product](https://docs.pensieve.uk/agents/head-of-product)
+- [Hire a Head of Growth](https://docs.pensieve.uk/agents/head-of-growth)
 
 ## About this repository
 
