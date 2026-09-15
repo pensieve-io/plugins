@@ -1,5 +1,8 @@
 {
   "name": "pensieve",
+  "metadata": {
+    "description": "Pensieve plugins for shared company context, connected tools and role skills."
+  },
   "owner": {
     "name": "Pensieve",
     "url": "https://pensieve.uk"
@@ -8,7 +11,7 @@
     {
       "name": "pensieve",
       "source": "./pensieve",
-      "description": "Role skills for agents working from a company's Pensieve context layer"
+      "description": "Company grounding, context refresh and role skills from Pensieve"
     }
   ]
 }

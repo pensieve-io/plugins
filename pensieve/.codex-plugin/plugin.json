@@ -1,0 +1,34 @@
+{
+  "name": "pensieve",
+  "description": "Company grounding, context refresh and role skills from Pensieve",
+  "author": {
+    "name": "Pensieve",
+    "url": "https://pensieve.uk"
+  },
+  "homepage": "https://docs.pensieve.uk/mcp-server/clients",
+  "repository": "https://github.com/pensieve-io/plugins",
+  "license": "Proprietary",
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/codex.json",
+  "interface": {
+    "displayName": "Pensieve",
+    "shortDescription": "Your company's shared, cited context",
+    "longDescription": "Connect to your company's context layer, follow claims to their sources, and work with Chief of Staff, Head of Product and Head of Growth skills. Supported clients load and refresh company context automatically through lifecycle hooks.",
+    "developerName": "Pensieve",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://pensieve.uk",
+    "privacyPolicyURL": "https://pensieve.uk/privacy",
+    "termsOfServiceURL": "https://pensieve.uk/terms",
+    "defaultPrompt": [
+      "Brief me on what changed across the company.",
+      "What should our product team focus on next?",
+      "Which growth channels are delivering results?"
+    ],
+    "brandColor": "#765AD4",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png",
+    "logoDark": "./assets/logo-dark.png"
+  }
+}

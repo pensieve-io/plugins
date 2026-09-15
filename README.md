@@ -55,17 +55,35 @@ Start a new conversation to use the installed plugin.
 For both command-line clients, `python3` (3.9 or newer) must be available to the
 client's command runner for the bundled hook helper.
 
-### Desktop and other clients
+### Desktop and workspace clients
 
 Where your client supports custom plugin marketplaces, add
 `https://github.com/pensieve-io/plugins` and install **Pensieve**. The catalogue
 and plugin are both named `pensieve`; the same bundle supplies the MCP
 connection and role skills.
 
-Automatic context loading also requires the host to run the plugin's hooks.
-An ordinary ChatGPT or Claude chat connected through MCP does not gain those
-hooks or install skill files. Follow the [client setup guide](https://docs.pensieve.uk/mcp-server/clients)
-for MCP connections and standing instructions.
+The components available depend on the client and workspace settings:
+
+| Client | Installation and skills | Automatic context hooks | Verification |
+| --- | --- | --- | --- |
+| Codex CLI | Git marketplace; bundled MCP connection and skills | Supported by the packaged Codex adapter | Synthetic probes on 0.154.0; live install/update pending |
+| Claude Code | Git marketplace; bundled MCP connection and skills | Supported by the packaged Claude adapter | Synthetic probes on 2.1.267; live install/update pending |
+| Codex desktop app | Plugin marketplace; availability depends on account/workspace | Requires the app to run the packaged hooks and helper | Pending |
+| ChatGPT Desktop / managed workspace | Workspace admins can import this GitHub marketplace; app access and authentication are separate | Package import alone does not establish hook execution | Pending |
+| Claude Desktop Chat / web chat | Plugin skills and connectors where enabled | Claude documents hooks as unavailable in Chat | Pending |
+| Claude Cowork | Custom Git marketplace or plugin upload; skills and connectors | Claude documents hook support; this adapter still needs a live check | Pending |
+| Other MCP clients | Connect the hosted MCP service; install skills separately where supported | Requires a compatible hook runner | Client-specific |
+
+Connecting only through MCP does not install skill files or lifecycle hooks.
+ChatGPT imports that declare MCP servers can be marked **Desktop only**, even
+when the server is remote. See [OpenAI's marketplace import guide](https://help.openai.com/en/articles/20001504)
+and [Claude's plugin support guide](https://support.claude.com/en/articles/13837440-use-plugins-in-claude)
+for host capabilities. The table records package verification as of 15 September
+2026; it does not imply production or desktop acceptance.
+
+Follow the [client setup guide](https://docs.pensieve.uk/mcp-server/clients)
+for MCP connections and standing instructions. Developers can run the
+[client probes and live acceptance checks](docs/client-probes.md) before publication.
 
 ## Updates
 
@@ -107,7 +125,15 @@ Conversation text and local file contents are not uploaded.
 
 Scheduled tasks inherit installed skills, so a role can run on a cadence — a Monday operating brief, a weekly customer-signal review — with the destination and schedule named in the task, never in the skill.
 
-Other routes: `npx skills add pensieve-io/plugins` installs the skill files alone into any harness that reads Agent Skills (checksums are published at [`/.well-known/agent-skills/`](https://pensieve.uk/.well-known/agent-skills/index.json)), and any MCP client connected to the [Pensieve server](https://docs.pensieve.uk/mcp-server/clients) is offered each skill as a prompt and a `skill://` resource.
+`npx skills add pensieve-io/plugins` installs the skill files alone into harnesses
+that read Agent Skills. MCP clients connected to the
+[Pensieve server](https://docs.pensieve.uk/mcp-server/clients) are also offered
+each skill as a prompt and a `skill://` resource.
+
+The [hosted skill index](https://pensieve.uk/.well-known/agent-skills/index.json)
+publishes checksums for the application release's pinned skill snapshot. That
+snapshot can lag this repository's latest revision; its checksums do not verify
+an arbitrary latest Git install.
 
 ## Docs
 
@@ -118,17 +144,15 @@ Each skill's page shows the file in full, with setup for the scheduled agent ste
 - [Hire a Head of Product](https://docs.pensieve.uk/agents/head-of-product)
 - [Hire a Head of Growth](https://docs.pensieve.uk/agents/head-of-growth)
 
-## About this repository
+## Contributing
 
-This is the public distribution repository for the Pensieve plugin across
-supported AI clients. Its source lives in the `plugins/` directory of Pensieve's
-private main repository. Publishing that directory here lets anyone install
-the plugin without access to the application code.
+This repository is the source of truth for the installable Pensieve plugin.
+Edit skills, client manifests, MCP connection configuration, hooks and the local
+helper here. Claude and Codex share the skills and helper, with separate
+manifests and hook adapters where their clients require different formats.
 
-The MCP configuration, skills, client manifests, hook adapters and helper are
-maintained in the main repository and published here together. Claude and Codex
-use client-specific manifests and hook adapters around the same company context
-and role skills.
+Pensieve's hosted MCP server, authentication and company data remain in the
+application repository. Its backend and docs import a pinned copy of the skills
+from this repository; they do not publish or overwrite the plugin.
 
-Issues and requests are welcome. Changes should be made in the main repository;
-direct edits to this mirror are overwritten by the next publication.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release order.
