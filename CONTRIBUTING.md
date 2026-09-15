@@ -40,12 +40,15 @@ fields. Package tests verify that advertised artwork stays inside the plugin
 and is a real PNG. The existing Claude-compatible marketplace is also accepted
 by Codex and ChatGPT workspace import, so keep one catalogue.
 
-Artwork is copied from Pensieve's existing brand files: `icon.png` from
-`frontend/apps/web/public/icon-512.png`, `logo.png` from
-`assets/branding/logos/logo-black.png`, and `logo-dark.png` from
-`assets/branding/logos/logo-white.png`. The accent colour follows the product's
-light-mode `--primary` token. Update the bundled copies deliberately when the
-brand changes; the plugin has no runtime dependency on the application checkout.
+Artwork uses `assets/branding/logos/logo-fill-grey-rounded.png` from the
+application repository, copied unchanged to `pensieve/assets/icon.png`.
+`composerIcon`, `logo` and `logoDark` all reference this one white mark on its
+own grey background. Keep the background: some client surfaces, including
+ChatGPT's plugin detail MCP row, use only `logo` even in dark mode and add no
+background of their own. The same asset must remain legible in both themes.
+The accent colour follows the product's light-mode `--primary` token. Update
+the bundled copy deliberately; the plugin has no runtime dependency on the
+application checkout.
 
 Installed Claude/Codex CLI probes use synthetic local services and no paid model
 calls. See [client-probes.md](docs/client-probes.md) and the

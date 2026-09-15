@@ -44,12 +44,14 @@ plugin's hooks if prompted, then start a new chat.
 
 ### Claude Code
 
-```
-/plugin marketplace add pensieve-io/plugins
-/plugin install pensieve@pensieve
+Run these in your terminal:
+
+```sh
+claude plugin marketplace add pensieve-io/plugins
+claude plugin install pensieve@pensieve
 ```
 
-Complete the Pensieve sign-in when prompted and enable the plugin's hooks.
+Open Claude Code, run `/mcp` to sign in to Pensieve, and enable the plugin's hooks.
 Start a new conversation to use the installed plugin.
 
 For both command-line clients, `python3` (3.9 or newer) must be available to the
@@ -57,10 +59,32 @@ client's command runner for the bundled hook helper.
 
 ### Desktop and workspace clients
 
-Where your client supports custom plugin marketplaces, add
-`https://github.com/pensieve-io/plugins` and install **Pensieve**. The catalogue
-and plugin are both named `pensieve`; the same bundle supplies the MCP
-connection and role skills.
+**Claude web, Desktop and Cowork** (paid plans with plugins enabled):
+
+1. Open [Claude plugins](https://claude.ai/customize/plugins). In Cowork, open
+   the Cowork tab first, then **Customize → Plugins**.
+2. Choose **+ → Add marketplace → Add from a repository**.
+3. Paste `https://github.com/pensieve-io/plugins` and sync the marketplace.
+4. Open the Pensieve marketplace, install **Pensieve**, sign in when prompted
+   and start a new conversation.
+
+**ChatGPT desktop / Codex desktop:** with the
+[Codex CLI](https://learn.chatgpt.com/docs/codex/cli) installed on the same
+computer, run the three Codex commands above. Restart the desktop app, open
+**Plugins**, select the Pensieve marketplace and enable the installed plugin.
+Review any hook permissions, then start a new chat in Work or Codex.
+
+**Managed ChatGPT workspaces:** an admin opens **Admin → Plugins → Add → Import
+marketplace**, enters `https://github.com/pensieve-io/plugins` as **Source**, and
+leaves **Path** and **Branch** empty. After import, make Pensieve available to
+the workspace. Members open **Plugins**, choose their workspace and install
+Pensieve. Complete sign-in when prompted. A plugin marked **Desktop only** must
+be installed and used in the desktop app.
+
+These routes use our public GitHub marketplace. Add it first; publishing a
+GitHub repository does not add a plugin to either client's public directory.
+The catalogue and plugin are both named `pensieve`. A settings link opens the
+host's setup screen; it does not install the plugin for you.
 
 The components available depend on the client and workspace settings:
 
@@ -76,7 +100,7 @@ The components available depend on the client and workspace settings:
 
 Connecting only through MCP does not install skill files or lifecycle hooks.
 ChatGPT imports that declare MCP servers can be marked **Desktop only**, even
-when the server is remote. See [OpenAI's marketplace import guide](https://help.openai.com/en/articles/20001504)
+when the server is remote. See [OpenAI's marketplace import guide](https://learn.chatgpt.com/docs/enterprise/plugin-management)
 and [Claude's plugin support guide](https://support.claude.com/en/articles/13837440-use-plugins-in-claude)
 for host capabilities. The table records package verification as of 15 September
 2026; it does not imply production or desktop acceptance.
