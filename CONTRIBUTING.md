@@ -6,6 +6,7 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/.mcp.json`: the hosted Pensieve MCP connection, without credentials.
 - `pensieve/.claude-plugin/` and `pensieve/.codex-plugin/`: client manifests.
 - `pensieve/assets/`: bundled Pensieve branding used by supported client fields.
+- `docs/distribution.md`: canonical directory metadata, listing copy and submission checks.
 - `pensieve/hooks/`: host-specific hook adapters.
 - `pensieve/scripts/context_receipt.py`: the standard-library-only client helper.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
@@ -75,6 +76,13 @@ Keep the hooks PR in draft until these checks are complete:
 Preserve the `pensieve` marketplace, plugin and MCP server names. This package
 omits a fixed manifest version so Claude Code can use the Git revision for
 updates. Never publish credentials or install a server implementation locally.
+
+Public directory releases also follow [distribution.md](docs/distribution.md).
+Keep Claude's connector and plugin identities aligned; OpenAI takes one combined
+MCP-and-skills submission for ChatGPT and Codex. Directory imports must preserve
+the required adapter/helper and pass native hook checks before claiming the same
+automatic context behaviour as the Git package. OpenAI's imported skill snapshot
+requires a new scan or upload for updates; a Git push does not update it live.
 
 Local/synthetic package tests need no application release. Live tests against
 `mcp.pensieve.uk` require the compatible backend to be released first. A staging

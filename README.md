@@ -28,6 +28,19 @@ provides the company knowledge it works from.
 
 ## Install
 
+**Install this plugin and sign in; you do not need to add a standalone Pensieve
+connector as well.** A connector on its own supplies MCP access without native
+skills or hooks. In Claude, the directory connector and plugin can coexist
+without duplicating tools when they use the same server URL. Other clients may
+handle extra manual connections differently.
+
+[Open Claude plugins](https://claude.ai/customize/plugins) ·
+[Open ChatGPT plugins](https://chatgpt.com/plugins) ·
+[Client setup guide](https://docs.pensieve.uk/mcp-server/clients)
+
+These links open setup screens. Use the Git marketplace instructions below to
+install this package; a link does not install or authenticate it automatically.
+
 ### Codex CLI
 
 Run these commands in a terminal:
@@ -85,6 +98,13 @@ These routes use our public GitHub marketplace. Add it first; publishing a
 GitHub repository does not add a plugin to either client's public directory.
 The catalogue and plugin are both named `pensieve`. A settings link opens the
 host's setup screen; it does not install the plugin for you.
+
+Claude lists its MCP connector and full plugin separately. OpenAI uses one
+universal public plugin directory shared by ChatGPT and Codex; our public
+submission should contain both the MCP connection and these skills. See
+[directory distribution and branding](docs/distribution.md) for the canonical
+listing fields and publishing process. Git publication and directory approval
+are separate steps.
 
 The components available depend on the client and workspace settings:
 
@@ -164,6 +184,7 @@ an arbitrary latest Git install.
 Each skill's page shows the file in full, with setup for the scheduled agent step by step:
 
 - [Build your AI team](https://docs.pensieve.uk/agents)
+- [Directory distribution and shared branding](docs/distribution.md)
 - [Hire a Chief of Staff](https://docs.pensieve.uk/agents/chief-of-staff)
 - [Hire a Head of Product](https://docs.pensieve.uk/agents/head-of-product)
 - [Hire a Head of Growth](https://docs.pensieve.uk/agents/head-of-growth)
