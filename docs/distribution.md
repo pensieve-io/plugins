@@ -26,7 +26,8 @@ Do not create a separate package or artwork for each directory.
 | Support contact | `euan@pensieve.uk` |
 | Privacy | `https://pensieve.uk/privacy` |
 | Terms | `https://pensieve.uk/terms` |
-| Logo upload | [`pensieve/assets/icon.png`](../pensieve/assets/icon.png) |
+| Logo asset | [`pensieve/assets/icon.png`](../pensieve/assets/icon.png) |
+| Public icon URL | `https://raw.githubusercontent.com/pensieve-io/plugins/main/pensieve/assets/icon.png` |
 | Category | Productivity |
 | Short description / tagline | Your company's shared, cited context |
 
@@ -41,6 +42,10 @@ Codex's `composerIcon`, `logo` and `logoDark` all point at this file. For a
 directory that accepts an upload, upload these bytes. The MCP service also
 bundles the image; changing the repository asset does not update a directory's
 uploaded or cached logo. Verify the displayed listing after every brand change.
+Claude's connector editor accepts a custom icon URL. Its checker accepts the
+public URL above, which serves the same approved bytes directly from this
+repository. That override changes the directory listing only; the MCP-host
+favicon still needs its own deployment for other Claude surfaces.
 
 For a submitted version, record the full source commit, package SHA-256 and
 logo SHA-256 in the release handoff. Import the same reviewed skills into the
@@ -108,6 +113,13 @@ helps Claude recognise the service used by the plugin.
    acceptance test.
 5. Verify that directory search finds both entries and that each displays the
    same logo and product name.
+
+After the plugin is published, Claude's directory CI mirrors GitHub updates
+and screens them automatically; do not re-submit the form for routine package
+updates. A pending submission may have no edit control in the portal. Check its
+existing review before starting another submission. The former
+`pensieve-io/skills` repository URL redirects to this same `pensieve-io/plugins`
+repository; the rename alone does not require a second listing.
 
 [Claude documents](https://claude.com/docs/connectors/building/what-to-build#how-they-coexist)
 one set of tools when the plugin and directory connector point to the same MCP
