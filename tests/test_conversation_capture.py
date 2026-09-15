@@ -1,0 +1,948 @@
+"""Capture requires fresh, correctly scoped provenance and durable acknowledgement."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import stat
+import uuid
+
+import conversation_capture as capture
+import pytest
+
+SESSION = "923bbd76-d864-4b8f-b252-c2b7c3692492"
+OWNER = "353e0b53-8178-4a3c-8d40-a07414144741"
+OTHER_OWNER = "173e0b53-8178-4a3c-8d40-a07414144741"
+KEY = "synthetic-upload-key-owner-one"
+OTHER_KEY = "synthetic-upload-key-owner-two"
+NOW = "2026-09-15T10:00:00+00:00"
+
+
+def marker(client="codex", owner=OWNER, context=497, kind="prompt", turn=None, session=SESSION):
+    value = {
+        "v": 1,
+        "kind": kind,
+        "user_id": owner,
+        "context_id": context,
+        "client": client,
+        "conversation_id": session,
+        "turn_id": turn,
+    }
+    return "<!-- pensieve-capture-context " + json.dumps(value) + " -->"
+
+
+def hook_record(client="codex", **kwargs):
+    content = marker(client=client, **kwargs)
+    if client == "claude":
+        return {
+            "type": "attachment",
+            "sessionId": SESSION,
+            "isSidechain": False,
+            "attachment": {
+                "type": "hook_additional_context",
+                "hookName": "UserPromptSubmit",
+                "hookEvent": "UserPromptSubmit",
+                "content": [content],
+            },
+        }
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": content}],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["hooks.additional_context"]
+            },
+        },
+    }
+
+
+def user(text="Visible question", client="codex"):
+    if client == "claude":
+        return {
+            "type": "user",
+            "sessionId": SESSION,
+            "isSidechain": False,
+            "uuid": str(uuid.uuid4()),
+            "timestamp": NOW,
+            "message": {"role": "user", "content": text},
+        }
+    return {
+        "type": "event_msg",
+        "timestamp": NOW,
+        "payload": {"type": "user_message", "message": text},
+    }
+
+
+def assistant(text="Visible answer", client="codex"):
+    payload = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text" if client == "codex" else "text", "text": text}],
+    }
+    if client == "claude":
+        return {
+            "type": "assistant",
+            "sessionId": SESSION,
+            "isSidechain": False,
+            "uuid": str(uuid.uuid4()),
+            "timestamp": NOW,
+            "message": payload,
+        }
+    return {"type": "response_item", "timestamp": NOW, "payload": payload}
+
+
+def append(path, *records):
+    with path.open("ab") as handle:
+        for record in records:
+            handle.write(json.dumps(record).encode() + b"\n")
+
+
+def config(tmp_path, profiles=None):
+    path = tmp_path / "capture.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": profiles
+                if profiles is not None
+                else [{"user_id": OWNER, "context_id": 497, "upload_key": KEY}],
+            }
+        )
+    )
+    path.chmod(0o600)
+    return path
+
+
+def setup(tmp_path, monkeypatch, client="codex", prior=(), profiles=None):
+    path = tmp_path / "transcript.jsonl"
+    path.touch()
+    if client == "codex":
+        append(path, {"type": "session_meta", "payload": {"id": SESSION}})
+    append(path, *prior)
+    cfg = config(tmp_path, profiles)
+    state = tmp_path / "spool"
+    calls = []
+
+    def send(batch, key, endpoint, timeout):
+        calls.append((dict(batch), key))
+        return True
+
+    monkeypatch.setattr(capture, "upload", send)
+
+    def run(event="Stop"):
+        return capture.run_hook(
+            {"session_id": SESSION, "hook_event_name": event, "transcript_path": str(path)},
+            client,
+            cfg,
+            state,
+        )
+
+    run("SessionStart")
+    return path, cfg, state, calls, run
+
+
+def events(calls):
+    return [event for batch, _key in calls for event in json.loads(batch["body"])["events"]]
+
+
+def pending(state):
+    db = sqlite3.connect(next(state.glob("*.sqlite3")))
+    try:
+        return db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        db.close()
+
+
+def test_capture_off_does_not_read_transcript_or_create_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture, "scan", lambda *args: pytest.fail("capture off read transcript"))
+    capture.run_hook(
+        {"session_id": SESSION, "hook_event_name": "Stop", "transcript_path": "/does-not-exist"},
+        "codex",
+        tmp_path / "absent",
+        tmp_path / "spool",
+    )
+    assert not (tmp_path / "spool").exists()
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o666, 0o400])
+def test_config_requires_exact_private_permissions(tmp_path, mode):
+    path = config(tmp_path)
+    path.chmod(mode)
+    with pytest.raises(ValueError, match="0600"):
+        capture.profiles(path)
+
+
+def test_config_and_transcript_symlinks_rejected(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    link = tmp_path / "config-link"
+    link.symlink_to(cfg)
+    with pytest.raises(OSError):
+        capture.profiles(link)
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    real = tmp_path / "real"
+    path.rename(real)
+    path.symlink_to(real)
+    with pytest.raises(OSError):
+        run()
+    assert not calls
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_checkpoint_and_resume_do_not_duplicate_or_backfill(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(
+        tmp_path,
+        monkeypatch,
+        client,
+        prior=[
+            user("Old unconsented history", client),
+            hook_record(client),
+            assistant("Old answer", client),
+        ],
+    )
+    append(path, user(client=client), hook_record(client), assistant(client=client))
+    run()
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+    assert pending(state) == 0
+    ids = [event["event_id"] for event in events(calls)]
+    assert len(set(ids)) == 2
+    run("SessionEnd")
+    ended = json.loads(calls[-1][0]["body"])
+    assert ended["is_active"] is False and ended["events"] == []
+    run("SessionStart")
+    resumed = json.loads(calls[-1][0]["body"])
+    assert resumed["is_active"] is True and resumed["activity_seq"] > ended["activity_seq"]
+    assert resumed["segment_id"] == ended["segment_id"]
+    run()
+    assert [event["event_id"] for event in events(calls)] == ids
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_new_unmarked_turn_never_reuses_previous_owner(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user("One", client), hook_record(client), assistant("One answer", client))
+    run()
+    calls.clear()
+    append(
+        path, user("Other account's question", client), assistant("Other account's answer", client)
+    )
+    run()
+    assert events(calls) == []
+    assert pending(state) == 2
+    append(
+        path, hook_record(client)
+    )  # late marker cannot retroactively repair the missing boundary
+    run()
+    assert events(calls) == []
+    append(path, user("Three", client), hook_record(client), assistant("Three answer", client))
+    run()
+    assert [event["content"] for event in events(calls)] == ["Three", "Three answer"]
+    assert pending(state) == 2
+
+
+def test_codex_turn_identity_must_match_prompt_marker(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        {"type": "turn_context", "payload": {"turn_id": "current"}},
+        user(),
+        hook_record(turn="previous"),
+        assistant(),
+    )
+    run()
+    assert not calls and pending(state) == 2
+
+
+def test_account_and_context_switches_use_only_matching_configured_keys(tmp_path, monkeypatch):
+    profiles = [
+        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "context_id": 12, "upload_key": OTHER_KEY},
+    ]
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
+    append(path, user("Owner one"), hook_record(), assistant("First answer"))
+    append(
+        path,
+        user("Owner two"),
+        hook_record(owner=OTHER_OWNER, context=12),
+        assistant("Second answer"),
+    )
+    run()
+    by_key = {key: json.loads(batch["body"]) for batch, key in calls}
+    assert [event["content"] for event in by_key[KEY]["events"]] == ["Owner one", "First answer"]
+    assert [event["content"] for event in by_key[OTHER_KEY]["events"]] == [
+        "Owner two",
+        "Second answer",
+    ]
+    assert by_key[KEY]["segment_id"] != by_key[OTHER_KEY]["segment_id"]
+
+
+def test_unconfigured_context_and_null_selection_are_capture_off(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user("Other scope"), hook_record(context=12), assistant("Other scope answer"))
+    append(path, user("No context"), hook_record(context=None), assistant("No context answer"))
+    run()
+    assert not calls and pending(state) == 0
+
+
+def test_set_context_output_is_assigned_to_new_context_before_result_capture(tmp_path, monkeypatch):
+    profiles = [
+        {"user_id": OWNER, "context_id": context, "upload_key": KEY + str(context)}
+        for context in [497, 12]
+    ]
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
+    append(
+        path,
+        user(),
+        hook_record(),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "set_context",
+                "namespace": "mcp__pensieve",
+                "call_id": "switch",
+                "arguments": "{}",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "switch",
+                "output": "Second company overview\n" + marker(context=12, kind="selection"),
+            },
+        },
+        assistant("Second company answer"),
+    )
+    run()
+    by_key = {key: json.loads(batch["body"]) for batch, key in calls}
+    assert [event["kind"] for event in by_key[KEY + "497"]["events"]] == ["user", "tool_call"]
+    assert [event["kind"] for event in by_key[KEY + "12"]["events"]] == ["tool_result", "assistant"]
+    assert "Second company overview" in by_key[KEY + "12"]["events"][0]["content"]
+    assert "pensieve-capture-context" not in str(events(calls))
+
+
+def test_quoted_markers_and_non_pensieve_tool_results_do_not_authorize(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user(marker()),
+        assistant(marker()),
+        {
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "read", "call_id": "other"},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "other",
+                "output": marker(kind="selection"),
+            },
+        },
+    )
+    run()
+    assert not calls
+
+
+def test_hidden_reasoning_instructions_and_compaction_history_are_never_captured(
+    tmp_path, monkeypatch
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user(),
+        hook_record(),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [{"text": "HIDDEN_THOUGHT"}],
+                "encrypted_content": "SECRET_CIPHER",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "HARNESS_USER_INSTRUCTIONS"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "DEVELOPER_INSTRUCTIONS"}],
+            },
+        },
+        {"type": "compacted", "payload": {"guardian_history": [assistant("OLD_HIDDEN")]}},
+        assistant(),
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+
+
+def test_claude_mixed_thinking_and_text_only_keeps_visible_text(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    record = assistant(client="claude")
+    record["message"]["content"].append({"type": "thinking", "thinking": "hidden thought"})
+    append(path, user(client="claude"), hook_record("claude"), record)
+    run()
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+
+
+def test_partial_record_retries_and_identical_messages_keep_distinct_ids(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record())
+    raw = json.dumps(assistant("Same answer")).encode()
+    with path.open("ab") as output:
+        output.write(raw[:50])
+    run()
+    assert [event["kind"] for event in events(calls)] == ["user"]
+    with path.open("ab") as output:
+        output.write(raw[50:] + b"\n" + raw + b"\n")
+    run()
+    answers = [event for event in events(calls) if event["kind"] == "assistant"]
+    assert len(answers) == 2 and answers[0]["event_id"] != answers[1]["event_id"]
+
+
+def test_failed_upload_retries_identical_bytes_before_removing_events(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(), assistant())
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or False,
+    )
+    run()
+    assert pending(state) == 2
+    original = calls[-1][0]
+    append(path, assistant("More work"))
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+    )
+    run()
+    assert calls[1][0]["body"] == original["body"]
+    assert calls[1][0]["sha"] == hashlib.sha256(original["body"]).hexdigest()
+    assert pending(state) == 0
+    assert len(events(calls[1:])) == 3
+
+
+def test_end_backlog_cannot_overwrite_newer_resume_activity(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(), assistant())
+    run()
+    calls.clear()
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or False,
+    )
+    run("SessionEnd")
+    old_end = json.loads(calls[-1][0]["body"])
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+    )
+    run("SessionStart")
+    resumed = json.loads(calls[-1][0]["body"])
+    assert old_end["is_active"] is False and resumed["is_active"] is True
+    assert resumed["activity_seq"] > old_end["activity_seq"]
+
+
+def test_batch_size_event_limit_and_explicit_content_truncation(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user(),
+        hook_record(),
+        *[assistant("汉" * 40000) for _ in range(7)],
+        *[assistant("small") for _ in range(105)],
+    )
+    run()
+    assert all(len(batch["body"]) <= capture.MAX_BATCH_BYTES for batch, key in calls)
+    assert all(
+        len(json.loads(batch["body"])["events"]) <= capture.MAX_BATCH_EVENTS for batch, key in calls
+    )
+    truncated = [event for event in events(calls) if event["truncated"]]
+    assert len(truncated) == 7
+    assert all(len(event["content"]) == capture.MAX_EVENT_CHARS for event in truncated)
+    assert len(events(calls)) == 113
+
+
+def test_configured_keys_and_common_secrets_are_redacted(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user(),
+        hook_record(),
+        assistant(KEY + " password=hunter2 Bearer secret-token " + "ghp_" + "a" * 30),
+    )
+    run()
+    content = str(events(calls))
+    for secret in [KEY, "hunter2", "secret-token", "ghp_" + "a" * 30]:
+        assert secret not in content
+    assert "[REDACTED_SECRET]" in content
+
+
+def test_unknown_rows_and_unacked_batches_are_kept_when_spool_fills(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "MAX_STATE_PAGES", 40)
+    append(path, user(), *[assistant("x" * 32000) for _ in range(10)])
+    try:
+        run()
+    except sqlite3.DatabaseError:
+        pass
+    db = sqlite3.connect(next(state.glob("*.sqlite3")))
+    saved = json.loads(db.execute("SELECT body FROM state").fetchone()[0])
+    db.close()
+    assert saved["offset"] < path.stat().st_size
+    assert not calls
+
+
+def test_private_spool_and_removed_profile_preserve_pending_without_upload(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run()
+    assert pending(state) == 2
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(next(state.glob("*.sqlite3")).stat().st_mode) == 0o600
+    cfg.write_text(json.dumps({"version": 1, "profiles": []}))
+    run()
+    assert pending(state) == 2
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://attacker.test/hooks/conversations",
+        "http://127.0.0.1:123/hooks/delivery",
+        "http://user:password@localhost/hooks/conversations",
+        "http://localhost/hooks/conversations?token=x",
+    ],
+)
+def test_endpoint_cannot_redirect_upload_keys(endpoint):
+    with pytest.raises(ValueError):
+        capture.checked_endpoint(endpoint)
+
+
+def test_empty_events_activity_upload_has_no_transcript_content(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(), assistant())
+    run()
+    run("SessionEnd")
+    assert json.loads(calls[-1][0]["body"])["events"] == []
+
+
+def test_source_replacement_pauses_without_removing_unacked_events(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run()
+    replacement = path.with_suffix(".new")
+    replacement.write_bytes(path.read_bytes())
+    os.replace(replacement, path)
+    with pytest.raises(ValueError, match="replaced"):
+        run()
+    assert pending(state) == 2
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_fresh_prompt_restores_same_segment_only_after_matching_marker(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user("First", client), hook_record(client), assistant("First answer", client))
+    run()
+    original = json.loads(calls[0][0]["body"])["segment_id"]
+    append(path, user("Second", client))
+    run()
+    assert [event["content"] for event in events(calls)] == ["First", "First answer"]
+    append(path, hook_record(client), assistant("Second answer", client))
+    run()
+    run("SessionEnd")
+    run("SessionStart")
+    append(path, user("Third", client), hook_record(client), assistant("Third answer", client))
+    run()
+    assert {json.loads(batch["body"])["segment_id"] for batch, key in calls} == {original}
+    assert [event["content"] for event in events(calls)] == [
+        "First",
+        "First answer",
+        "Second",
+        "Second answer",
+        "Third",
+        "Third answer",
+    ]
+
+
+def test_switch_marks_previous_segment_inactive(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(), assistant())
+    run()
+    old = json.loads(calls[-1][0]["body"])
+    append(path, user("Different company"), hook_record(context=12), assistant("Unconfigured"))
+    run()
+    ended = json.loads(calls[-1][0]["body"])
+    assert ended["segment_id"] == old["segment_id"]
+    assert ended["is_active"] is False and ended["activity_seq"] > old["activity_seq"]
+    assert ended["events"] == []
+
+
+def test_current_codex_visible_user_item_excludes_harness_response_messages(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "HARNESS"}],
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": NOW,
+            "payload": {
+                "type": "item_completed",
+                "thread_id": SESSION,
+                "turn_id": "native-turn",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "message-id",
+                    "content": [{"type": "text", "text": "Actual visible prompt"}],
+                },
+            },
+        },
+        hook_record(turn="native-turn"),
+        assistant(),
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Actual visible prompt",
+        "Visible answer",
+    ]
+
+
+def test_missing_transcript_still_flushes_previously_durable_outbox(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(), assistant())
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    run()
+    assert pending(state) == 2
+    path.unlink()
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+    )
+    with pytest.raises(FileNotFoundError):
+        run("SessionEnd")
+    assert len(events(calls)) == 2 and pending(state) == 0
+
+
+def test_server_erasure_retires_old_work_and_next_fresh_prompt_uses_new_segment(
+    tmp_path, monkeypatch
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user("Private old title"), hook_record(), assistant("Private old answer"))
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or "retired",
+    )
+    run()
+    old = json.loads(calls[0][0]["body"])["segment_id"]
+    db = sqlite3.connect(next(state.glob("*.sqlite3")))
+    assert db.execute("SELECT title,retired FROM segments WHERE id=?", (old,)).fetchone() == ("", 1)
+    assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+    saved = db.execute("SELECT body FROM state").fetchone()[0]
+    assert "Private old" not in saved
+    db.close()
+    calls.clear()
+    append(path, assistant("Late old answer"))
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+    )
+    run()
+    assert not calls
+    append(path, user("Fresh work"), hook_record(), assistant("Fresh answer"))
+    run()
+    assert [event["content"] for event in events(calls)] == ["Fresh work", "Fresh answer"]
+    assert {json.loads(batch["body"])["segment_id"] for batch, key in calls} != {old}
+    run()
+    assert pending(state) == 0  # late text from the retired turn is not captured
+
+
+def test_revoked_scope_does_not_block_another_configured_context(tmp_path, monkeypatch):
+    prof = [
+        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
+        {"user_id": OWNER, "context_id": 12, "upload_key": OTHER_KEY},
+    ]
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
+    append(
+        path,
+        user("Denied"),
+        hook_record(),
+        assistant("Denied answer"),
+        user("Allowed"),
+        hook_record(context=12),
+        assistant("Allowed answer"),
+    )
+
+    def send(batch, key, endpoint, timeout):
+        if key == KEY:
+            return "forbidden"
+        calls.append((dict(batch), key))
+        return True
+
+    monkeypatch.setattr(capture, "upload", send)
+    run()
+    assert [event["content"] for event in events(calls)] == ["Allowed", "Allowed answer"]
+    assert pending(state) == 2
+
+
+@pytest.mark.parametrize(
+    "field,value", [("channel", "analysis"), ("channel", "summary"), ("phase", "analysis")]
+)
+def test_codex_nonvisible_assistant_channels_are_excluded(tmp_path, monkeypatch, field, value):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    hidden = assistant("HIDDEN_REASONING_SENTINEL")
+    hidden["payload"][field] = value
+    append(path, user(), hook_record(), hidden, assistant())
+    run()
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+
+
+def test_retiring_old_context_does_not_clear_new_context_attribution(tmp_path, monkeypatch):
+    prof = [
+        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
+        {"user_id": OWNER, "context_id": 12, "upload_key": OTHER_KEY},
+    ]
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
+    append(
+        path,
+        user("Old company"),
+        hook_record(),
+        assistant("Old answer"),
+        user("New company"),
+        hook_record(context=12),
+        assistant("New answer"),
+    )
+
+    def send(batch, key, endpoint, timeout):
+        if key == KEY:
+            return "retired"
+        calls.append((dict(batch), key))
+        return True
+
+    monkeypatch.setattr(capture, "upload", send)
+    run()
+    append(path, assistant("More new-company work"))
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "New company",
+        "New answer",
+        "More new-company work",
+    ]
+    assert pending(state) == 0
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_disabling_and_reenabling_never_backfills_disabled_history(tmp_path, monkeypatch, missing):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user("Consented before disable"), hook_record(), assistant("Consented answer"))
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    run()
+    original_config = cfg.read_text()
+    if missing:
+        cfg.unlink()
+    else:
+        cfg.write_text(json.dumps({"version": 1, "profiles": []}))
+    append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
+    original_scan = capture.scan
+    monkeypatch.setattr(
+        capture, "scan", lambda *args: pytest.fail("disabled capture read transcript")
+    )
+    run()
+    monkeypatch.setattr(capture, "scan", original_scan)
+    cfg.write_text(original_config)
+    cfg.chmod(0o600)
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Consented before disable",
+        "Consented answer",
+    ]
+    append(path, user("Fresh enabled prompt"), hook_record(), assistant("Fresh enabled answer"))
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Consented before disable",
+        "Consented answer",
+        "Fresh enabled prompt",
+        "Fresh enabled answer",
+    ]
+
+
+def test_full_spool_still_retries_previously_committed_upload(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "MAX_STATE_PAGES", 60)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant("x" * 32000))
+    run()
+    assert pending(state) == 2
+    append(path, *[assistant("y" * 32000) for _ in range(20)])
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+    )
+    for _ in range(30):
+        try:
+            run()
+        except sqlite3.OperationalError:
+            pass
+    assert len(events(calls)) == 22 and pending(state) == 0
+    assert events(calls)[0]["content"] == "Visible question"
+    assert events(calls)[1]["content"] == "x" * 32000
+
+
+def test_selection_destination_never_inherits_previous_owner_title(tmp_path, monkeypatch):
+    prof = [
+        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "context_id": 12, "upload_key": OTHER_KEY},
+    ]
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
+    append(
+        path,
+        user("Owner A confidential prompt"),
+        hook_record(),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "namespace": "mcp__pensieve",
+                "name": "set_context",
+                "call_id": "switch",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "switch",
+                "output": "Owner B overview "
+                + marker(owner=OTHER_OWNER, context=12, kind="selection"),
+            },
+        },
+        assistant("Owner B answer"),
+    )
+    run()
+    destination = [json.loads(batch["body"]) for batch, key in calls if key == OTHER_KEY]
+    assert destination and all(body["title"] == "" for body in destination)
+    assert "Owner A confidential prompt" not in json.dumps(destination)
+
+
+def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_path, monkeypatch):
+    path = tmp_path / "new-transcript.jsonl"
+    cfg = config(tmp_path)
+    state = tmp_path / "spool"
+    calls = []
+    monkeypatch.setattr(capture, "upload", lambda batch, *args: calls.append(dict(batch)) or True)
+    payload = {
+        "session_id": SESSION,
+        "hook_event_name": "SessionStart",
+        "transcript_path": str(path),
+    }
+    capture.run_hook(payload, "claude", cfg, state)
+    append(path, user(client="claude"), hook_record("claude"), assistant(client="claude"))
+    payload["hook_event_name"] = "Stop"
+    capture.run_hook(payload, "claude", cfg, state)
+    assert [
+        event["content"] for batch in calls for event in json.loads(batch["body"])["events"]
+    ] == ["Visible question", "Visible answer"]
+
+
+def test_claude_compaction_and_local_commands_preserve_segment(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    append(path, user("First", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    original = json.loads(calls[0][0]["body"])["segment_id"]
+    summary = user("Internal compaction instructions", "claude")
+    summary.update(isCompactSummary=True, isVisibleInTranscriptOnly=True)
+    append(
+        path,
+        summary,
+        user("<command-name>/compact</command-name>", "claude"),
+        user("<local-command-stdout>Compacted</local-command-stdout>", "claude"),
+    )
+    run("SessionStart")
+    append(path, user("Second", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    assert {json.loads(batch["body"])["segment_id"] for batch, _ in calls} == {original}
+    assert [e["content"] for e in events(calls) if e["kind"] == "user"] == ["First", "Second"]
+    assert pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    if client == "codex":
+        tool_call = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "hook",
+                "name": "mcp__pensieve__context_briefing",
+            },
+        }
+        tool_result = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "hook",
+                "output": "Internal hook payload",
+            },
+        }
+    else:
+        tool_call = assistant(client=client)
+        tool_call["message"]["content"] = [
+            {
+                "type": "tool_use",
+                "id": "hook",
+                "name": "mcp__plugin_pensieve_pensieve__context_briefing",
+                "input": {},
+            }
+        ]
+        tool_result = user(client=client)
+        tool_result["message"]["content"] = [
+            {"type": "tool_result", "tool_use_id": "hook", "content": "Internal hook payload"}
+        ]
+    append(
+        path,
+        user(client=client),
+        hook_record(client),
+        tool_call,
+        tool_result,
+        assistant(client=client),
+    )
+    run()
+    assert [event["kind"] for event in events(calls)] == ["user", "assistant"]

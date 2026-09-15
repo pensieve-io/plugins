@@ -8,6 +8,11 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py\" --client codex",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client codex",
+            "timeout": 3
           }
         ]
       },
@@ -44,9 +49,15 @@
             "input": {
               "client": "codex",
               "session_id": "${session_id}",
-              "event": "${hook_event_name}"
+              "event": "${hook_event_name}",
+              "turn_id": "${turn_id}"
             },
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client codex",
+            "timeout": 3
           }
         ]
       }
@@ -58,6 +69,22 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py\" --client codex",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client codex",
+            "timeout": 1
           }
         ]
       }

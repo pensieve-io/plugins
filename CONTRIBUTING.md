@@ -8,6 +8,9 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/assets/`: bundled Pensieve branding used by supported client fields.
 - `pensieve/hooks/`: host-specific hook adapters.
 - `pensieve/scripts/context_receipt.py`: the standard-library-only client helper.
+- `pensieve/scripts/conversation_capture.py`: opt-in visible-conversation capture,
+  private retry state and separately authorized uploads. See
+  [conversation-capture.md](docs/conversation-capture.md).
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
 The application repository owns the hosted MCP implementation, authentication,
@@ -29,9 +32,11 @@ ruff check .
 ruff format --check .
 ```
 
-CI runs the package and receipt tests on Python 3.9 and 3.12. The tests cover
+CI runs the package, receipt and capture tests on Python 3.9 and 3.12. The tests cover
 manifest paths, the MCP connection, the skill roster and the receipt helper's
-conversation identity, accepted-context and privacy boundaries. Keep the README
+conversation identity, accepted-context and privacy boundaries. Capture tests
+also cover account/company isolation, disabled intervals, private storage,
+stable retry receipts, full-spool recovery and deletion tombstones. Keep the README
 roster current when adding or removing a skill.
 
 Use native host metadata. Codex's `interface` supplies artwork, descriptions,
@@ -53,6 +58,12 @@ calls. See [client-probes.md](docs/client-probes.md) and the
 behaviour separately from live OAuth and desktop checks.
 
 ## Release order
+
+Conversation capture additionally requires Pensieve PR #886 and its task base
+PR #708, including the upload route, private storage and authenticated key UI.
+Keep the capture PR in draft until that compatible service is deployed and
+live client acceptance is recorded. Installing this candidate remains capture-off
+without a private local config.
 
 The first hooks release requires the server-side work from Pensieve PR #881.
 Keep the hooks PR in draft until these checks are complete:
@@ -77,6 +88,8 @@ Local/synthetic package tests need no application release. Live tests against
 `mcp.pensieve.uk` require the compatible backend to be released first. A staging
 test can run earlier with a disposable package: change `.mcp.json` and the
 helper's `DELIVERY_ENDPOINT` constant to the staging MCP and receipt URLs.
+For capture, also change `UPLOAD_ENDPOINT` in the disposable helper and use a
+staging-issued upload-only key kept in its private test config.
 Passing a staging URL to `--endpoint` alone is rejected; that override accepts
 only the fixed service URL or HTTP loopback. Production endpoints in the
 shipped package stay fixed.
