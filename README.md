@@ -1,4 +1,4 @@
-# Pensieve plugin
+# Pensieve Plugins
 
 Give your AI a shared, cited understanding of your company. The Pensieve plugin
 connects it to your company's context layer and bundles three things:
