@@ -118,17 +118,15 @@ Each skill's page shows the file in full, with setup for the scheduled agent ste
 - [Hire a Head of Product](https://docs.pensieve.uk/agents/head-of-product)
 - [Hire a Head of Growth](https://docs.pensieve.uk/agents/head-of-growth)
 
-## About this repository
+## Contributing
 
-This is the public distribution repository for the Pensieve plugin across
-supported AI clients. Its source lives in the `plugins/` directory of Pensieve's
-private main repository. Publishing that directory here lets anyone install
-the plugin without access to the application code.
+This repository is the source of truth for the installable Pensieve plugin.
+Edit skills, client manifests, MCP connection configuration, hooks and the local
+helper here. Claude and Codex share the skills and helper, with separate
+manifests and hook adapters where their clients require different formats.
 
-The MCP configuration, skills, client manifests, hook adapters and helper are
-maintained in the main repository and published here together. Claude and Codex
-use client-specific manifests and hook adapters around the same company context
-and role skills.
+Pensieve's hosted MCP server, authentication and company data remain in the
+application repository. Its backend and docs import a pinned copy of the skills
+from this repository; they do not publish or overwrite the plugin.
 
-Issues and requests are welcome. Changes should be made in the main repository;
-direct edits to this mirror are overwritten by the next publication.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release order.

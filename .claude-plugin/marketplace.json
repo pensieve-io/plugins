@@ -8,7 +8,7 @@
     {
       "name": "pensieve",
       "source": "./pensieve",
-      "description": "Role skills for agents working from a company's Pensieve context layer"
+      "description": "Company grounding, context refresh and role skills from Pensieve"
     }
   ]
 }

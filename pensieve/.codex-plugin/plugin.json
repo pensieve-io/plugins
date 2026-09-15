@@ -1,0 +1,16 @@
+{
+  "name": "pensieve",
+  "description": "Company grounding, context refresh and role skills from Pensieve",
+  "author": {
+    "name": "Pensieve",
+    "url": "https://pensieve.uk"
+  },
+  "homepage": "https://docs.pensieve.uk/mcp-server/clients",
+  "license": "Proprietary",
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/codex.json",
+  "interface": {
+    "displayName": "Pensieve"
+  }
+}

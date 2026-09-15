@@ -1,0 +1,66 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py\" --client claude",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "clear|compact",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:pensieve:pensieve",
+            "tool": "context_briefing",
+            "input": {
+              "client": "claude",
+              "session_id": "${session_id}",
+              "event": "${hook_event_name}",
+              "source": "${source}"
+            },
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py\" --client claude",
+            "timeout": 5
+          },
+          {
+            "type": "mcp_tool",
+            "server": "plugin:pensieve:pensieve",
+            "tool": "context_briefing",
+            "input": {
+              "client": "claude",
+              "session_id": "${session_id}",
+              "event": "${hook_event_name}"
+            },
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py\" --client claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

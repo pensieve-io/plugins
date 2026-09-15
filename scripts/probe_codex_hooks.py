@@ -1,0 +1,319 @@
+"""Probe installed Codex hooks against synthetic local MCP and model servers.
+
+Run with Python's standard library. No credentials, real model calls, global
+configuration changes or full prompt logging are required. Probe receipts are
+written beneath a disposable output directory. ``--persist`` additionally saves
+the synthetic conversation in Codex's ordinary local session store for resume
+and transcript inspection; omit it for an ephemeral probe.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+RECEIPT_TOKEN = "a" * 64 + "." + "b" * 32
+
+
+def append(path: Path, value: dict[str, Any]) -> None:
+    with path.open("a") as handle:
+        handle.write(json.dumps(value) + "\n")
+
+
+def mcp_server(output: Path) -> None:
+    """Serve synthetic tools over stdio, retaining only fixture request data."""
+    for line in sys.stdin:
+        request = json.loads(line)
+        method = request.get("method")
+        if "id" not in request:
+            continue
+        if method == "initialize":
+            result = {
+                "protocolVersion": request["params"]["protocolVersion"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "pensieve-hook-probe", "version": "1"},
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": name,
+                        "description": "Synthetic hook probe; returns a fixture marker.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True,
+                        },
+                        "annotations": {"readOnlyHint": True},
+                    }
+                    for name in ("context_briefing", "ordinary")
+                ]
+            }
+        elif method == "tools/call":
+            params = request["params"]
+            append(output / "mcp.jsonl", {"pid": os.getpid(), **params})
+            event = params.get("arguments", {}).get("event", "ordinary")
+            marker = "HOOK_PROBE_" + event.upper()
+            if source := params.get("arguments", {}).get("source"):
+                marker += "_" + source.upper()
+            result = {"content": [{"type": "text", "text": marker}]}
+            if params["name"] == "context_briefing":
+                result["content"][0]["text"] = json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": event,
+                            "additionalContext": marker
+                            + f"\n<!-- pensieve-delivery token={RECEIPT_TOKEN} -->",
+                        }
+                    }
+                )
+                result["structuredContent"] = {"ignored_marker": "HOOK_PROBE_STRUCTURED_ONLY"}
+        else:
+            result = {}
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+
+
+def run_probe(
+    output: Path, *, persist: bool = False, resume: str | None = None, compact: bool = False
+) -> dict[str, Any]:
+    output.mkdir(parents=True, exist_ok=False)
+    workspace = output / "workspace"
+    workspace.mkdir()
+    plugin = output / "plugin"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "pensieve", plugin)
+    sequence = 0
+
+    class ModelHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            payload = json.dumps({"models": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self) -> None:
+            nonlocal sequence
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.path == "/hooks/delivery":
+                append(output / "receipts.jsonl", request)
+                self.send_response(204)
+                self.end_headers()
+                return
+            sequence += 1
+            items = request.get("input", [])
+            markers = []
+            for item in items:
+                markers.extend(re.findall(r"HOOK_PROBE_[A-Z_]+", json.dumps(item)))
+            append(
+                output / "model.jsonl",
+                {
+                    "sequence": sequence,
+                    "path": self.path,
+                    "markers": markers,
+                    "local_primer_delivered": "Pensieve is the company's shared, curated context layer"
+                    in json.dumps(items),
+                },
+            )
+            has_result = any(item.get("type") == "function_call_output" for item in items)
+            if not has_result and (not compact or sequence == 1):
+                item = {
+                    "type": "function_call",
+                    "call_id": "probe-ordinary",
+                    "namespace": "mcp__pensieve",
+                    "name": "ordinary",
+                    "arguments": "{}",
+                }
+            else:
+                item = {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "probe-answer",
+                    "content": [{"type": "output_text", "text": "Synthetic probe complete."}],
+                }
+            events = [
+                {"type": "response.created", "response": {"id": f"probe-{sequence}"}},
+                {"type": "response.output_item.done", "item": item},
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": f"probe-{sequence}",
+                        "usage": {
+                            "input_tokens": 100000 if compact and sequence == 1 else 0,
+                            "output_tokens": 0,
+                            "total_tokens": 100000 if compact and sequence == 1 else 0,
+                        },
+                    },
+                },
+            ]
+            payload = "".join("data: " + json.dumps(event) + "\n\n" for event in events).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ModelHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    hooks = json.loads((plugin / "hooks/codex.json").read_text())["hooks"]
+    # Direct CLI settings need the plugin-root expansion normally supplied by
+    # the loader. Otherwise execute the generated adapters and bundled helper,
+    # changing only its receipt destination to the synthetic local service.
+    for groups in hooks.values():
+        for group in groups:
+            for hook in group["hooks"]:
+                if hook["type"] == "command":
+                    hook["command"] = hook["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(plugin))
+                    hook["command"] += (
+                        f" --endpoint http://127.0.0.1:{server.server_port}/hooks/delivery"
+                    )
+
+    # CLI overrides are parsed as TOML; serialise through a deliberately tiny
+    # encoder rather than shell interpolation. All subprocess arguments are raw.
+    def toml(value: Any) -> str:
+        if isinstance(value, dict):
+            return "{" + ",".join(json.dumps(k) + "=" + toml(v) for k, v in value.items()) + "}"
+        if isinstance(value, list):
+            return "[" + ",".join(toml(v) for v in value) + "]"
+        return json.dumps(value)
+
+    settings = {
+        "model": "gpt-5.4",
+        "model_provider": "hookprobe",
+        "model_providers.hookprobe": {
+            "name": "Synthetic local probe",
+            "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+            "wire_api": "responses",
+            "requires_openai_auth": False,
+        },
+        "mcp_servers.pensieve": {
+            "command": sys.executable,
+            "args": [str(Path(__file__).resolve()), "--mcp", str(output)],
+        },
+        "hooks": hooks,
+        "features.hooks": True,
+        "features.code_mode": False,
+        "features.apps": False,
+        "features.memories": False,
+        "features.shell_snapshot": False,
+        "sqlite_home": str(output / "state"),
+        "log_dir": str(output / "logs"),
+        "history.persistence": "none",
+        "analytics.enabled": False,
+        "feedback.enabled": False,
+    }
+    if compact:
+        settings["model_auto_compact_token_limit"] = 50000
+    command = [
+        "codex",
+        "exec",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-hook-trust",
+        "--json",
+        "-C",
+        str(workspace),
+    ]
+    if not persist:
+        command.append("--ephemeral")
+    for key, value in settings.items():
+        command.extend(["-c", key + "=" + toml(value)])
+    if resume:
+        command.extend(["resume", resume])
+    command.append("Run the synthetic fixture.")
+    try:
+        # Codex 0.154.0 can drain its in-process client through two 45-second
+        # shutdown waits after turn.completed. Allow those plus the fixture
+        # turn; individual generated hooks retain their five-second timeout.
+        result = subprocess.run(
+            command, input="", text=True, capture_output=True, timeout=120, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        (output / "events.jsonl").write_bytes(exc.stdout or b"")
+        (output / "stderr.txt").write_bytes(exc.stderr or b"")
+        raise RuntimeError(f"Codex timed out; inspect {output / 'events.jsonl'}") from None
+    finally:
+        server.shutdown()
+        server.server_close()
+    (output / "events.jsonl").write_text(result.stdout)
+    (output / "stderr.txt").write_text(result.stderr)
+    if result.returncode:
+        raise RuntimeError(f"Codex exited {result.returncode}; inspect {output / 'stderr.txt'}")
+    calls = [json.loads(line) for line in (output / "mcp.jsonl").read_text().splitlines()]
+    model_requests = [
+        json.loads(line) for line in (output / "model.jsonl").read_text().splitlines()
+    ]
+    assert model_requests[0]["local_primer_delivered"]
+    assert "HOOK_PROBE_USERPROMPTSUBMIT" in model_requests[0]["markers"]
+    assert all(
+        call["arguments"].get("source") not in {"startup", "resume"}
+        for call in calls
+        if call["name"] == "context_briefing"
+    )
+    assert all("HOOK_PROBE_STRUCTURED_ONLY" not in request["markers"] for request in model_requests)
+    thread_ids = {call["_meta"]["threadId"] for call in calls}
+    assert len(thread_ids) == 1
+    assert all(
+        call["arguments"]["session_id"] == call["_meta"]["threadId"]
+        for call in calls
+        if call["name"] == "context_briefing"
+    )
+    if compact:
+        assert model_requests[-1]["markers"] == ["HOOK_PROBE_SESSIONSTART_COMPACT"]
+    receipt_path = output / "receipts.jsonl"
+    receipts = (
+        [json.loads(line) for line in receipt_path.read_text().splitlines()]
+        if receipt_path.exists()
+        else []
+    )
+    assert all(set(receipt) == {"token", "operation"} for receipt in receipts)
+    operations = {receipt["operation"] for receipt in receipts}
+    if persist:
+        assert "ack" in operations
+    return {
+        "exit_code": result.returncode,
+        "output": str(output),
+        "model_requests": sequence,
+        "thread_id": next(iter(thread_ids)),
+        "ordinary_call_seen": any(call["name"] == "ordinary" for call in calls),
+        "same_mcp_process": len({call["pid"] for call in calls}) == 1,
+        "receipt_operations": sorted(operations),
+    }
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mcp", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--persist", action="store_true")
+    parser.add_argument("--resume")
+    parser.add_argument("--compact", action="store_true")
+    args = parser.parse_args()
+    if args.mcp:
+        mcp_server(args.mcp)
+    else:
+        destination = (
+            args.output or Path(tempfile.mkdtemp(prefix="pensieve-hook-probe-")) / "receipts"
+        )
+        print(
+            json.dumps(
+                run_probe(
+                    destination, persist=args.persist, resume=args.resume, compact=args.compact
+                ),
+                indent=2,
+            )
+        )
