@@ -7,7 +7,8 @@
     "name": "Pensieve",
     "url": "https://pensieve.uk"
   },
-  "homepage": "https://docs.pensieve.uk/agents",
+  "homepage": "https://docs.pensieve.uk/mcp-server/clients",
+  "repository": "https://github.com/pensieve-io/plugins",
   "license": "Proprietary",
   "keywords": [
     "pensieve",

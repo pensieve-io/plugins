@@ -1,5 +1,8 @@
 {
   "name": "pensieve",
+  "metadata": {
+    "description": "Pensieve plugins for shared company context, connected tools and role skills."
+  },
   "owner": {
     "name": "Pensieve",
     "url": "https://pensieve.uk"

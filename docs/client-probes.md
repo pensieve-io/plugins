@@ -1,4 +1,25 @@
-# Codex plugin hook probes
+# Client hook probes
+
+## Claude Code
+
+Run from the repository root with Python 3.12 and the installed Claude Code CLI:
+
+```sh
+python3 scripts/probe_claude_hooks.py > /tmp/pensieve-claude-probe.json
+```
+
+Verified on 15 September 2026 with Claude Code 2.1.267. The probe uses the
+packaged hook adapter and helper with disposable local MCP/model endpoints
+and a temporary `CLAUDE_CONFIG_DIR`. It does not load Pensieve credentials,
+change personal settings or make paid model calls.
+
+Its twelve assertions cover first-prompt grounding, the local startup primer,
+conversation identity across resume and transport reconnection, grounding after
+compaction and clear, ordinary-tool metadata, failed-hook retry, and receipt
+acknowledgement/reset containing only the token and operation. Exit status zero
+requires all twelve to pass; the JSON report records each result.
+
+## Codex CLI
 
 These fixtures use the installed Codex executable, synthetic local MCP tools and
 a local Responses server. They make no billed model calls and do not modify
@@ -17,7 +38,7 @@ using the returned `thread_id`. This explicitly writes the synthetic conversatio
 to the normal Codex session store; ephemeral probes do not persist it. Inspect
 only the packaged session named in `mcp.jsonl`, rather than searching user chats.
 
-## Verified on 15 September 2026
+### Verified on 15 September 2026
 
 Installed `codex-cli 0.154.0`; matching upstream tag `rust-v0.154.0`, commit
 `6b9826e3aa83b1a5947db50f4332cb9c65f1b340`.
@@ -40,7 +61,7 @@ The process deadline allows Codex's two 45-second shutdown waits after a
 completed turn; each packaged hook keeps its five-second deadline. A timeout
 preserves `events.jsonl` and `stderr.txt` for distinguishing delivery from exit.
 
-## Delivery acknowledgement boundary
+### Delivery acknowledgement boundary
 
 Accepted context is a top-level JSONL `response_item` whose payload is a
 `message` with role `developer`. Its `content` holds `input_text`, and
@@ -70,4 +91,29 @@ authority for the format exercised here.
 Source boundaries: [hook MCP executor](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/hook_mcp_executor.rs),
 [plugin loader](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core-plugins/src/loader.rs#L954),
 [hook dispatch](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/hooks/src/engine/dispatcher.rs),
-and [PostCompact schema](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/hooks/schema/packaged/post-compact.command.output.schema.json).
+and [PostCompact schema](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/hooks/schema/generated/post-compact.command.output.schema.json).
+
+## Live client acceptance
+
+Synthetic probes establish local client behaviour. Before publishing the first
+hooks release, record the candidate plugin commit, deployed backend commit,
+client/version, operating system, install route and result for each tested host.
+Use a local package or the candidate Git branch until these checks pass.
+
+1. **Fresh install:** authenticate through the client's normal OAuth flow, enable
+   hooks, select a company and confirm grounding arrives before the first answer.
+2. **Existing install:** update the marketplace/plugin without uninstalling;
+   confirm sign-in, selected company, skills, branding and hook permissions.
+3. **Conversation isolation:** open two conversations on different companies,
+   alternate reads, and confirm each keeps its own selection, including when the
+   client shares one MCP connection. Start a third conversation and verify the
+   latest explicit default selection.
+4. **Lifecycle:** resume, compact and clear; verify context returns where needed
+   and a changed company briefing refreshes before the next answer.
+5. **Delivery failure:** interrupt a briefing request and confirm a later prompt
+   retries without treating undelivered context as acknowledged.
+
+Record results separately for CLI, desktop and workspace imports. A successful
+marketplace import or a displayed icon does not prove hooks executed. Where a
+host does not support hooks, verify MCP and skill use and keep hook support
+marked unavailable. Desktop and live OAuth checks are currently pending.

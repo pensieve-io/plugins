@@ -2,6 +2,7 @@
 
 import json
 import re
+import struct
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,25 @@ def test_plugin_bundles_the_hosted_mcp_without_credentials():
     assert read_json(PLUGIN / ".mcp.json") == {
         "mcpServers": {"pensieve": {"type": "http", "url": "https://mcp.pensieve.uk/mcp"}}
     }
+
+
+def test_codex_presentation_assets_are_bundled_pngs():
+    interface = read_json(PLUGIN / ".codex-plugin/plugin.json")["interface"]
+    for field in ("composerIcon", "logo", "logoDark"):
+        relative = interface[field]
+        assert relative.startswith("./assets/")
+        path = (PLUGIN / relative).resolve()
+        assert PLUGIN.resolve() in path.parents
+        assert path.suffix == ".png"
+        data = path.read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", field
+        assert data[12:16] == b"IHDR", field
+        width, height = struct.unpack(">II", data[16:24])
+        assert width == height and 128 <= width <= 2048, field
+    prompts = interface["defaultPrompt"]
+    assert 1 <= len(prompts) <= 3
+    assert all(0 < len(prompt) <= 128 for prompt in prompts)
+    assert re.fullmatch(r"#[0-9A-Fa-f]{6}", interface["brandColor"])
 
 
 def test_skills_have_valid_identity_and_a_visible_readme_entry():
