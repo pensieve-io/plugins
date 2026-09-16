@@ -59,8 +59,9 @@ behaviour separately from live OAuth and desktop checks.
 
 ## Release order
 
-Conversation capture additionally requires Pensieve PR #886 and its task base
-PR #708, including the upload route, private storage and authenticated key UI.
+Conversation capture requires standalone Pensieve PR #886, including the upload
+route, private storage, search/read tools and authenticated key UI. It has no
+task-ledger dependency.
 Keep the capture PR in draft until that compatible service is deployed and
 live client acceptance is recorded. Installing this candidate remains capture-off
 without a private local config.

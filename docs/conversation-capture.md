@@ -1,7 +1,7 @@
 # Optional work conversation capture
 
-Capture saves visible work conversations in Pensieve so their owner can find
-earlier work and link it to tasks. It is **off by default**. Installing or
+Capture saves visible work conversations in Pensieve so their owner and
+authorised agents can search and read earlier work. It is **off by default**. Installing or
 updating the plugin alone does not upload a conversation.
 
 The first implementation supports the tested local macOS Claude Code and Codex
