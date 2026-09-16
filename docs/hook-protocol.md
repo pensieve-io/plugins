@@ -40,8 +40,14 @@ receipts, and fences stale nonces. The token authorises only delivery bookkeepin
 it does not authorise access to company data.
 
 Receipt requests contain no transcript text, local file contents or OAuth
-credentials. A reset or missing receipt can cause a repeated briefing. Hook
-execution order and transcript writes are not assumed to be synchronous.
+credentials. They identify themselves with the fixed `User-Agent`
+`Pensieve-Plugin-Receipt/1.0`: the service sits behind Cloudflare, whose
+Browser Integrity Check rejects Python's default `Python-urllib/…` signature
+with error 1010 before the request reaches the server. A reset or missing
+receipt can cause a repeated briefing, and a receipt the service does not accept
+is reported on the helper's stderr (failure class only) so the host's hook
+record shows it. Hook execution order and transcript writes are not assumed to
+be synchronous.
 
 Both repositories test their side of this contract. Client receipt/probe tests
 live here; the server repository tests forced recovery, receipt fencing,
