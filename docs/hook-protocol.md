@@ -50,10 +50,10 @@ authentication and conversation selection without importing client code.
 ## Optional conversation capture
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-Personal Settings → Connected clients owns per-user/client consent and device
+Personal Settings → Connected clients owns per-user consent across all clients and device
 keys. The setup command only imports a downloaded upload-only credential into
 private storage. It never reads OAuth credentials. Every upload checks current
-membership, matching client and current enabled consent generation.
+membership and the user's current enabled consent generation.
 
 At every `UserPromptSubmit`, including an unchanged briefing, the service emits
 one terminal, non-secret marker in accepted hook context:

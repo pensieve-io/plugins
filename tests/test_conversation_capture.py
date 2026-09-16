@@ -114,7 +114,7 @@ def append(path, *records):
             handle.write(json.dumps(record).encode() + b"\n")
 
 
-def config(tmp_path, profiles=None, client="codex"):
+def config(tmp_path, profiles=None):
     path = tmp_path / "capture.json"
     path.write_text(
         json.dumps(
@@ -122,7 +122,7 @@ def config(tmp_path, profiles=None, client="codex"):
                 "version": 2,
                 "profiles": profiles
                 if profiles is not None
-                else [{"user_id": OWNER, "client": client, "upload_key": KEY}],
+                else [{"user_id": OWNER, "upload_key": KEY}],
             }
         )
     )
@@ -136,7 +136,7 @@ def setup(tmp_path, monkeypatch, client="codex", prior=(), profiles=None):
     if client == "codex":
         append(path, {"type": "session_meta", "payload": {"id": SESSION}})
     append(path, *prior)
-    cfg = config(tmp_path, profiles, client)
+    cfg = config(tmp_path, profiles)
     state = tmp_path / "spool"
     calls = []
 
@@ -186,7 +186,7 @@ def test_config_requires_exact_private_permissions(tmp_path, mode):
     path = config(tmp_path)
     path.chmod(mode)
     with pytest.raises(ValueError, match="0600"):
-        capture.profiles(path, "codex")
+        capture.profiles(path)
 
 
 def test_config_and_transcript_symlinks_rejected(tmp_path, monkeypatch):
@@ -194,7 +194,7 @@ def test_config_and_transcript_symlinks_rejected(tmp_path, monkeypatch):
     link = tmp_path / "config-link"
     link.symlink_to(cfg)
     with pytest.raises(OSError):
-        capture.profiles(link, "codex")
+        capture.profiles(link)
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     real = tmp_path / "real"
     path.rename(real)
@@ -279,8 +279,8 @@ def test_codex_turn_identity_must_match_prompt_marker(tmp_path, monkeypatch):
 
 def test_account_and_context_switches_use_only_matching_configured_keys(tmp_path, monkeypatch):
     profiles = [
-        {"user_id": OWNER, "client": "codex", "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "client": "codex", "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(path, user("Owner one"), hook_record(), assistant("First answer"))
@@ -314,7 +314,7 @@ def test_unconfigured_account_and_null_selection_are_capture_off(tmp_path, monke
 
 
 def test_set_context_output_is_assigned_to_new_context_before_result_capture(tmp_path, monkeypatch):
-    profiles = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
+    profiles = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(
         path,
@@ -664,7 +664,7 @@ def test_server_erasure_retires_old_work_and_next_fresh_prompt_uses_new_segment(
 
 
 def test_revoked_scope_does_not_block_another_configured_context(tmp_path, monkeypatch):
-    prof = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
+    prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -701,7 +701,7 @@ def test_codex_nonvisible_assistant_channels_are_excluded(tmp_path, monkeypatch,
 
 
 def test_retiring_old_context_does_not_clear_new_context_attribution(tmp_path, monkeypatch):
-    prof = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
+    prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -796,8 +796,8 @@ def test_full_spool_still_retries_previously_committed_upload(tmp_path, monkeypa
 
 def test_selection_destination_never_inherits_previous_owner_title(tmp_path, monkeypatch):
     prof = [
-        {"user_id": OWNER, "client": "codex", "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "client": "codex", "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
@@ -832,7 +832,7 @@ def test_selection_destination_never_inherits_previous_owner_title(tmp_path, mon
 
 def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_path, monkeypatch):
     path = tmp_path / "new-transcript.jsonl"
-    cfg = config(tmp_path, client="claude")
+    cfg = config(tmp_path)
     state = tmp_path / "spool"
     calls = []
     monkeypatch.setattr(
@@ -951,7 +951,7 @@ def native_selection(context=12, turn="turn-one", call_id="nested-call", server=
 
 @pytest.mark.parametrize("wrapper", ["exec", "wait"])
 def test_codex_native_selection_fences_combined_code_mode_output(tmp_path, monkeypatch, wrapper):
-    prof = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
+    prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -1025,8 +1025,8 @@ def test_removing_one_profile_excludes_its_disabled_interval_and_keeps_old_backl
     tmp_path, monkeypatch
 ):
     prof = [
-        {"user_id": OWNER, "client": "codex", "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "client": "codex", "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(path, user("Consented prompt"), hook_record(), assistant("Consented answer"))
@@ -1161,7 +1161,7 @@ def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediat
         json.dumps(
             {
                 "version": 2,
-                "profiles": [{"user_id": OWNER, "client": "codex", "upload_key": OTHER_KEY}],
+                "profiles": [{"user_id": OWNER, "upload_key": OTHER_KEY}],
             }
         )
     )

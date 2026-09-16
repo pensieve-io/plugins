@@ -2,7 +2,8 @@
 
 Capture saves new visible work in Postgres for future team handoffs. It is
 **off by default**, controlled for each person in Pensieve **Settings →
-Connected clients**, separately for Codex and Claude Code across devices.
+Connected clients**. One **Save agent transcripts** toggle controls all of your
+supported agents and devices.
 Installing or updating the plugin never opts you in.
 
 Saved work belongs to the selected context and is intended for its members.
@@ -15,13 +16,13 @@ same host conversation appends to its existing logical record.
 ## Set up a device
 
 1. Sign in to Pensieve with the same account used for this client's MCP login.
-2. Open personal **Settings → Connected clients**, enable the client, and choose
+2. Open personal **Settings → Connected clients**, enable **Save agent transcripts**, and choose
    **Set up device**. This downloads a uniquely named JSON file with an upload-only key.
 3. In a terminal, from your installed Pensieve plugin folder, run the command
    shown in settings, using the actual downloaded file path:
 
    ```sh
-   python3 scripts/capture_setup.py ~/Downloads/pensieve-codex-DEVICE_ID.json
+   python3 scripts/capture_setup.py ~/Downloads/pensieve-capture-DEVICE_ID.json
    ```
 
 4. Delete the downloaded setup file, then start or resume your work session.
@@ -30,16 +31,17 @@ An agent can help locate the plugin folder, but do not paste the setup file or
 key into chat. The importer makes no network calls, opens no sign-in flow and
 never reads host credentials. It stores the key in
 `~/.config/pensieve/capture.json` with mode `0600`, under a private `0700`
-directory. It preserves profiles for other accounts and clients.
+directory. It preserves profiles for other accounts; one setup works across supported
+clients on this device.
 
 Settings is the only opt-in control. Turning capture off stops new and queued
-uploads for that client on every device. Re-enabling starts a new consent period;
+uploads for every client on every device. Re-enabling starts a new consent period;
 it never backfills the disabled period or retries an older period's backlog.
 Saved content keeps its original expiry. **Remove device** revokes only that
 upload key, including queued retries; it does not disconnect MCP or delete
 saved history. Device IDs in settings match their downloaded setup filenames.
 
-The version-2 private config holds `user_id`, `client` and `upload_key` profiles.
+The version-2 private config holds `user_id` and `upload_key` profiles.
 Keys cannot read transcripts or call MCP tools. The server checks current
 consent, key status and membership for every batch. `PENSIEVE_CAPTURE_CONFIG`
 and `PENSIEVE_CAPTURE_STATE` may override local paths; no preference flag or

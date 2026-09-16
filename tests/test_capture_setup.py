@@ -11,25 +11,20 @@ OWNER = "353e0b53-8178-4a3c-8d40-a07414144741"
 KEY = "synthetic-upload-only-key"
 
 
-def download(tmp_path, client="codex", key=KEY):
+def download(tmp_path, owner=OWNER, key=KEY):
     path = tmp_path / "download.json"
-    path.write_text(
-        json.dumps(
-            {"version": 2, "profiles": [{"user_id": OWNER, "client": client, "upload_key": key}]}
-        )
-    )
+    path.write_text(json.dumps({"version": 2, "profiles": [{"user_id": owner, "upload_key": key}]}))
     return path
 
 
-def test_import_installs_private_scoped_key_and_preserves_other_client(tmp_path):
+def test_import_installs_private_account_key_and_preserves_other_accounts(tmp_path):
     destination = tmp_path / "private" / "capture.json"
     setup.install(download(tmp_path), destination)
-    assert profiles(destination, "codex") == {OWNER: KEY}
-    assert profiles(destination, "claude") == {}
-    setup.install(download(tmp_path, "claude"), destination)
+    assert profiles(destination) == {OWNER: KEY}
+    other = "173e0b53-8178-4a3c-8d40-a07414144741"
+    setup.install(download(tmp_path, owner=other), destination)
     setup.install(download(tmp_path, key=KEY + "-new"), destination)
-    assert profiles(destination, "codex") == {OWNER: KEY + "-new"}
-    assert profiles(destination, "claude") == {OWNER: KEY}
+    assert profiles(destination) == {OWNER: KEY + "-new", other: KEY}
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
     assert stat.S_IMODE(destination.parent.stat().st_mode) == 0o700
     assert "enabled" not in destination.read_text()
@@ -40,7 +35,7 @@ def test_import_installs_private_scoped_key_and_preserves_other_client(tmp_path)
     [
         {"version": 1, "profiles": []},
         {"version": 2, "profiles": []},
-        {"version": 2, "profiles": [{"user_id": OWNER, "client": "codex", "upload_key": "short"}]},
+        {"version": 2, "profiles": [{"user_id": OWNER, "upload_key": "short"}]},
     ],
 )
 def test_invalid_download_never_replaces_working_config(tmp_path, invalid):
@@ -73,4 +68,4 @@ def test_cli_never_prints_setup_contents(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["setup", str(source), "--config", str(destination)])
     setup.main()
     assert KEY not in capsys.readouterr().out
-    assert profiles(destination, "codex") == {OWNER: KEY}
+    assert profiles(destination) == {OWNER: KEY}

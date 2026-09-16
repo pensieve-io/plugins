@@ -1,6 +1,6 @@
 """Import a device setup file downloaded from Pensieve personal settings.
 
-Capture consent is managed in the app. This command only installs a client-scoped
+Capture consent is managed in the app. This command only installs a account-scoped
 upload credential; it never signs in, reads host credentials or prints secrets.
 """
 
@@ -36,8 +36,7 @@ def save_config(path, value):
             handle.flush()
             os.fsync(handle.fileno())
         # Validate all profiles before replacing working credentials.
-        for client in ("codex", "claude"):
-            profiles(Path(temporary), client)
+        profiles(Path(temporary))
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -65,19 +64,18 @@ def install(source: Path, destination: Path):
     ):
         raise ValueError("Setup must contain one device credential")
     profile = incoming["profiles"][0]
-    if not isinstance(profile, dict) or set(profile) != {"client", "user_id", "upload_key"}:
+    if not isinstance(profile, dict) or set(profile) != {"user_id", "upload_key"}:
         raise ValueError("Invalid setup credential")
     # Read and validate the existing file before merging; never loosen its permissions.
-    for client in ("codex", "claude"):
-        profiles(destination, client)
+    profiles(destination)
     existing = (
         json.loads(private_file(destination, MAX_CONFIG_BYTES))
         if destination.exists()
         else {"version": 2, "profiles": []}
     )
-    identity = (profile["user_id"], profile["client"])
+    identity = profile["user_id"]
     existing["profiles"] = [
-        item for item in existing["profiles"] if (item["user_id"], item["client"]) != identity
+        item for item in existing["profiles"] if item["user_id"] != identity
     ] + [profile]
     save_config(destination, existing)
 

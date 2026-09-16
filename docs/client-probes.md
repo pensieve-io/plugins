@@ -96,7 +96,9 @@ capture, resume and code-mode context switching (all ten switch checks passed).
 Claude Code 2.1.273 passed all eight capture checks and twelve grounding/receipt
 checks, including resumed segment identity and compaction. These probes use
 synthetic services and credentials; they do not prove live personal-settings
-setup, account consent or production acceptance.
+setup, account consent or production acceptance. On 17 September, the same
+Claude suite and Codex code-mode switch checks passed again with one
+account-scoped setup credential shared across clients.
 
 Codex 0.154.0 persists visible user turns as `event_msg` / `item_completed`
 records whose `item.type` is `UserMessage`; they carry thread and turn IDs and

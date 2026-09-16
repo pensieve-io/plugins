@@ -151,9 +151,7 @@ def run_probe(
             json.dumps(
                 {
                     "version": 2,
-                    "profiles": [
-                        {"user_id": CAPTURE_OWNER, "client": "codex", "upload_key": CAPTURE_KEY}
-                    ],
+                    "profiles": [{"user_id": CAPTURE_OWNER, "upload_key": CAPTURE_KEY}],
                 }
             )
         )

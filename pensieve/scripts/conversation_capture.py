@@ -74,7 +74,7 @@ def private_file(path: Path, limit: int) -> bytes:
         return data
 
 
-def profiles(path: Path, client: str) -> dict[str, str]:
+def profiles(path: Path) -> dict[str, str]:
     try:
         value = json.loads(private_file(path, MAX_CONFIG_BYTES))
     except FileNotFoundError:
@@ -84,26 +84,21 @@ def profiles(path: Path, client: str) -> dict[str, str]:
     if value["version"] != 2 or not isinstance(value["profiles"], list):
         raise ValueError("unsupported capture config")
     result = {}
-    seen = set()
     for profile in value["profiles"]:
-        if not isinstance(profile, dict) or set(profile) != {"user_id", "client", "upload_key"}:
+        if not isinstance(profile, dict) or set(profile) != {"user_id", "upload_key"}:
             raise ValueError("invalid capture profile")
         owner = conversation_id(profile["user_id"])
         key = profile["upload_key"]
         if (
             owner is None
-            or profile["client"] not in {"codex", "claude"}
             or not isinstance(key, str)
             or not 16 <= len(key) <= 4096
             or any(character.isspace() for character in key)
         ):
             raise ValueError("invalid capture profile")
-        identity = (owner, profile["client"])
-        if identity in seen:
+        if owner in result:
             raise ValueError("duplicate capture profile")
-        seen.add(identity)
-        if profile["client"] == client:
-            result[owner] = key
+        result[owner] = key
     return result
 
 
@@ -1005,7 +1000,7 @@ def run_hook(
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return {}
-    configured = profiles(config, client)
+    configured = profiles(config)
     if not configured:
         # Capture-off must be remembered without reading transcript text, or a
         # later re-enable would scan and upload the disabled interval. Never

@@ -346,7 +346,6 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                         "profiles": [
                             {
                                 "user_id": CAPTURE_OWNER,
-                                "client": "claude",
                                 "upload_key": CAPTURE_KEY,
                             }
                         ],
