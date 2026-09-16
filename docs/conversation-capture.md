@@ -1,64 +1,49 @@
 # Optional work conversation capture
 
-Capture saves new visible work to the selected Pensieve context so its members
-and agents can search/read earlier conversations. It is **off by default**.
-Installing or updating the plugin alone never uploads conversation text.
+Capture saves new visible work in Postgres for future team handoffs. It is
+**off by default**, controlled for each person in Pensieve **Settings →
+Connected clients**, separately for Codex and Claude Code across devices.
+Installing or updating the plugin never opts you in.
 
-Once enabled for your account, capture follows the selected context. **Every
-current member of that context can read its captured portions.** There is no
-private mode, sharing toggle or conversation delete action. No selected context
-means no upload. A session that switches A → B → A saves the first and third
-portions to A and the second to B; it does not copy the entire session to both.
-Resuming the same host conversation updates the same logical archive record.
+Saved work belongs to the selected context and is intended for its members.
+Only enable this for work you want to share. The pilot has no transcript
+browser, search/read tools, summaries, embeddings or automatic knowledge
+extraction. No selected context means no upload. A → B → A saves separate
+portions without copying the whole session to both companies. Resuming the
+same host conversation appends to its existing logical record.
 
-## Set up in the plugin
+## Set up a device
 
-Run the bundled helper from the installed plugin directory in an interactive
-terminal. You can ask your agent to locate that directory; no key needs to be
-copied into the conversation. The commands, relative to the plugin root, are:
+1. Sign in to Pensieve with the same account used for this client's MCP login.
+2. Open personal **Settings → Connected clients**, enable the client, and choose
+   **Set up device**. This downloads a uniquely named JSON file with an upload-only key.
+3. In a terminal, from your installed Pensieve plugin folder, run the command
+   shown in settings, using the actual downloaded file path:
 
-```sh
-python3 scripts/capture_setup.py enable
-python3 scripts/capture_setup.py status
-python3 scripts/capture_setup.py disable
-```
+   ```sh
+   python3 scripts/capture_setup.py ~/Downloads/pensieve-codex-DEVICE_ID.json
+   ```
 
-`enable` explains sharing/retention and asks you to opt in. It opens the existing
-Pensieve sign-in/consent flow in your browser using its own OAuth PKCE grant,
-then stores an upload-only key in `~/.config/pensieve/capture.json` with mode
-`0600`. Its containing directory must be private (`0700`). Start or resume your
-work session afterward. Neither the app's settings page nor manual credential
-copying is required. This setup is separate from your host's MCP login; use the
-same account. The helper never reads the host's OAuth credentials and never
-stores its own temporary OAuth access/refresh tokens.
+4. Delete the downloaded setup file, then start or resume your work session.
 
-Capture begins with newly observed work. It does not import older sessions or
-backfill a resumed conversation. `disable` removes local capture configuration;
-it neither deletes already-shared history nor revokes keys on other computers.
-Every enable issues a new upload key. Changed key fingerprints reset the live
-capture baseline, even if no hook ran while capture was disabled; already-durable
-previously enabled work can still retry.
+An agent can help locate the plugin folder, but do not paste the setup file or
+key into chat. The importer makes no network calls, opens no sign-in flow and
+never reads host credentials. It stores the key in
+`~/.config/pensieve/capture.json` with mode `0600`, under a private `0700`
+directory. It preserves profiles for other accounts and clients.
 
-To manage upload credentials, including a lost computer:
+Settings is the only opt-in control. Turning capture off stops new and queued
+uploads for that client on every device. Re-enabling starts a new consent period;
+it never backfills the disabled period or retries an older period's backlog.
+Saved content keeps its original expiry. **Remove device** revokes only that
+upload key, including queued retries; it does not disconnect MCP or delete
+saved history. Device IDs in settings match their downloaded setup filenames.
 
-```sh
-python3 scripts/capture_setup.py keys
-python3 scripts/capture_setup.py revoke KEY_UUID
-```
-
-These commands use browser sign-in. Listing shows key IDs/labels, never secret
-keys. Revocation stops that key's uploads, including queued retries. Use `keys`
-to identify and revoke an unused key before re-enabling if the account key cap
-is reached. `PENSIEVE_CAPTURE_CONFIG` can select another private config file;
-`PENSIEVE_CAPTURE_STATE` selects the private spool directory. Both contain paths,
-not credentials. Keep these outside the plugin installation so updates preserve
-configuration and pending uploads.
-
-The private config supports multiple accounts, each with `user_id` and
-`upload_key`. The server authenticates that account and checks its current
-membership in every upload's `context_id`. A configured account needs no separate
-profile for each context. An unconfigured account never uses another account's
-key. Upload keys cannot read transcripts or call MCP tools.
+The version-2 private config holds `user_id`, `client` and `upload_key` profiles.
+Keys cannot read transcripts or call MCP tools. The server checks current
+consent, key status and membership for every batch. `PENSIEVE_CAPTURE_CONFIG`
+and `PENSIEVE_CAPTURE_STATE` may override local paths; no preference flag or
+secret belongs in the hook/marketplace definition.
 
 ## What is saved
 
@@ -67,48 +52,46 @@ key. Upload keys cannot read transcripts or call MCP tools.
 - Artifact references and attachment omission notices, without opening files.
 
 Reasoning, system/developer instructions, hook payloads and compaction internals
-are excluded. Known credentials and common secret patterns are redacted, although
-pattern matching cannot identify every secret in arbitrary prose. Each event is
-limited to 32,000 characters with explicit truncation. Batches hold at most 100
-events / 256 KiB. Unsupported oversized records pause parsing without guessing.
+are excluded. Configured credentials and common secret patterns, including
+quoted JSON credential fields, are redacted; arbitrary prose can still contain
+secrets. Events are limited to 32,000 characters with explicit truncation;
+batches hold at most 100 events / 256 KiB. Unsupported oversized records pause
+parsing without guessing.
 
 ## Attribution and reliability
 
-The service emits authenticated, non-secret prompt/selection markers. The helper
-accepts only recognised native hook records and actual Pensieve MCP-call results,
-matching account, client, conversation and (for Codex) turn. Unknown or ambiguous
-attribution stays local. A later marker never assigns earlier work wholesale to
-its context. Codex code mode uses native completed MCP-call records; combined
-`exec`/`wait` output is omitted because it may span several contexts.
+Authenticated version-2 prompt/selection markers carry account, client,
+conversation, context and current consent generation (or null when disabled).
+Only recognised native hook records and actual Pensieve MCP results supply
+attribution. Codex also matches its turn ID. Only an observed user prompt may
+wait provisionally for its own marker; ambiguous/unassignable work is discarded.
+Codex code mode uses native completed MCP-call records and omits combined
+`exec`/`wait` output that could span contexts.
 
-SessionStart establishes the baseline, prompt/Stop checkpoints durable work and
-SessionEnd attempts a short best-effort flush. Stable event identities and exact
-batch receipts tolerate retries, resume and out-of-order delivery. The private
-SQLite spool is bounded at 16 MiB per conversation and pauses scanning when full,
-without evicting unacknowledged events. There is no background daemon: pending
-work retries at later supported hooks. Losing the machine or host transcript can
-leave final work unsaved.
+SessionStart establishes a baseline, prompt/Stop checkpoints work, and
+SessionEnd attempts a short best-effort flush. Immutable events and exact-byte
+receipts tolerate retries, resume and out-of-order delivery. There are no
+message edit revisions or active/inactive updates. The private SQLite spool is
+bounded at 16 MiB per conversation, retaining valid unacknowledged work when
+full. Pending work retries at later hooks; there is no background daemon.
+Final work can be lost if the machine or local transcript disappears.
 
-Each saved context portion expires **90 days after its first accepted upload**;
-resume does not extend it. Expired bodies and titles are erased, leaving a
-content-free tombstone that rejects old retries. Receipts include the deadline.
-A fresh post-expiry user turn starts a new portion under the same logical
-conversation. If expiry is discovered after an offline backlog accumulated,
-only a suffix beginning with a host-timestamped post-expiry user turn can move.
-Old or untimestamped work is never resurrected. User/context deletion also removes
-its stored content through the existing account/context lifecycle.
+Each portion expires **90 days after its first accepted upload**; resume does
+not extend it. The server erases bodies, titles and receipts, retaining only
+content-free tombstones against retry resurrection. A fresh post-expiry user
+turn can begin a new portion of the same conversation. If expiry is discovered
+while work is queued, only a host-timestamped post-expiry turn can roll over.
+Account/context deletion removes its stored content. The pilot has no individual
+transcript delete action.
 
 ## Supported clients and verification
 
-The tested capture contracts are local macOS Codex CLI and Claude Code. Desktop,
-ChatGPT Work, Cowork, ordinary chat tabs, Windows and ephemeral sessions without
-a local transcript require their own verification. A working MCP connection does
-not establish capture support.
+The pilot targets local macOS Codex CLI and Claude Code. Desktop, ChatGPT Work,
+Cowork, ordinary chat tabs, Windows and ephemeral sessions without a local
+transcript require separate verification. MCP connectivity does not prove capture.
 
-Run package tests and synthetic installed-client probes as described in
-[client-probes.md](client-probes.md). Setup tests exercise a real loopback callback,
-including idle browser connections, wrong OAuth state, PKCE, private file storage
-and disabled capture. They use synthetic identity/upload services, not real
-accounts. Live authenticated fresh installation, update, resume, membership
-changes and expiry remain release acceptance requirements. The companion server
-must be deployed before this plugin feature is published.
+Package tests cover credential import, private storage, client/consent boundaries,
+retry, expiry and no-backfill behavior. Synthetic installed-client probes are
+in [client-probes.md](client-probes.md). Live authenticated personal-settings
+setup, fresh installation, updates and resumed sessions remain release checks.
+Deploy the companion app/API/MCP/scheduler before publishing the plugin feature.

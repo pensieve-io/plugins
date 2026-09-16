@@ -44,7 +44,7 @@ SECRET = re.compile(
     r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})|"
     r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|upload[_-]?key)"
-    r"\s*[=:]\s*[\"']?[^\s\"',}]+)"
+    r"[\"']?\s*[=:]\s*[\"']?[^\s\"',}]+)"
 )
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
 SET_CONTEXT_NAMES = {
@@ -74,31 +74,36 @@ def private_file(path: Path, limit: int) -> bytes:
         return data
 
 
-def profiles(path: Path) -> dict[str, str]:
+def profiles(path: Path, client: str) -> dict[str, str]:
     try:
         value = json.loads(private_file(path, MAX_CONFIG_BYTES))
     except FileNotFoundError:
         return {}
     if not isinstance(value, dict) or set(value) != {"version", "profiles"}:
         raise ValueError("capture config must contain version and profiles")
-    if value["version"] != 1 or not isinstance(value["profiles"], list):
+    if value["version"] != 2 or not isinstance(value["profiles"], list):
         raise ValueError("unsupported capture config")
     result = {}
+    seen = set()
     for profile in value["profiles"]:
-        if not isinstance(profile, dict) or set(profile) != {"user_id", "upload_key"}:
+        if not isinstance(profile, dict) or set(profile) != {"user_id", "client", "upload_key"}:
             raise ValueError("invalid capture profile")
         owner = conversation_id(profile["user_id"])
         key = profile["upload_key"]
         if (
             owner is None
+            or profile["client"] not in {"codex", "claude"}
             or not isinstance(key, str)
             or not 16 <= len(key) <= 4096
             or any(character.isspace() for character in key)
         ):
             raise ValueError("invalid capture profile")
-        if owner in result:
+        identity = (owner, profile["client"])
+        if identity in seen:
             raise ValueError("duplicate capture profile")
-        result[owner] = key
+        seen.add(identity)
+        if profile["client"] == client:
+            result[owner] = key
     return result
 
 
@@ -112,6 +117,7 @@ def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None
         return None
     if not isinstance(marker, dict) or set(marker) != {
         "v",
+        "capture_generation",
         "kind",
         "user_id",
         "client",
@@ -122,7 +128,11 @@ def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None
         return None
     context, turn = marker["context_id"], marker["turn_id"]
     if (
-        marker["v"] != 1
+        marker["v"] != 2
+        or (
+            marker["capture_generation"] is not None
+            and conversation_id(marker["capture_generation"]) is None
+        )
         or marker["kind"] != kind
         or marker["client"] != client
         or conversation_id(marker["conversation_id"]) != session
@@ -413,7 +423,7 @@ def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS segments (
             id TEXT PRIMARY KEY, owner TEXT NOT NULL, context INTEGER NOT NULL,
-            activity INTEGER NOT NULL, active INTEGER NOT NULL, dirty INTEGER NOT NULL,
+            generation TEXT NOT NULL,
             title TEXT NOT NULL DEFAULT '', retired INTEGER NOT NULL DEFAULT 0,
             expires_at TEXT);
         CREATE TABLE IF NOT EXISTS events (
@@ -422,32 +432,18 @@ def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS pending_events ON events(segment, sequence);
         CREATE TABLE IF NOT EXISTS batches (
             id TEXT PRIMARY KEY, segment TEXT UNIQUE NOT NULL, body BLOB NOT NULL,
-            sha TEXT NOT NULL, activity INTEGER NOT NULL, event_ids TEXT NOT NULL);
+            sha TEXT NOT NULL, event_ids TEXT NOT NULL);
     """)
     return db
 
 
 def load_state(db: sqlite3.Connection) -> dict:
     row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
-    return (
-        json.loads(row[0]) if row else {"offset": None, "sequence": 0, "activity": 0, "calls": {}}
-    )
+    return json.loads(row[0]) if row else {"offset": None, "sequence": 0, "calls": {}}
 
 
 def save_state(db: sqlite3.Connection, state: dict) -> None:
     db.execute("INSERT OR REPLACE INTO state(id,body) VALUES (1,?)", (encoded(state).decode(),))
-
-
-def set_activity(
-    db: sqlite3.Connection, state: dict, active: bool, segment: str | None = None
-) -> None:
-    segment = segment or state.get("segment")
-    if segment:
-        state["activity"] += 1
-        db.execute(
-            "UPDATE segments SET activity=?,active=?,dirty=1 WHERE id=?",
-            (state["activity"], int(active), segment),
-        )
 
 
 def renewal_segment(segment: str, user_event: str) -> str:
@@ -456,6 +452,8 @@ def renewal_segment(segment: str, user_event: str) -> str:
 
 def apply_item(db, state, item, identity, occurred_at, client, session, configured, host_timestamp):
     if item.get("new_turn"):
+        # A later turn can never authorise an earlier unmarked one.
+        db.execute("DELETE FROM events WHERE segment IS NULL")
         state.update(
             candidate_segment=state.get("segment"),
             candidate_scope=state.get("scope"),
@@ -468,7 +466,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             turn_occurred_at=occurred_at if host_timestamp else None,
         )
     if item.get("unknown_boundary"):
-        set_activity(db, state, False, state.get("segment") or state.get("candidate_segment"))
+        db.execute("DELETE FROM events WHERE segment IS NULL")
         state.update(segment=None, scope=None, ambiguous=True, awaiting_marker=False)
         return
     marker = item.get("boundary")
@@ -484,6 +482,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         elif state.get("ambiguous") or state.get("awaiting_marker"):
             return
         owner, context = marker["user_id"], marker["context_id"]
+        generation = marker["capture_generation"]
         previous = (
             state.get("candidate_scope") if marker["kind"] == "prompt" else state.get("scope")
         )
@@ -491,13 +490,23 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             state.get("candidate_segment") if marker["kind"] == "prompt" else state.get("segment")
         )
         state.update(candidate_segment=None, candidate_scope=None)
-        if marker["kind"] == "selection" and previous != [owner, context]:
+        if (
+            marker["kind"] == "selection"
+            and previous is not None
+            and previous[0] == owner
+            and previous[2] != generation
+        ):
+            # A changed opt-in period cannot authorise the rest of an old turn.
+            # Wait for the next user prompt and its matching receipt.
+            state.update(segment=None, scope=None, discard_until_prompt=True)
+            db.execute("DELETE FROM events WHERE segment IS NULL")
+            return
+        if marker["kind"] == "selection" and previous != [owner, context, generation]:
             # The preceding prompt belongs to the previous company/account.
             # A destination reached by a tool has no destination user title yet.
             state.update(title="", title_segment=None)
-        state["scope"] = [owner, context]
-        if context is None or owner not in configured:
-            set_activity(db, state, False, previous_segment)
+        state["scope"] = [owner, context, generation]
+        if context is None or generation is None or owner not in configured:
             state["segment"] = None
             state.update(title="", title_segment=None)
             # An explicit disabled scope is not an upload backlog. Only its
@@ -520,15 +529,17 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             and turn_time
             and turn_time >= expiry
         ):
-            set_activity(db, state, False, previous_segment)
             segment = renewal_segment(previous_segment, state["turn_group"])
-        elif previous == [owner, context] and previous_segment:
+        elif previous == [owner, context, generation] and previous_segment:
             # A fresh marker restores the candidate; the prior scope alone
             # never authorizes a new user turn. Resume keeps one segment.
             segment = previous_segment
         else:
-            set_activity(db, state, False, previous_segment)
-            segment = str(uuid.uuid5(uuid.UUID(session), f"{client}:{owner}:{context}:{identity}"))
+            segment = str(
+                uuid.uuid5(
+                    uuid.UUID(session), f"{client}:{owner}:{context}:{generation}:{identity}"
+                )
+            )
         retired = db.execute("SELECT retired FROM segments WHERE id=?", (segment,)).fetchone()
         if retired and retired[0]:
             state.update(segment=None, scope=None, awaiting_marker=False, ambiguous=True, title="")
@@ -540,24 +551,33 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         state["segment"] = segment
         state["title_segment"] = segment
         db.execute(
-            "INSERT OR IGNORE INTO segments(id,owner,context,activity,active,dirty,title) VALUES (?,?,?,0,1,1,?)",
-            (segment, owner, context, state.get("title", "")),
+            "INSERT OR IGNORE INTO segments(id,owner,context,generation,title) VALUES (?,?,?,?,?)",
+            (segment, owner, context, generation, state.get("title", "")),
         )
         if marker["kind"] == "prompt":
             db.execute(
                 "UPDATE events SET segment=? WHERE segment IS NULL AND turn_group=?",
                 (segment, state.get("turn_group")),
             )
-        set_activity(db, state, True)
         return
     if "kind" not in item:
         return
     if state.get("discard_until_prompt"):
         return
+    if state.get("segment") is None and not state.get("awaiting_marker"):
+        # A baseline may begin mid-turn. Only an observed user prompt can
+        # wait provisionally for attribution; orphan outputs are never queued.
+        db.execute("DELETE FROM events WHERE segment IS NULL")
+        return
     if item["kind"] != "user" and state.get("awaiting_marker"):
         state["ambiguous"] = True
-    # Known scope with no configured consent is capture-off. Unknown boundaries
-    # remain pending locally and cannot be assigned by a later unrelated marker.
+    if state.get("ambiguous"):
+        # Its own prompt receipt can no longer repair this turn. Keep no
+        # unuploadable text that could fill the spool and block future work.
+        db.execute("DELETE FROM events WHERE segment IS NULL")
+        return
+    # Only the current user prompt may wait provisionally for its own receipt.
+    # Known disabled scopes never retain transcript text.
     if state.get("scope") is not None and state.get("segment") is None:
         return
     text, truncated = clean_content(item["content"], list(configured.values()))
@@ -567,7 +587,6 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
     event = {
         "event_id": identity,
         "sequence": state["sequence"],
-        "revision": 1,
         "kind": item["kind"],
         "content": text,
         "occurred_at": occurred_at,
@@ -592,7 +611,6 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             "UPDATE segments SET title=? WHERE id=? AND title=''",
             (state.get("title", ""), state["segment"]),
         )
-    set_activity(db, state, True)
 
 
 def scan(
@@ -728,7 +746,7 @@ def next_batch(db, segment, client, session):
         "SELECT id,body FROM events WHERE segment=? ORDER BY sequence LIMIT ?",
         (segment["id"], MAX_BATCH_EVENTS),
     ).fetchall()
-    if not rows and not segment["dirty"]:
+    if not rows:
         return None
     body = {
         "batch_id": str(uuid.uuid4()),
@@ -737,8 +755,7 @@ def next_batch(db, segment, client, session):
         "segment_id": segment["id"],
         "context_id": segment["context"],
         "events": [],
-        "activity_seq": segment["activity"],
-        "is_active": bool(segment["active"]),
+        "capture_generation": segment["generation"],
         "title": segment["title"],
     }
     selected = []
@@ -752,13 +769,12 @@ def next_batch(db, segment, client, session):
     raw = encoded(body)
     checksum = hashlib.sha256(raw).hexdigest()
     db.execute(
-        "INSERT INTO batches(id,segment,body,sha,activity,event_ids) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO batches(id,segment,body,sha,event_ids) VALUES (?,?,?,?,?)",
         (
             body["batch_id"],
             segment["id"],
             raw,
             checksum,
-            body["activity_seq"],
             json.dumps(selected),
         ),
     )
@@ -768,7 +784,6 @@ def next_batch(db, segment, client, session):
         "segment": segment["id"],
         "body": raw,
         "sha": checksum,
-        "activity": body["activity_seq"],
         "event_ids": json.dumps(selected),
     }
 
@@ -826,6 +841,12 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
             if (
                 isinstance(result, dict)
                 and result.get("segment_id") == batch["segment"]
+                and result.get("reason") == "capture_disabled"
+            ):
+                return {"status": "capture_disabled"}
+            if (
+                isinstance(result, dict)
+                and result.get("segment_id") == batch["segment"]
                 and result.get("reason") == "expired"
                 and aware_time(result.get("expires_at")) is not None
             ):
@@ -873,15 +894,13 @@ def retire_segment(db, segment_id, expires_at):
             old = db.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
             replacement = renewal_segment(segment_id, fresh["id"])
             title = json.loads(fresh["body"])["content"][:200]
-            state["activity"] += 1
             db.execute(
-                "INSERT OR IGNORE INTO segments(id,owner,context,activity,active,dirty,title) VALUES (?,?,?,?,?,1,?)",
+                "INSERT OR IGNORE INTO segments(id,owner,context,generation,title) VALUES (?,?,?,?,?)",
                 (
                     replacement,
                     old["owner"],
                     old["context"],
-                    state["activity"],
-                    old["active"],
+                    old["generation"],
                     title,
                 ),
             )
@@ -907,7 +926,7 @@ def retire_segment(db, segment_id, expires_at):
             state.update(candidate_segment=None, candidate_scope=None)
     db.execute("DELETE FROM events WHERE segment=?", (segment_id,))
     db.execute("DELETE FROM batches WHERE segment=?", (segment_id,))
-    db.execute("UPDATE segments SET retired=1,active=0,dirty=0,title='' WHERE id=?", (segment_id,))
+    db.execute("UPDATE segments SET retired=1,title='' WHERE id=?", (segment_id,))
     if state.get("title_segment") == segment_id:
         state.update(title="", title_segment=None)
     if state.get("segment") == segment_id or state.get("candidate_segment") == segment_id:
@@ -931,7 +950,7 @@ def flush(db, configured, client, session, endpoint, deadline):
     while time.monotonic() < deadline:
         progressed = False
         segments = db.execute(
-            "SELECT * FROM segments WHERE retired=0 AND (dirty=1 OR id IN (SELECT segment FROM events) OR id IN (SELECT segment FROM batches)) ORDER BY activity"
+            "SELECT * FROM segments WHERE retired=0 AND (id IN (SELECT segment FROM events) OR id IN (SELECT segment FROM batches)) ORDER BY rowid"
         ).fetchall()
         for segment in segments:
             scope = (segment["owner"], segment["context"])
@@ -943,6 +962,10 @@ def flush(db, configured, client, session, endpoint, deadline):
             if batch is None:
                 continue
             outcome = upload(batch, key, endpoint, min(0.65, remaining))
+            if isinstance(outcome, dict) and outcome["status"] == "capture_disabled":
+                retire_segment(db, segment["id"], None)
+                progressed = True
+                continue
             if isinstance(outcome, dict) and outcome["status"] == "expired":
                 retire_segment(
                     db,
@@ -964,10 +987,6 @@ def flush(db, configured, client, session, endpoint, deadline):
             for identity in json.loads(batch["event_ids"]):
                 db.execute("DELETE FROM events WHERE id=?", (identity,))
             db.execute("DELETE FROM batches WHERE id=?", (batch["id"],))
-            db.execute(
-                "UPDATE segments SET dirty=0 WHERE id=? AND activity=?",
-                (segment["id"], batch["activity"]),
-            )
             db.commit()
             progressed = True
         if not progressed:
@@ -986,7 +1005,7 @@ def run_hook(
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return {}
-    configured = profiles(config)
+    configured = profiles(config, client)
     if not configured:
         # Capture-off must be remembered without reading transcript text, or a
         # later re-enable would scan and upload the disabled interval. Never
@@ -997,7 +1016,6 @@ def run_hook(
             try:
                 db.execute("BEGIN IMMEDIATE")
                 state = load_state(db)
-                set_activity(db, state, False)
                 state["capture_paused"] = True
                 save_state(db, state)
                 db.commit()
@@ -1019,7 +1037,6 @@ def run_hook(
         )
         if disabled:
             # Consent is per account; another enabled account grants no upload rights.
-            set_activity(db, state, False, state.get("segment") or state.get("candidate_segment"))
             state.update(
                 segment=None,
                 candidate_segment=None,
@@ -1034,7 +1051,6 @@ def run_hook(
         }
         previous_fingerprints = state.get("profile_keys")
         if previous_fingerprints is not None and previous_fingerprints != fingerprints:
-            set_activity(db, state, False, state.get("segment") or state.get("candidate_segment"))
             state["capture_paused"] = True
         state["profile_keys"] = fingerprints
         if state.pop("capture_paused", False):
@@ -1072,8 +1088,6 @@ def run_hook(
                 db.execute("BEGIN IMMEDIATE")
                 state = load_state(db)
                 source_error = exc
-        if event in {"SessionStart", "SessionEnd"}:
-            set_activity(db, state, event != "SessionEnd")
         save_state(db, state)
         db.commit()
         flush(db, configured, client, session, endpoint, deadline)

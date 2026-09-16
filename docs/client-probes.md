@@ -82,8 +82,8 @@ python3 scripts/probe_codex_hooks.py --persist --capture --context-switch code-m
 ```
 
 Use the first command's returned thread ID in the second. Six capture assertions
-cover visible prompts/answers, exact-byte retry after a synthetic 503, inactivity
-flush, credential exclusion, internal-payload exclusion and distinct identities.
+cover visible prompts/answers, exact-byte retry after a synthetic 503, captured visible work,
+credential exclusion, internal-payload exclusion and distinct identities.
 Actual start/resume uploads used the same one segment for two distinct user
 turns. The compaction run also passed. No real upload key or hosted capture
 service is used by these probes.
@@ -91,10 +91,12 @@ service is used by these probes.
 The context-switch variant calls an ordinary source-context tool and then
 `set_context` in one code-mode wrapper. It checks destination attribution and
 that combined output does not cross context boundaries. On 16 September 2026,
-the installed Codex 0.154.0 recorded the correct native selection boundary and
-destination answer in the local spool, but timed out before turn completion and
-upload retry. That run is partial evidence, not a passing native acceptance
-result. The Claude capture probe passed again with the account-scoped setup.
+the updated version-2 fixtures passed on installed Codex 0.154.0 for fresh
+capture, resume and code-mode context switching (all ten switch checks passed).
+Claude Code 2.1.273 passed all eight capture checks and twelve grounding/receipt
+checks, including resumed segment identity and compaction. These probes use
+synthetic services and credentials; they do not prove live personal-settings
+setup, account consent or production acceptance.
 
 Codex 0.154.0 persists visible user turns as `event_msg` / `item_completed`
 records whose `item.type` is `UserMessage`; they carry thread and turn IDs and

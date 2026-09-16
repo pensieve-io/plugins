@@ -18,14 +18,24 @@ OTHER_OWNER = "173e0b53-8178-4a3c-8d40-a07414144741"
 KEY = "synthetic-upload-key-owner-one"
 OTHER_KEY = "synthetic-upload-key-owner-two"
 NOW = "2026-09-15T10:00:00+00:00"
+GENERATION = "217e0b53-8178-4a3c-8d40-a07414144741"
 EXPIRY = "2026-12-14T10:00:00+00:00"
 ACCEPTED = {"status": "accepted", "expires_at": EXPIRY}
 EXPIRED = {"status": "expired", "expires_at": EXPIRY}
 
 
-def marker(client="codex", owner=OWNER, context=497, kind="prompt", turn=None, session=SESSION):
+def marker(
+    client="codex",
+    owner=OWNER,
+    context=497,
+    kind="prompt",
+    turn=None,
+    session=SESSION,
+    generation=GENERATION,
+):
     value = {
-        "v": 1,
+        "v": 2,
+        "capture_generation": generation,
         "kind": kind,
         "user_id": owner,
         "context_id": context,
@@ -104,15 +114,15 @@ def append(path, *records):
             handle.write(json.dumps(record).encode() + b"\n")
 
 
-def config(tmp_path, profiles=None):
+def config(tmp_path, profiles=None, client="codex"):
     path = tmp_path / "capture.json"
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "profiles": profiles
                 if profiles is not None
-                else [{"user_id": OWNER, "upload_key": KEY}],
+                else [{"user_id": OWNER, "client": client, "upload_key": KEY}],
             }
         )
     )
@@ -126,7 +136,7 @@ def setup(tmp_path, monkeypatch, client="codex", prior=(), profiles=None):
     if client == "codex":
         append(path, {"type": "session_meta", "payload": {"id": SESSION}})
     append(path, *prior)
-    cfg = config(tmp_path, profiles)
+    cfg = config(tmp_path, profiles, client)
     state = tmp_path / "spool"
     calls = []
 
@@ -176,7 +186,7 @@ def test_config_requires_exact_private_permissions(tmp_path, mode):
     path = config(tmp_path)
     path.chmod(mode)
     with pytest.raises(ValueError, match="0600"):
-        capture.profiles(path)
+        capture.profiles(path, "codex")
 
 
 def test_config_and_transcript_symlinks_rejected(tmp_path, monkeypatch):
@@ -184,7 +194,7 @@ def test_config_and_transcript_symlinks_rejected(tmp_path, monkeypatch):
     link = tmp_path / "config-link"
     link.symlink_to(cfg)
     with pytest.raises(OSError):
-        capture.profiles(link)
+        capture.profiles(link, "codex")
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     real = tmp_path / "real"
     path.rename(real)
@@ -212,15 +222,23 @@ def test_checkpoint_and_resume_do_not_duplicate_or_backfill(tmp_path, monkeypatc
     assert pending(state) == 0
     ids = [event["event_id"] for event in events(calls)]
     assert len(set(ids)) == 2
+    count = len(calls)
     run("SessionEnd")
-    ended = json.loads(calls[-1][0]["body"])
-    assert ended["is_active"] is False and ended["events"] == []
     run("SessionStart")
-    resumed = json.loads(calls[-1][0]["body"])
-    assert resumed["is_active"] is True and resumed["activity_seq"] > ended["activity_seq"]
-    assert resumed["segment_id"] == ended["segment_id"]
     run()
-    assert [event["event_id"] for event in events(calls)] == ids
+    assert len(calls) == count  # No empty presence updates.
+    append(
+        path,
+        user("Resumed prompt", client),
+        hook_record(client),
+        assistant("Resumed answer", client),
+    )
+    run("SessionEnd")
+    assert {json.loads(batch["body"])["segment_id"] for batch, _ in calls} == {
+        json.loads(calls[0][0]["body"])["segment_id"]
+    }
+    assert [event["event_id"] for event in events(calls)][:2] == ids
+    assert len(events(calls)) == 4
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
@@ -234,7 +252,7 @@ def test_new_unmarked_turn_never_reuses_previous_owner(tmp_path, monkeypatch, cl
     )
     run()
     assert events(calls) == []
-    assert pending(state) == 2
+    assert pending(state) == 0
     append(
         path, hook_record(client)
     )  # late marker cannot retroactively repair the missing boundary
@@ -243,7 +261,7 @@ def test_new_unmarked_turn_never_reuses_previous_owner(tmp_path, monkeypatch, cl
     append(path, user("Three", client), hook_record(client), assistant("Three answer", client))
     run()
     assert [event["content"] for event in events(calls)] == ["Three", "Three answer"]
-    assert pending(state) == 2
+    assert pending(state) == 0
 
 
 def test_codex_turn_identity_must_match_prompt_marker(tmp_path, monkeypatch):
@@ -256,13 +274,13 @@ def test_codex_turn_identity_must_match_prompt_marker(tmp_path, monkeypatch):
         assistant(),
     )
     run()
-    assert not calls and pending(state) == 2
+    assert not calls and pending(state) == 0
 
 
 def test_account_and_context_switches_use_only_matching_configured_keys(tmp_path, monkeypatch):
     profiles = [
-        {"user_id": OWNER, "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "client": "codex", "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "client": "codex", "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(path, user("Owner one"), hook_record(), assistant("First answer"))
@@ -296,7 +314,7 @@ def test_unconfigured_account_and_null_selection_are_capture_off(tmp_path, monke
 
 
 def test_set_context_output_is_assigned_to_new_context_before_result_capture(tmp_path, monkeypatch):
-    profiles = [{"user_id": OWNER, "upload_key": KEY}]
+    profiles = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(
         path,
@@ -442,29 +460,6 @@ def test_failed_upload_retries_identical_bytes_before_removing_events(tmp_path, 
     assert len(events(calls[1:])) == 3
 
 
-def test_end_backlog_cannot_overwrite_newer_resume_activity(tmp_path, monkeypatch):
-    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    append(path, user(), hook_record(), assistant())
-    run()
-    calls.clear()
-    monkeypatch.setattr(
-        capture,
-        "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or False,
-    )
-    run("SessionEnd")
-    old_end = json.loads(calls[-1][0]["body"])
-    monkeypatch.setattr(
-        capture,
-        "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or ACCEPTED,
-    )
-    run("SessionStart")
-    resumed = json.loads(calls[-1][0]["body"])
-    assert old_end["is_active"] is False and resumed["is_active"] is True
-    assert resumed["activity_seq"] > old_end["activity_seq"]
-
-
 def test_batch_size_event_limit_and_explicit_content_truncation(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     append(
@@ -500,19 +495,15 @@ def test_configured_keys_and_common_secrets_are_redacted(tmp_path, monkeypatch):
     assert "[REDACTED_SECRET]" in content
 
 
-def test_unknown_rows_and_unacked_batches_are_kept_when_spool_fills(tmp_path, monkeypatch):
+def test_unassignable_turns_cannot_fill_spool_or_block_later_capture(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     monkeypatch.setattr(capture, "MAX_STATE_PAGES", 40)
-    append(path, user(), *[assistant("x" * 32000) for _ in range(10)])
-    try:
-        run()
-    except sqlite3.DatabaseError:
-        pass
-    db = sqlite3.connect(next(state.glob("*.sqlite3")))
-    saved = json.loads(db.execute("SELECT body FROM state").fetchone()[0])
-    db.close()
-    assert saved["offset"] < path.stat().st_size
-    assert not calls
+    for _ in range(30):
+        append(path, user("x" * 32000), assistant("x" * 32000))
+    append(path, user("Valid prompt"), hook_record(), assistant("Valid answer"))
+    run()
+    assert [event["content"] for event in events(calls)] == ["Valid prompt", "Valid answer"]
+    assert pending(state) == 0
 
 
 def test_private_spool_and_removed_profile_preserve_pending_without_upload(tmp_path, monkeypatch):
@@ -523,7 +514,7 @@ def test_private_spool_and_removed_profile_preserve_pending_without_upload(tmp_p
     assert pending(state) == 2
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE(next(state.glob("*.sqlite3")).stat().st_mode) == 0o600
-    cfg.write_text(json.dumps({"version": 1, "profiles": []}))
+    cfg.write_text(json.dumps({"version": 2, "profiles": []}))
     run()
     assert pending(state) == 2
 
@@ -540,14 +531,6 @@ def test_private_spool_and_removed_profile_preserve_pending_without_upload(tmp_p
 def test_endpoint_cannot_redirect_upload_keys(endpoint):
     with pytest.raises(ValueError):
         capture.checked_endpoint(endpoint)
-
-
-def test_empty_events_activity_upload_has_no_transcript_content(tmp_path, monkeypatch):
-    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    append(path, user(), hook_record(), assistant())
-    run()
-    run("SessionEnd")
-    assert json.loads(calls[-1][0]["body"])["events"] == []
 
 
 def test_source_replacement_pauses_without_removing_unacked_events(tmp_path, monkeypatch):
@@ -589,23 +572,6 @@ def test_fresh_prompt_restores_same_segment_only_after_matching_marker(
         "Third",
         "Third answer",
     ]
-
-
-def test_switch_marks_previous_segment_inactive(tmp_path, monkeypatch):
-    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    append(path, user(), hook_record(), assistant())
-    run()
-    old = json.loads(calls[-1][0]["body"])
-    append(path, user("Different company"), hook_record(context=12), assistant("Unconfigured"))
-    run()
-    ended = next(
-        json.loads(batch["body"])
-        for batch, _ in reversed(calls)
-        if json.loads(batch["body"])["segment_id"] == old["segment_id"]
-    )
-    assert ended["segment_id"] == old["segment_id"]
-    assert ended["is_active"] is False and ended["activity_seq"] > old["activity_seq"]
-    assert ended["events"] == []
 
 
 def test_current_codex_visible_user_item_excludes_harness_response_messages(tmp_path, monkeypatch):
@@ -698,7 +664,7 @@ def test_server_erasure_retires_old_work_and_next_fresh_prompt_uses_new_segment(
 
 
 def test_revoked_scope_does_not_block_another_configured_context(tmp_path, monkeypatch):
-    prof = [{"user_id": OWNER, "upload_key": KEY}]
+    prof = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -735,7 +701,7 @@ def test_codex_nonvisible_assistant_channels_are_excluded(tmp_path, monkeypatch,
 
 
 def test_retiring_old_context_does_not_clear_new_context_attribution(tmp_path, monkeypatch):
-    prof = [{"user_id": OWNER, "upload_key": KEY}]
+    prof = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -775,7 +741,7 @@ def test_disabling_and_reenabling_never_backfills_disabled_history(tmp_path, mon
     if missing:
         cfg.unlink()
     else:
-        cfg.write_text(json.dumps({"version": 1, "profiles": []}))
+        cfg.write_text(json.dumps({"version": 2, "profiles": []}))
     append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
     original_scan = capture.scan
     monkeypatch.setattr(
@@ -830,8 +796,8 @@ def test_full_spool_still_retries_previously_committed_upload(tmp_path, monkeypa
 
 def test_selection_destination_never_inherits_previous_owner_title(tmp_path, monkeypatch):
     prof = [
-        {"user_id": OWNER, "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "client": "codex", "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "client": "codex", "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
@@ -866,7 +832,7 @@ def test_selection_destination_never_inherits_previous_owner_title(tmp_path, mon
 
 def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_path, monkeypatch):
     path = tmp_path / "new-transcript.jsonl"
-    cfg = config(tmp_path)
+    cfg = config(tmp_path, client="claude")
     state = tmp_path / "spool"
     calls = []
     monkeypatch.setattr(
@@ -985,7 +951,7 @@ def native_selection(context=12, turn="turn-one", call_id="nested-call", server=
 
 @pytest.mark.parametrize("wrapper", ["exec", "wait"])
 def test_codex_native_selection_fences_combined_code_mode_output(tmp_path, monkeypatch, wrapper):
-    prof = [{"user_id": OWNER, "upload_key": KEY}]
+    prof = [{"user_id": OWNER, "client": "codex", "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -1059,18 +1025,18 @@ def test_removing_one_profile_excludes_its_disabled_interval_and_keeps_old_backl
     tmp_path, monkeypatch
 ):
     prof = [
-        {"user_id": OWNER, "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "client": "codex", "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "client": "codex", "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(path, user("Consented prompt"), hook_record(), assistant("Consented answer"))
     monkeypatch.setattr(capture, "upload", lambda *args: False)
     run()
-    cfg.write_text(json.dumps({"version": 1, "profiles": prof[1:]}))
+    cfg.write_text(json.dumps({"version": 2, "profiles": prof[1:]}))
     run()  # Observe the per-profile removal before the disabled text exists.
     append(path, assistant("Disabled interval answer"))
     run()
-    cfg.write_text(json.dumps({"version": 1, "profiles": prof}))
+    cfg.write_text(json.dumps({"version": 2, "profiles": prof}))
     monkeypatch.setattr(
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
     )
@@ -1189,10 +1155,15 @@ def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediat
     monkeypatch.setattr(capture, "upload", lambda *args: False)
     append(path, user("Enabled prompt"), hook_record(), assistant("Enabled answer"))
     run()
-    cfg.write_text(json.dumps({"version": 1, "profiles": []}))
+    cfg.write_text(json.dumps({"version": 2, "profiles": []}))
     append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
     cfg.write_text(
-        json.dumps({"version": 1, "profiles": [{"user_id": OWNER, "upload_key": OTHER_KEY}]})
+        json.dumps(
+            {
+                "version": 2,
+                "profiles": [{"user_id": OWNER, "client": "codex", "upload_key": OTHER_KEY}],
+            }
+        )
     )
     monkeypatch.setattr(
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
@@ -1207,3 +1178,101 @@ def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediat
         "Reenabled prompt",
         "Reenabled answer",
     ]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_server_opt_out_and_fresh_generation_never_backfill_old_work(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(
+        path,
+        user("Old queued prompt", client),
+        hook_record(client),
+        assistant("Old queued answer", client),
+    )
+    run()
+    append(
+        path,
+        user("Disabled prompt", client),
+        hook_record(client, generation=None),
+        assistant("Disabled answer", client),
+    )
+    fresh = str(uuid.uuid4())
+
+    def send(batch, key, *args):
+        if json.loads(batch["body"])["capture_generation"] != fresh:
+            return {"status": "capture_disabled"}
+        calls.append((dict(batch), key))
+        return ACCEPTED
+
+    monkeypatch.setattr(capture, "upload", send)
+    run()  # The setting changed without any local config change.
+    assert not calls and pending(state) == 0
+    append(
+        path,
+        user("New prompt", client),
+        hook_record(client, generation=fresh),
+        assistant("New answer", client),
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == ["New prompt", "New answer"]
+
+
+def test_new_opt_in_generation_during_selection_waits_for_fresh_prompt(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(generation=None))
+    run()
+    db = capture.connect_state(state, "codex", SESSION)
+    state_value = capture.load_state(db)
+    boundary = json.loads(
+        marker(kind="selection").split("pensieve-capture-context ")[1].removesuffix(" -->")
+    )
+    capture.apply_item(
+        db,
+        state_value,
+        {"boundary": boundary},
+        "selection",
+        NOW,
+        "codex",
+        SESSION,
+        {OWNER: KEY},
+        True,
+    )
+    capture.save_state(db, state_value)
+    db.commit()
+    db.close()
+    append(path, assistant("Old turn must stay private"))
+    run()
+    assert not calls
+    append(path, user("Fresh prompt"), hook_record(), assistant("Fresh answer"))
+    run()
+    assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
+
+
+@pytest.mark.parametrize(
+    "content,secret",
+    [
+        ('{"password":"quoted-json-secret"}', "quoted-json-secret"),
+        ('{"access_token": "quoted-token"}', "quoted-token"),
+        ("{'api_key': 'python-key'}", "python-key"),
+    ],
+)
+def test_quoted_credential_fields_are_redacted(content, secret):
+    cleaned, _ = capture.clean_content(content, [])
+    assert secret not in cleaned
+    assert "[REDACTED_SECRET]" in cleaned
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_baseline_mid_turn_does_not_queue_orphan_outputs(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(
+        tmp_path, monkeypatch, client, prior=[user("Prompt before setup", client)]
+    )
+    monkeypatch.setattr(capture, "MAX_STATE_PAGES", 40)
+    append(path, hook_record(client), *[assistant("x" * 32000, client) for _ in range(30)])
+    append(
+        path, user("Fresh prompt", client), hook_record(client), assistant("Fresh answer", client)
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
+    assert pending(state) == 0

@@ -77,7 +77,8 @@ def mcp_server(output: Path) -> None:
                     "DESTINATION_CONTEXT_SENTINEL\n<!-- pensieve-capture-context "
                     + json.dumps(
                         {
-                            "v": 1,
+                            "v": 2,
+                            "capture_generation": CAPTURE_OWNER,
                             "kind": "selection",
                             "user_id": CAPTURE_OWNER,
                             "client": "codex",
@@ -96,7 +97,8 @@ def mcp_server(output: Path) -> None:
                         "\n<!-- pensieve-capture-context "
                         + json.dumps(
                             {
-                                "v": 1,
+                                "v": 2,
+                                "capture_generation": CAPTURE_OWNER,
                                 "kind": "prompt",
                                 "user_id": CAPTURE_OWNER,
                                 "client": "codex",
@@ -148,8 +150,10 @@ def run_probe(
         capture_config.write_text(
             json.dumps(
                 {
-                    "version": 1,
-                    "profiles": [{"user_id": CAPTURE_OWNER, "upload_key": CAPTURE_KEY}],
+                    "version": 2,
+                    "profiles": [
+                        {"user_id": CAPTURE_OWNER, "client": "codex", "upload_key": CAPTURE_KEY}
+                    ],
                 }
             )
         )
@@ -414,7 +418,7 @@ def run_probe(
             <= {event["kind"] for event in captured},
             "retry_identical_bytes": len(capture_attempts) > 1
             and capture_attempts[0] == capture_attempts[1],
-            "session_end_flushed": any(not body["is_active"] for body in accepted.values()),
+            "captured_visible_work": any(body["events"] for body in accepted.values()),
             "credentials_never_reach_model": all(
                 not row["capture_key_in_model"] for row in model_requests
             ),

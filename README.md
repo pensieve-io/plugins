@@ -120,10 +120,10 @@ keeps its own selection.
 
 The context hooks send delivery receipts for the briefing the client received.
 Optional [work conversation capture](docs/conversation-capture.md) is off by
-default. Enable it with the bundled `scripts/capture_setup.py enable` command. It saves
-new work to the selected context, automatically shared with its members; ordinary
-plugin installation uploads no conversation text. Setup lives in the plugin,
-with no in-app conversation settings page.
+default. Enable Codex or Claude Code in personal **Settings → Connected clients**,
+download device setup, and import it with the bundled `scripts/capture_setup.py`.
+New visible work belongs to the selected context for future team handoffs. This
+pilot adds no transcript browser, agent retrieval or automatic extraction.
 
 ## Other ways to use the skills
 

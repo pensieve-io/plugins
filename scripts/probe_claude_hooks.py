@@ -104,7 +104,8 @@ class ModelStub(BaseHTTPRequestHandler):
                         "\n<!-- pensieve-capture-context "
                         + json.dumps(
                             {
-                                "v": 1,
+                                "v": 2,
+                                "capture_generation": CAPTURE_OWNER,
                                 "kind": "prompt",
                                 "user_id": CAPTURE_OWNER,
                                 "client": "claude",
@@ -341,8 +342,14 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
             capture_config.write_text(
                 json.dumps(
                     {
-                        "version": 1,
-                        "profiles": [{"user_id": CAPTURE_OWNER, "upload_key": CAPTURE_KEY}],
+                        "version": 2,
+                        "profiles": [
+                            {
+                                "user_id": CAPTURE_OWNER,
+                                "client": "claude",
+                                "upload_key": CAPTURE_KEY,
+                            }
+                        ],
                     }
                 )
             )
@@ -519,7 +526,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                         for event in captured
                     ),
                     "retry_identical_bytes": len(attempts) > 1 and attempts[0] == attempts[1],
-                    "session_end_flushed": any(not body["is_active"] for body in accepted.values()),
+                    "captured_visible_work": any(body["events"] for body in accepted.values()),
                     "credentials_never_reach_model": CAPTURE_KEY
                     not in json.dumps(ModelStub.requests),
                     "no_hook_or_reasoning_payload": all(
