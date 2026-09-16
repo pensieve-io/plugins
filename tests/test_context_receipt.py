@@ -294,11 +294,57 @@ def test_receipt_sends_only_token_and_operation_with_timeout_and_no_redirects(mo
     assert request.full_url == receipt.DELIVERY_ENDPOINT
     assert json.loads(request.data) == {"token": TOKEN, "operation": "ack"}
     assert request.get_method() == "POST"
+    assert request.get_header("User-agent") == receipt.USER_AGENT
+    assert not request.get_header("User-agent").startswith("Python-urllib")
     assert timeout == 2
     assert (
         receipt.NoRedirects().redirect_request(None, None, 302, None, None, "https://evil.invalid")
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "failure, reason",
+    [
+        (lambda: receipt.HTTPError("url", 403, "Forbidden", {}, None), "HTTP 403"),
+        (lambda: receipt.URLError("timed out"), "URLError"),
+        (lambda: ConnectionResetError(), "ConnectionResetError"),
+    ],
+    ids=["cloudflare-403", "url-error", "connection-reset"],
+)
+def test_unaccepted_receipt_reports_only_the_failure_class_on_stderr(
+    monkeypatch, capsys, failure, reason
+):
+    class Opener:
+        def open(self, request, timeout):
+            raise failure()
+
+    monkeypatch.setattr(receipt, "build_opener", lambda *handlers: Opener())
+    assert receipt.send_receipt(TOKEN, "ack") is False
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"pensieve receipt not accepted ({reason}); briefing may repeat\n"
+    assert TOKEN not in captured.err
+    assert receipt.DELIVERY_ENDPOINT not in captured.err
+
+
+def test_accepted_receipt_writes_nothing(monkeypatch, capsys):
+    class Response:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    class Opener:
+        def open(self, request, timeout):
+            return Response()
+
+    monkeypatch.setattr(receipt, "build_opener", lambda *handlers: Opener())
+    assert receipt.send_receipt(TOKEN, "ack") is True
+    assert capsys.readouterr() == ("", "")
 
 
 @pytest.mark.parametrize(
