@@ -74,7 +74,7 @@ def private_file(path: Path, limit: int) -> bytes:
         return data
 
 
-def profiles(path: Path) -> dict[tuple[str, int], str]:
+def profiles(path: Path) -> dict[str, str]:
     try:
         value = json.loads(private_file(path, MAX_CONFIG_BYTES))
     except FileNotFoundError:
@@ -85,24 +85,20 @@ def profiles(path: Path) -> dict[tuple[str, int], str]:
         raise ValueError("unsupported capture config")
     result = {}
     for profile in value["profiles"]:
-        if not isinstance(profile, dict) or set(profile) != {"user_id", "context_id", "upload_key"}:
+        if not isinstance(profile, dict) or set(profile) != {"user_id", "upload_key"}:
             raise ValueError("invalid capture profile")
         owner = conversation_id(profile["user_id"])
-        context = profile["context_id"]
         key = profile["upload_key"]
         if (
             owner is None
-            or type(context) is not int
-            or context <= 0
             or not isinstance(key, str)
             or not 16 <= len(key) <= 4096
             or any(character.isspace() for character in key)
         ):
             raise ValueError("invalid capture profile")
-        scope = (owner, context)
-        if scope in result:
+        if owner in result:
             raise ValueError("duplicate capture profile")
-        result[scope] = key
+        result[owner] = key
     return result
 
 
@@ -175,16 +171,19 @@ def visible_text(content: object) -> str:
     return "\n".join(parts)
 
 
-def timestamp(record: dict) -> str:
-    value = record.get("timestamp")
+def aware_time(value: object) -> datetime | None:
     if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             if parsed.tzinfo is not None:
-                return parsed.isoformat()
+                return parsed
         except ValueError:
             pass
-    return datetime.now(timezone.utc).isoformat()
+    return None
+
+
+def is_code_mode_tool(name: object, namespace: object) -> bool:
+    return isinstance(name, str) and name in {"exec", "wait"} and namespace in {None, "functions"}
 
 
 def is_set_context(name: object, namespace: object = None) -> bool:
@@ -237,6 +236,27 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             item = payload.get("item")
             if (
                 payload.get("thread_id") == session
+                and payload.get("turn_id") == state.get("turn_id")
+                and isinstance(item, dict)
+                and item.get("type") == "McpToolCall"
+                and item.get("server") == "pensieve"
+                and item.get("tool") == "set_context"
+                and item.get("status") == "completed"
+                and not state.get("calls", {}).get(item.get("id"), {}).get("selection")
+            ):
+                # Nested code-mode calls have native MCP provenance even though
+                # the model-visible call is only exec/wait. Never infer a
+                # selection from JavaScript source or its combined output.
+                output = item.get("result")
+                if not isinstance(output, dict) or output.get("isError"):
+                    return []
+                text = visible_text(output.get("content"))
+                marker = parse_marker(text, client, session, "selection")
+                if marker:
+                    return [{"boundary": marker}, {"kind": "tool_result", "content": text}]
+                return [{"unknown_boundary": True}]
+            if (
+                payload.get("thread_id") == session
                 and isinstance(item, dict)
                 and item.get("type") == "UserMessage"
                 and isinstance(payload.get("turn_id"), str)
@@ -261,6 +281,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                 state.setdefault("calls", {})[call] = {
                     "selection": is_set_context(payload.get("name"), payload.get("namespace")),
                     "internal": internal,
+                    "aggregate": is_code_mode_tool(payload.get("name"), payload.get("namespace")),
                 }
             if internal:
                 return []
@@ -276,6 +297,16 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             call = state.setdefault("calls", {}).pop(payload.get("call_id"), {})
             if call.get("internal"):
                 return []
+            if call.get("aggregate"):
+                # One exec/wait result can combine calls made before and after
+                # a selection, including concurrent or yielded work. Its text
+                # has no single proven company; retain only an omission notice.
+                return [
+                    {
+                        "kind": "tool_result",
+                        "content": "[Combined code-mode tool output omitted; original remains in the host conversation]",
+                    }
+                ]
             if call.get("selection"):
                 marker = parse_marker(text, client, session, "selection")
                 if marker:
@@ -383,18 +414,16 @@ def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS segments (
             id TEXT PRIMARY KEY, owner TEXT NOT NULL, context INTEGER NOT NULL,
             activity INTEGER NOT NULL, active INTEGER NOT NULL, dirty INTEGER NOT NULL,
-            title TEXT NOT NULL DEFAULT '', retired INTEGER NOT NULL DEFAULT 0);
+            title TEXT NOT NULL DEFAULT '', retired INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT);
         CREATE TABLE IF NOT EXISTS events (
             id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, turn_group TEXT,
-            segment TEXT, body TEXT NOT NULL);
+            segment TEXT, body TEXT NOT NULL, host_timestamp INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS pending_events ON events(segment, sequence);
         CREATE TABLE IF NOT EXISTS batches (
             id TEXT PRIMARY KEY, segment TEXT UNIQUE NOT NULL, body BLOB NOT NULL,
             sha TEXT NOT NULL, activity INTEGER NOT NULL, event_ids TEXT NOT NULL);
     """)
-    if "retired" not in {row[1] for row in db.execute("PRAGMA table_info(segments)")}:
-        db.execute("ALTER TABLE segments ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
-        db.commit()
     return db
 
 
@@ -421,7 +450,11 @@ def set_activity(
         )
 
 
-def apply_item(db, state, item, identity, occurred_at, client, session, configured):
+def renewal_segment(segment: str, user_event: str) -> str:
+    return str(uuid.uuid5(uuid.UUID(segment), "renewal:" + user_event))
+
+
+def apply_item(db, state, item, identity, occurred_at, client, session, configured, host_timestamp):
     if item.get("new_turn"):
         state.update(
             candidate_segment=state.get("segment"),
@@ -432,6 +465,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             awaiting_marker=True,
             ambiguous=False,
             discard_until_prompt=False,
+            turn_occurred_at=occurred_at if host_timestamp else None,
         )
     if item.get("unknown_boundary"):
         set_activity(db, state, False, state.get("segment") or state.get("candidate_segment"))
@@ -462,7 +496,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             # A destination reached by a tool has no destination user title yet.
             state.update(title="", title_segment=None)
         state["scope"] = [owner, context]
-        if (owner, context) not in configured:
+        if context is None or owner not in configured:
             set_activity(db, state, False, previous_segment)
             state["segment"] = None
             state.update(title="", title_segment=None)
@@ -474,7 +508,21 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                     (state.get("turn_group"),),
                 )
             return
-        if previous == [owner, context] and previous_segment:
+        prior = db.execute(
+            "SELECT expires_at FROM segments WHERE id=?", (previous_segment,)
+        ).fetchone()
+        expiry = aware_time(prior[0]) if prior else None
+        turn_time = aware_time(state.get("turn_occurred_at"))
+        if (
+            marker["kind"] == "prompt"
+            and previous_segment
+            and expiry
+            and turn_time
+            and turn_time >= expiry
+        ):
+            set_activity(db, state, False, previous_segment)
+            segment = renewal_segment(previous_segment, state["turn_group"])
+        elif previous == [owner, context] and previous_segment:
             # A fresh marker restores the candidate; the prior scope alone
             # never authorizes a new user turn. Resume keeps one segment.
             segment = previous_segment
@@ -526,13 +574,14 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         "truncated": truncated or item.get("truncated", False),
     }
     db.execute(
-        "INSERT OR IGNORE INTO events(id,sequence,turn_group,segment,body) VALUES (?,?,?,?,?)",
+        "INSERT OR IGNORE INTO events(id,sequence,turn_group,segment,body,host_timestamp) VALUES (?,?,?,?,?,?)",
         (
             identity,
             state["sequence"],
             state.get("turn_group"),
             state.get("segment"),
             encoded(event).decode(),
+            int(host_timestamp),
         ),
     )
     if item["kind"] == "user":
@@ -653,8 +702,17 @@ def scan(
                         )
                 for index, item in enumerate(items):
                     identity = f"{client}:{session}:{offset}:{index}"
+                    original_time = aware_time(record.get("timestamp"))
                     apply_item(
-                        db, state, item, identity, timestamp(record), client, session, configured
+                        db,
+                        state,
+                        item,
+                        identity,
+                        (original_time or datetime.now(timezone.utc)).isoformat(),
+                        client,
+                        session,
+                        configured,
+                        original_time is not None,
                     )
             state["offset"] = handle.tell()
             # The caller commits this scan and cursor atomically while holding
@@ -677,11 +735,11 @@ def next_batch(db, segment, client, session):
         "client": client,
         "host_conversation_id": session,
         "segment_id": segment["id"],
+        "context_id": segment["context"],
         "events": [],
         "activity_seq": segment["activity"],
         "is_active": bool(segment["active"]),
         "title": segment["title"],
-        "parent_conversation_id": None,
     }
     selected = []
     for row in rows:
@@ -746,7 +804,7 @@ def checked_endpoint(endpoint: str) -> str:
     return endpoint
 
 
-def upload(batch: dict, key: str, endpoint: str, timeout: float) -> bool | str:
+def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool | str:
     request = Request(
         checked_endpoint(endpoint),
         data=batch["body"],
@@ -761,29 +819,95 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> bool | str:
             result = json.loads(response.read(4097))
     except HTTPError as exc:
         if exc.code == 410:
-            return "retired"
+            try:
+                result = json.loads(exc.read(4097))
+            except (OSError, ValueError):
+                return False
+            if (
+                isinstance(result, dict)
+                and result.get("segment_id") == batch["segment"]
+                and result.get("reason") == "expired"
+                and aware_time(result.get("expires_at")) is not None
+            ):
+                return {"status": result["reason"], "expires_at": result["expires_at"]}
+            return False
         if exc.code in {401, 403}:
             return "forbidden"
         return False
     except (OSError, URLError, ValueError):
         return False
-    return (
+    accepted = (
         isinstance(result, dict)
         and result.get("batch_id") == batch["id"]
         and result.get("batch_sha256") == batch["sha"]
         and result.get("segment_id") == batch["segment"]
         and result.get("accepted_events") == len(json.loads(batch["event_ids"]))
         and conversation_id(result.get("conversation_id")) is not None
+        and aware_time(result.get("expires_at")) is not None
     )
+    return {"status": "accepted", "expires_at": result["expires_at"]} if accepted else False
 
 
-def retire_segment(db, segment_id):
-    """A server erasure receipt destroys only this segment's local content."""
+def retire_segment(db, segment_id, expires_at):
+    """Erase old content; an expiry can preserve a proven fresh user-turn suffix."""
     db.execute("BEGIN IMMEDIATE")
+    state = load_state(db)
+    expiry = aware_time(expires_at)
+    if expiry:
+        rows = db.execute(
+            "SELECT id,sequence,body,host_timestamp FROM events WHERE segment=? ORDER BY sequence",
+            (segment_id,),
+        ).fetchall()
+        fresh = next(
+            (
+                row
+                for row in rows
+                if row["host_timestamp"]
+                and (event := json.loads(row["body"]))["kind"] == "user"
+                and (occurred := aware_time(event["occurred_at"])) is not None
+                and occurred >= expiry
+            ),
+            None,
+        )
+        if fresh:
+            old = db.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
+            replacement = renewal_segment(segment_id, fresh["id"])
+            title = json.loads(fresh["body"])["content"][:200]
+            state["activity"] += 1
+            db.execute(
+                "INSERT OR IGNORE INTO segments(id,owner,context,activity,active,dirty,title) VALUES (?,?,?,?,?,1,?)",
+                (
+                    replacement,
+                    old["owner"],
+                    old["context"],
+                    state["activity"],
+                    old["active"],
+                    title,
+                ),
+            )
+            db.execute(
+                "UPDATE events SET segment=? WHERE segment=? AND sequence>=?",
+                (replacement, segment_id, fresh["sequence"]),
+            )
+            for name in ("segment", "candidate_segment", "title_segment"):
+                if state.get(name) == segment_id:
+                    state[name] = replacement
+            if state.get("title_segment") == replacement:
+                state["title"] = title
+        # A prompt checkpoint may precede its concurrent hook receipt. Preserve
+        # that fresh provisional turn so its own receipt can still authorize it.
+        turn_time = aware_time(state.get("turn_occurred_at"))
+        if (
+            state.get("candidate_segment") == segment_id
+            and state.get("awaiting_marker")
+            and not state.get("ambiguous")
+            and turn_time
+            and turn_time >= expiry
+        ):
+            state.update(candidate_segment=None, candidate_scope=None)
     db.execute("DELETE FROM events WHERE segment=?", (segment_id,))
     db.execute("DELETE FROM batches WHERE segment=?", (segment_id,))
     db.execute("UPDATE segments SET retired=1,active=0,dirty=0,title='' WHERE id=?", (segment_id,))
-    state = load_state(db)
     if state.get("title_segment") == segment_id:
         state.update(title="", title_segment=None)
     if state.get("segment") == segment_id or state.get("candidate_segment") == segment_id:
@@ -811,7 +935,7 @@ def flush(db, configured, client, session, endpoint, deadline):
         ).fetchall()
         for segment in segments:
             scope = (segment["owner"], segment["context"])
-            key = configured.get(scope)
+            key = configured.get(segment["owner"])
             remaining = deadline - time.monotonic()
             if key is None or scope in denied or remaining < 0.05:
                 continue
@@ -819,16 +943,24 @@ def flush(db, configured, client, session, endpoint, deadline):
             if batch is None:
                 continue
             outcome = upload(batch, key, endpoint, min(0.65, remaining))
-            if outcome == "retired":
-                retire_segment(db, segment["id"])
+            if isinstance(outcome, dict) and outcome["status"] == "expired":
+                retire_segment(
+                    db,
+                    segment["id"],
+                    outcome["expires_at"],
+                )
                 progressed = True
                 continue
             if outcome == "forbidden":
                 denied.add(scope)
                 continue
-            if outcome is not True:
+            if not isinstance(outcome, dict) or outcome["status"] != "accepted":
                 return
             db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE segments SET expires_at=? WHERE id=?",
+                (outcome["expires_at"], segment["id"]),
+            )
             for identity in json.loads(batch["event_ids"]):
                 db.execute("DELETE FROM events WHERE id=?", (identity,))
             db.execute("DELETE FROM batches WHERE id=?", (batch["id"],))
@@ -881,6 +1013,30 @@ def run_hook(
     try:
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
+        disabled = any(
+            scope is not None and scope[0] not in configured
+            for scope in (state.get("scope"), state.get("candidate_scope"))
+        )
+        if disabled:
+            # Consent is per account; another enabled account grants no upload rights.
+            set_activity(db, state, False, state.get("segment") or state.get("candidate_segment"))
+            state.update(
+                segment=None,
+                candidate_segment=None,
+                candidate_scope=None,
+                awaiting_marker=False,
+                ambiguous=True,
+                title="",
+                title_segment=None,
+            )
+        fingerprints = {
+            owner: hashlib.sha256(key.encode()).hexdigest() for owner, key in configured.items()
+        }
+        previous_fingerprints = state.get("profile_keys")
+        if previous_fingerprints is not None and previous_fingerprints != fingerprints:
+            set_activity(db, state, False, state.get("segment") or state.get("candidate_segment"))
+            state["capture_paused"] = True
+        state["profile_keys"] = fingerprints
         if state.pop("capture_paused", False):
             state.update(
                 offset=None,
@@ -893,6 +1049,7 @@ def run_hook(
                 title="",
                 title_segment=None,
                 calls={},
+                discard_until_prompt=True,
             )
         path = payload.get("transcript_path")
         if isinstance(path, str):

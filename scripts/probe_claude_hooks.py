@@ -65,6 +65,7 @@ class ModelStub(BaseHTTPRequestHandler):
                     "batch_sha256": hashlib.sha256(raw).hexdigest(),
                     "conversation_id": "c73e0b53-8178-4a3c-8d40-a07414144741",
                     "segment_id": body["segment_id"],
+                    "expires_at": "2026-12-31T00:00:00+00:00",
                     "accepted_events": len(body["events"]),
                 }
             )
@@ -341,9 +342,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                 json.dumps(
                     {
                         "version": 1,
-                        "profiles": [
-                            {"user_id": CAPTURE_OWNER, "context_id": 497, "upload_key": CAPTURE_KEY}
-                        ],
+                        "profiles": [{"user_id": CAPTURE_OWNER, "upload_key": CAPTURE_KEY}],
                     }
                 )
             )

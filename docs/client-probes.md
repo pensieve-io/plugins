@@ -78,6 +78,7 @@ preserves `events.jsonl` and `stderr.txt` for distinguishing delivery from exit.
 python3 scripts/probe_codex_hooks.py --persist --capture --output /tmp/pensieve-capture-start
 python3 scripts/probe_codex_hooks.py --persist --capture --resume ID --capture-state /tmp/pensieve-capture-start/capture-spool --output /tmp/pensieve-capture-resume
 python3 scripts/probe_codex_hooks.py --persist --capture --compact --output /tmp/pensieve-capture-compact
+python3 scripts/probe_codex_hooks.py --persist --capture --context-switch code-mode --output /tmp/pensieve-capture-switch
 ```
 
 Use the first command's returned thread ID in the second. Six capture assertions
@@ -86,6 +87,14 @@ flush, credential exclusion, internal-payload exclusion and distinct identities.
 Actual start/resume uploads used the same one segment for two distinct user
 turns. The compaction run also passed. No real upload key or hosted capture
 service is used by these probes.
+
+The context-switch variant calls an ordinary source-context tool and then
+`set_context` in one code-mode wrapper. It checks destination attribution and
+that combined output does not cross context boundaries. On 16 September 2026,
+the installed Codex 0.154.0 recorded the correct native selection boundary and
+destination answer in the local spool, but timed out before turn completion and
+upload retry. That run is partial evidence, not a passing native acceptance
+result. The Claude capture probe passed again with the account-scoped setup.
 
 Codex 0.154.0 persists visible user turns as `event_msg` / `item_completed`
 records whose `item.type` is `UserMessage`; they carry thread and turn IDs and

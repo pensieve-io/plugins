@@ -120,8 +120,10 @@ keeps its own selection.
 
 The context hooks send delivery receipts for the briefing the client received.
 Optional [work conversation capture](docs/conversation-capture.md) is off by
-default. It requires an upload-only key configured privately for the intended
-member and company; ordinary plugin installation uploads no conversation text.
+default. Enable it with the bundled `scripts/capture_setup.py enable` command. It saves
+new work to the selected context, automatically shared with its members; ordinary
+plugin installation uploads no conversation text. Setup lives in the plugin,
+with no in-app conversation settings page.
 
 ## Other ways to use the skills
 

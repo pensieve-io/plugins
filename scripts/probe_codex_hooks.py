@@ -59,7 +59,7 @@ def mcp_server(output: Path) -> None:
                         },
                         "annotations": {"readOnlyHint": True},
                     }
-                    for name in ("context_briefing", "ordinary")
+                    for name in ("context_briefing", "ordinary", "set_context")
                 ]
             }
         elif method == "tools/call":
@@ -70,6 +70,24 @@ def mcp_server(output: Path) -> None:
             if source := params.get("arguments", {}).get("source"):
                 marker += "_" + source.upper()
             result = {"content": [{"type": "text", "text": marker}]}
+            if params["name"] == "ordinary":
+                result["content"][0]["text"] += " SOURCE_CONTEXT_SENTINEL"
+            if params["name"] == "set_context":
+                result["content"][0]["text"] = (
+                    "DESTINATION_CONTEXT_SENTINEL\n<!-- pensieve-capture-context "
+                    + json.dumps(
+                        {
+                            "v": 1,
+                            "kind": "selection",
+                            "user_id": CAPTURE_OWNER,
+                            "client": "codex",
+                            "conversation_id": params["_meta"]["threadId"],
+                            "context_id": 12,
+                            "turn_id": None,
+                        }
+                    )
+                    + " -->"
+                )
             if params["name"] == "context_briefing":
                 args = params.get("arguments", {})
                 context_marker = ""
@@ -113,6 +131,7 @@ def run_probe(
     compact: bool = False,
     capture: bool = False,
     capture_state: Path | None = None,
+    context_switch: str | None = None,
 ) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=False)
     workspace = output / "workspace"
@@ -121,6 +140,7 @@ def run_probe(
     shutil.copytree(Path(__file__).resolve().parents[1] / "pensieve", plugin)
     sequence = 0
     capture_attempts = []
+    capture_batch_scopes = {}
     capture_config = output / "capture-config.json"
     if capture:
         if not persist:
@@ -129,9 +149,7 @@ def run_probe(
             json.dumps(
                 {
                     "version": 1,
-                    "profiles": [
-                        {"user_id": CAPTURE_OWNER, "context_id": 497, "upload_key": CAPTURE_KEY}
-                    ],
+                    "profiles": [{"user_id": CAPTURE_OWNER, "upload_key": CAPTURE_KEY}],
                 }
             )
         )
@@ -155,10 +173,17 @@ def run_probe(
             request = json.loads(raw)
             if self.path == "/hooks/conversations":
                 assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
+                scope = request["context_id"]
+                assert scope in {497, 12}
+                capture_batch_scopes[request["batch_id"]] = scope
                 capture_attempts.append((request, hashlib.sha256(raw).hexdigest()))
                 append(
                     output / "capture.jsonl",
-                    {"body": request, "sha256": hashlib.sha256(raw).hexdigest()},
+                    {
+                        "body": request,
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "context_id": scope,
+                    },
                 )
                 if len(capture_attempts) == 1:
                     self.send_response(503)
@@ -170,6 +195,7 @@ def run_probe(
                         "batch_sha256": hashlib.sha256(raw).hexdigest(),
                         "conversation_id": "c73e0b53-8178-4a3c-8d40-a07414144741",
                         "segment_id": request["segment_id"],
+                        "expires_at": "2026-12-31T00:00:00+00:00",
                         "accepted_events": len(request["events"]),
                     }
                 ).encode()
@@ -197,24 +223,42 @@ def run_probe(
                     "markers": markers,
                     "local_primer_delivered": "Pensieve is the company's shared, curated context layer"
                     in json.dumps(items),
-                    "capture_key_in_model": CAPTURE_KEY in json.dumps(items),
+                    "capture_key_in_model": any(key in json.dumps(items) for key in (CAPTURE_KEY,)),
                 },
             )
-            has_result = any(item.get("type") == "function_call_output" for item in items)
+            has_result = any(
+                item.get("type") in {"function_call_output", "custom_tool_call_output"}
+                for item in items
+            )
             if not has_result and (not compact or sequence == 1):
                 item = {
                     "type": "function_call",
                     "call_id": "probe-ordinary",
                     "namespace": "mcp__pensieve",
-                    "name": "ordinary",
+                    "name": "set_context" if context_switch else "ordinary",
                     "arguments": "{}",
                 }
+                if context_switch == "code-mode":
+                    item = {
+                        "type": "custom_tool_call",
+                        "call_id": "probe-wrapper",
+                        "namespace": "functions",
+                        "name": "exec",
+                        "input": "text(await tools.mcp__pensieve__ordinary({})); text(await tools.mcp__pensieve__set_context({}));",
+                    }
             else:
                 item = {
                     "type": "message",
                     "role": "assistant",
                     "id": "probe-answer",
-                    "content": [{"type": "output_text", "text": "Synthetic probe complete."}],
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "DESTINATION_ANSWER_SENTINEL"
+                            if context_switch
+                            else "Synthetic probe complete.",
+                        }
+                    ],
                 }
             events = [
                 {"type": "response.created", "response": {"id": f"probe-{sequence}"}},
@@ -282,7 +326,7 @@ def run_probe(
         },
         "hooks": hooks,
         "features.hooks": True,
-        "features.code_mode": False,
+        "features.code_mode": context_switch == "code-mode",
         "features.apps": False,
         "features.memories": False,
         "features.shell_snapshot": False,
@@ -382,6 +426,42 @@ def run_probe(
             "stable_distinct_events": len({event["event_id"] for event in captured})
             == len(captured),
         }
+        if context_switch:
+            source_events = [
+                event
+                for batch in accepted.values()
+                if capture_batch_scopes[batch["batch_id"]] == 497
+                for event in batch["events"]
+            ]
+            destination_events = [
+                event
+                for batch in accepted.values()
+                if capture_batch_scopes[batch["batch_id"]] == 12
+                for event in batch["events"]
+            ]
+            capture_checks.pop("prompt_and_answer_captured")
+            capture_checks.update(
+                {
+                    "source_prompt_consent": any(
+                        event["kind"] == "user" for event in source_events
+                    ),
+                    "destination_answer_consent": any(
+                        event["content"] == "DESTINATION_ANSWER_SENTINEL"
+                        for event in destination_events
+                    ),
+                    "company_isolation": "DESTINATION_" not in json.dumps(source_events)
+                    and "SOURCE_CONTEXT_SENTINEL" not in json.dumps(destination_events),
+                    "selection_result_once": sum(
+                        "DESTINATION_CONTEXT_SENTINEL" in event["content"]
+                        for event in destination_events
+                    )
+                    == 1,
+                }
+            )
+            if context_switch == "code-mode":
+                capture_checks["combined_output_omitted"] = (
+                    "SOURCE_CONTEXT_SENTINEL" not in json.dumps(captured)
+                )
         if not all(capture_checks.values()):
             raise RuntimeError("Codex capture probe failed: " + json.dumps(capture_checks))
     return {
@@ -405,6 +485,7 @@ if __name__ == "__main__":
     parser.add_argument("--compact", action="store_true")
     parser.add_argument("--capture", action="store_true")
     parser.add_argument("--capture-state", type=Path)
+    parser.add_argument("--context-switch", choices=("direct", "code-mode"))
     args = parser.parse_args()
     if args.mcp:
         mcp_server(args.mcp)
@@ -421,6 +502,7 @@ if __name__ == "__main__":
                     compact=args.compact,
                     capture=args.capture,
                     capture_state=args.capture_state,
+                    context_switch=args.context_switch,
                 ),
                 indent=2,
             )

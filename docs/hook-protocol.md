@@ -50,8 +50,11 @@ authentication and conversation selection without importing client code.
 ## Optional conversation capture
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-The helper uses a private local upload-only key, issued by the authenticated
-Pensieve UI for one member/context. It never reads OAuth credentials.
+The helper uses a private local upload-only key, issued through authenticated
+HTTP by the bundled setup command for one account. The hook never reads OAuth
+credentials. Setup uses its own ephemeral browser PKCE grant; it never reads the
+host grant. Every upload includes its attributed `context_id`, checked against
+current membership, and the stored portion is readable by all context members.
 
 At every `UserPromptSubmit`, including an unchanged briefing, the service emits
 one terminal, non-secret marker in accepted hook context:
@@ -75,7 +78,7 @@ run concurrently, so a checkpoint can be completed by the following hook.
 Uploads use `POST https://mcp.pensieve.uk/hooks/conversations` with the key in
 `Authorization: Bearer`. A batch carries `batch_id`, `client`,
 `host_conversation_id`, `segment_id`, `events`, `activity_seq`, `is_active`,
-`title`, and nullable `parent_conversation_id`. Every event has `event_id`,
+`title`, and the attributed `context_id`. Every event has `event_id`,
 `sequence`, `revision`, `kind`, `content`, `occurred_at` and `truncated`.
 The helper treats committed source positions as immutable events (revision 1).
 Server revision fencing also supports later producer revisions.
@@ -83,9 +86,11 @@ Server revision fencing also supports later producer revisions.
 Limits are 100 events, 32,000 characters per event and 262,144 bytes for the exact
 UTF-8 JSON request. Empty event lists carry lifecycle state. A successful HTTP
 200 receipt must match `batch_id`, `batch_sha256` of the exact raw request,
-`segment_id`, and `accepted_events`, and include a valid `conversation_id`.
+`segment_id`, and `accepted_events`, and include a valid `conversation_id` and fixed `expires_at`.
 Retries preserve the original batch bytes. A failed or mismatched receipt does
 not remove pending events. HTTP 401/403 retains the denied scope's backlog and
 allows other configured scopes to proceed; HTTP 410 securely removes the
-retired segment's content and retains a local tombstone. See
+expired segment's old content and retains a local tombstone. A scoped expiry
+response carries `reason: expired`, `segment_id` and `expires_at`; only a proven
+fresh post-expiry user-turn suffix can roll into a new segment. See
 [capture setup and boundaries](conversation-capture.md).

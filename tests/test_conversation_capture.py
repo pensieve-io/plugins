@@ -18,6 +18,9 @@ OTHER_OWNER = "173e0b53-8178-4a3c-8d40-a07414144741"
 KEY = "synthetic-upload-key-owner-one"
 OTHER_KEY = "synthetic-upload-key-owner-two"
 NOW = "2026-09-15T10:00:00+00:00"
+EXPIRY = "2026-12-14T10:00:00+00:00"
+ACCEPTED = {"status": "accepted", "expires_at": EXPIRY}
+EXPIRED = {"status": "expired", "expires_at": EXPIRY}
 
 
 def marker(client="codex", owner=OWNER, context=497, kind="prompt", turn=None, session=SESSION):
@@ -109,7 +112,7 @@ def config(tmp_path, profiles=None):
                 "version": 1,
                 "profiles": profiles
                 if profiles is not None
-                else [{"user_id": OWNER, "context_id": 497, "upload_key": KEY}],
+                else [{"user_id": OWNER, "upload_key": KEY}],
             }
         )
     )
@@ -129,7 +132,7 @@ def setup(tmp_path, monkeypatch, client="codex", prior=(), profiles=None):
 
     def send(batch, key, endpoint, timeout):
         calls.append((dict(batch), key))
-        return True
+        return ACCEPTED
 
     monkeypatch.setattr(capture, "upload", send)
 
@@ -258,8 +261,8 @@ def test_codex_turn_identity_must_match_prompt_marker(tmp_path, monkeypatch):
 
 def test_account_and_context_switches_use_only_matching_configured_keys(tmp_path, monkeypatch):
     profiles = [
-        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "context_id": 12, "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(path, user("Owner one"), hook_record(), assistant("First answer"))
@@ -279,19 +282,21 @@ def test_account_and_context_switches_use_only_matching_configured_keys(tmp_path
     assert by_key[KEY]["segment_id"] != by_key[OTHER_KEY]["segment_id"]
 
 
-def test_unconfigured_context_and_null_selection_are_capture_off(tmp_path, monkeypatch):
+def test_unconfigured_account_and_null_selection_are_capture_off(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    append(path, user("Other scope"), hook_record(context=12), assistant("Other scope answer"))
+    append(
+        path,
+        user("Other scope"),
+        hook_record(owner=OTHER_OWNER, context=12),
+        assistant("Other scope answer"),
+    )
     append(path, user("No context"), hook_record(context=None), assistant("No context answer"))
     run()
     assert not calls and pending(state) == 0
 
 
 def test_set_context_output_is_assigned_to_new_context_before_result_capture(tmp_path, monkeypatch):
-    profiles = [
-        {"user_id": OWNER, "context_id": context, "upload_key": KEY + str(context)}
-        for context in [497, 12]
-    ]
+    profiles = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(
         path,
@@ -318,10 +323,12 @@ def test_set_context_output_is_assigned_to_new_context_before_result_capture(tmp
         assistant("Second company answer"),
     )
     run()
-    by_key = {key: json.loads(batch["body"]) for batch, key in calls}
-    assert [event["kind"] for event in by_key[KEY + "497"]["events"]] == ["user", "tool_call"]
-    assert [event["kind"] for event in by_key[KEY + "12"]["events"]] == ["tool_result", "assistant"]
-    assert "Second company overview" in by_key[KEY + "12"]["events"][0]["content"]
+    by_key = {
+        json.loads(batch["body"])["context_id"]: json.loads(batch["body"]) for batch, key in calls
+    }
+    assert [event["kind"] for event in by_key[497]["events"]] == ["user", "tool_call"]
+    assert [event["kind"] for event in by_key[12]["events"]] == ["tool_result", "assistant"]
+    assert "Second company overview" in by_key[12]["events"][0]["content"]
     assert "pensieve-capture-context" not in str(events(calls))
 
 
@@ -426,7 +433,7 @@ def test_failed_upload_retries_identical_bytes_before_removing_events(tmp_path, 
     monkeypatch.setattr(
         capture,
         "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or ACCEPTED,
     )
     run()
     assert calls[1][0]["body"] == original["body"]
@@ -450,7 +457,7 @@ def test_end_backlog_cannot_overwrite_newer_resume_activity(tmp_path, monkeypatc
     monkeypatch.setattr(
         capture,
         "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or ACCEPTED,
     )
     run("SessionStart")
     resumed = json.loads(calls[-1][0]["body"])
@@ -591,7 +598,11 @@ def test_switch_marks_previous_segment_inactive(tmp_path, monkeypatch):
     old = json.loads(calls[-1][0]["body"])
     append(path, user("Different company"), hook_record(context=12), assistant("Unconfigured"))
     run()
-    ended = json.loads(calls[-1][0]["body"])
+    ended = next(
+        json.loads(batch["body"])
+        for batch, _ in reversed(calls)
+        if json.loads(batch["body"])["segment_id"] == old["segment_id"]
+    )
     assert ended["segment_id"] == old["segment_id"]
     assert ended["is_active"] is False and ended["activity_seq"] > old["activity_seq"]
     assert ended["events"] == []
@@ -643,7 +654,7 @@ def test_missing_transcript_still_flushes_previously_durable_outbox(tmp_path, mo
     monkeypatch.setattr(
         capture,
         "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or ACCEPTED,
     )
     with pytest.raises(FileNotFoundError):
         run("SessionEnd")
@@ -658,7 +669,7 @@ def test_server_erasure_retires_old_work_and_next_fresh_prompt_uses_new_segment(
     monkeypatch.setattr(
         capture,
         "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or "retired",
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or EXPIRED,
     )
     run()
     old = json.loads(calls[0][0]["body"])["segment_id"]
@@ -674,7 +685,7 @@ def test_server_erasure_retires_old_work_and_next_fresh_prompt_uses_new_segment(
     monkeypatch.setattr(
         capture,
         "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or ACCEPTED,
     )
     run()
     assert not calls
@@ -687,10 +698,7 @@ def test_server_erasure_retires_old_work_and_next_fresh_prompt_uses_new_segment(
 
 
 def test_revoked_scope_does_not_block_another_configured_context(tmp_path, monkeypatch):
-    prof = [
-        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
-        {"user_id": OWNER, "context_id": 12, "upload_key": OTHER_KEY},
-    ]
+    prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -703,10 +711,10 @@ def test_revoked_scope_does_not_block_another_configured_context(tmp_path, monke
     )
 
     def send(batch, key, endpoint, timeout):
-        if key == KEY:
+        if json.loads(batch["body"])["context_id"] == 497:
             return "forbidden"
         calls.append((dict(batch), key))
-        return True
+        return ACCEPTED
 
     monkeypatch.setattr(capture, "upload", send)
     run()
@@ -727,10 +735,7 @@ def test_codex_nonvisible_assistant_channels_are_excluded(tmp_path, monkeypatch,
 
 
 def test_retiring_old_context_does_not_clear_new_context_attribution(tmp_path, monkeypatch):
-    prof = [
-        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
-        {"user_id": OWNER, "context_id": 12, "upload_key": OTHER_KEY},
-    ]
+    prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
@@ -743,10 +748,10 @@ def test_retiring_old_context_does_not_clear_new_context_attribution(tmp_path, m
     )
 
     def send(batch, key, endpoint, timeout):
-        if key == KEY:
-            return "retired"
+        if json.loads(batch["body"])["context_id"] == 497:
+            return EXPIRED
         calls.append((dict(batch), key))
-        return True
+        return ACCEPTED
 
     monkeypatch.setattr(capture, "upload", send)
     run()
@@ -783,7 +788,7 @@ def test_disabling_and_reenabling_never_backfills_disabled_history(tmp_path, mon
     monkeypatch.setattr(
         capture,
         "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or ACCEPTED,
     )
     run()
     assert [event["content"] for event in events(calls)] == [
@@ -811,7 +816,7 @@ def test_full_spool_still_retries_previously_committed_upload(tmp_path, monkeypa
     monkeypatch.setattr(
         capture,
         "upload",
-        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or True,
+        lambda batch, key, endpoint, timeout: calls.append((dict(batch), key)) or ACCEPTED,
     )
     for _ in range(30):
         try:
@@ -825,8 +830,8 @@ def test_full_spool_still_retries_previously_committed_upload(tmp_path, monkeypa
 
 def test_selection_destination_never_inherits_previous_owner_title(tmp_path, monkeypatch):
     prof = [
-        {"user_id": OWNER, "context_id": 497, "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "context_id": 12, "upload_key": OTHER_KEY},
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
     ]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
@@ -864,7 +869,9 @@ def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_pat
     cfg = config(tmp_path)
     state = tmp_path / "spool"
     calls = []
-    monkeypatch.setattr(capture, "upload", lambda batch, *args: calls.append(dict(batch)) or True)
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, *args: calls.append(dict(batch)) or ACCEPTED
+    )
     payload = {
         "session_id": SESSION,
         "hook_event_name": "SessionStart",
@@ -946,3 +953,257 @@ def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
     )
     run()
     assert [event["kind"] for event in events(calls)] == ["user", "assistant"]
+
+
+def native_selection(context=12, turn="turn-one", call_id="nested-call", server="pensieve"):
+    return {
+        "type": "event_msg",
+        "timestamp": NOW,
+        "payload": {
+            "type": "item_completed",
+            "thread_id": SESSION,
+            "turn_id": turn,
+            "item": {
+                "type": "McpToolCall",
+                "id": call_id,
+                "server": server,
+                "tool": "set_context",
+                "status": "completed",
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Destination company result "
+                            + marker(context=context, kind="selection"),
+                        }
+                    ]
+                },
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("wrapper", ["exec", "wait"])
+def test_codex_native_selection_fences_combined_code_mode_output(tmp_path, monkeypatch, wrapper):
+    prof = [{"user_id": OWNER, "upload_key": KEY}]
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
+    append(
+        path,
+        {"type": "turn_context", "payload": {"turn_id": "turn-one"}},
+        user("Original company prompt"),
+        hook_record(turn="turn-one"),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "wrapper",
+                "namespace": "functions",
+                "name": wrapper,
+            },
+        },
+        native_selection(),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "wrapper",
+                "output": "Original company secret and destination company secret",
+            },
+        },
+        assistant("Destination company answer"),
+    )
+    run()
+    original = [
+        event
+        for batch, key in calls
+        if json.loads(batch["body"])["context_id"] == 497
+        for event in json.loads(batch["body"])["events"]
+    ]
+    destination = [
+        event
+        for batch, key in calls
+        if json.loads(batch["body"])["context_id"] == 12
+        for event in json.loads(batch["body"])["events"]
+    ]
+    assert "Destination company" not in json.dumps(original)
+    assert "Original company" not in json.dumps(destination)
+    assert "company secret" not in json.dumps(events(calls))
+    assert any("tool output omitted" in event["content"] for event in destination)
+    assert destination[-1]["content"] == "Destination company answer"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("server", "other-server"), ("thread_id", "other-thread"), ("turn_id", "other-turn")],
+)
+def test_native_selection_requires_host_and_pensieve_provenance(
+    tmp_path, monkeypatch, field, value
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    selection = native_selection()
+    target = selection["payload"]["item"] if field == "server" else selection["payload"]
+    target[field] = value
+    append(
+        path,
+        {"type": "turn_context", "payload": {"turn_id": "turn-one"}},
+        user(),
+        hook_record(turn="turn-one"),
+        selection,
+        assistant(),
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+
+
+def test_removing_one_profile_excludes_its_disabled_interval_and_keeps_old_backlog(
+    tmp_path, monkeypatch
+):
+    prof = [
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
+    ]
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
+    append(path, user("Consented prompt"), hook_record(), assistant("Consented answer"))
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    run()
+    cfg.write_text(json.dumps({"version": 1, "profiles": prof[1:]}))
+    run()  # Observe the per-profile removal before the disabled text exists.
+    append(path, assistant("Disabled interval answer"))
+    run()
+    cfg.write_text(json.dumps({"version": 1, "profiles": prof}))
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == ["Consented prompt", "Consented answer"]
+    append(path, assistant("Still no fresh consent marker"))
+    run()
+    append(path, user("Fresh prompt"), hook_record(), assistant("Fresh answer"))
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Consented prompt",
+        "Consented answer",
+        "Fresh prompt",
+        "Fresh answer",
+    ]
+
+
+def at(record, timestamp):
+    return {**record, "timestamp": timestamp}
+
+
+def test_known_expiry_rotates_at_the_next_fresh_user_turn(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user("Original prompt"), hook_record(), assistant())
+    run()
+    original = json.loads(calls[0][0]["body"])["segment_id"]
+    append(
+        path,
+        at(user("New prompt after expiry"), "2026-12-15T10:00:00+00:00"),
+        hook_record(),
+        assistant("New answer"),
+    )
+    run()
+    fresh = [
+        json.loads(batch["body"])
+        for batch, key in calls
+        if any(
+            e["content"] == "New prompt after expiry" for e in json.loads(batch["body"])["events"]
+        )
+    ]
+    assert fresh and all(batch["segment_id"] != original for batch in fresh)
+    assert all("parent_conversation_id" not in json.loads(batch["body"]) for batch, key in calls)
+
+
+@pytest.mark.parametrize("valid_host_time", [True, False])
+def test_lost_receipt_expiry_preserves_only_proven_fresh_unacknowledged_turns(
+    tmp_path, monkeypatch, valid_host_time
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    attempts = []
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, *args: attempts.append(dict(batch)) or False
+    )
+    append(path, user("Old prompt"), hook_record(), assistant("Old answer"))
+    run()
+    old_batch = attempts[0]
+    fresh_user = user("Fresh prompt after expiry")
+    if valid_host_time:
+        fresh_user["timestamp"] = "2026-12-15T10:00:00+00:00"
+    else:
+        fresh_user.pop("timestamp")
+    append(path, fresh_user, hook_record(), assistant("Fresh answer"))
+    # Scan the fresh turn into the queue while the original immutable batch is
+    # still pending, modelling an ACK lost before the server's retention sweep.
+    run()
+    db = sqlite3.connect(next(state.glob("*.sqlite3")))
+    original_events = [
+        json.loads(row[0]) for row in db.execute("SELECT body FROM events ORDER BY sequence")
+    ]
+    db.close()
+
+    def send(batch, key, *args):
+        if batch["segment"] == old_batch["segment"]:
+            assert batch["body"] == old_batch["body"]
+            return {"status": "expired", "expires_at": EXPIRY}
+        calls.append((dict(batch), key))
+        return {"status": "accepted", "expires_at": "2027-03-15T10:00:00+00:00"}
+
+    monkeypatch.setattr(capture, "upload", send)
+    run()
+    if valid_host_time:
+        assert events(calls) == original_events[2:]
+        append(path, assistant("More fresh work"))
+        run()
+        assert events(calls)[-1]["content"] == "More fresh work"
+    else:
+        assert not calls
+    assert pending(state) == 0
+
+
+def test_expiry_does_not_discard_a_fresh_prompt_awaiting_its_hook_marker(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user("Old prompt"), hook_record(), assistant())
+    run()
+    append(path, at(user("Fresh awaiting prompt"), "2026-12-15T10:00:00+00:00"))
+    monkeypatch.setattr(
+        capture, "upload", lambda *args: {"status": "expired", "expires_at": EXPIRY}
+    )
+    run("UserPromptSubmit")
+    append(path, hook_record(), assistant("Fresh response"))
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Fresh awaiting prompt",
+        "Fresh response",
+    ]
+
+
+def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediate_hook(
+    tmp_path, monkeypatch
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user("Enabled prompt"), hook_record(), assistant("Enabled answer"))
+    run()
+    cfg.write_text(json.dumps({"version": 1, "profiles": []}))
+    append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
+    cfg.write_text(
+        json.dumps({"version": 1, "profiles": [{"user_id": OWNER, "upload_key": OTHER_KEY}]})
+    )
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == ["Enabled prompt", "Enabled answer"]
+    append(path, user("Reenabled prompt"), hook_record(), assistant("Reenabled answer"))
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Enabled prompt",
+        "Enabled answer",
+        "Reenabled prompt",
+        "Reenabled answer",
+    ]
