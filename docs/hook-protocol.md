@@ -47,6 +47,10 @@ Both repositories test their side of this contract. Client receipt/probe tests
 live here; the server repository tests forced recovery, receipt fencing,
 authentication and conversation selection without importing client code.
 
+Both HTTP helpers identify themselves as `Pensieve-Plugin/1.0`. Production's
+edge rejects urllib's generic default user agent before requests reach these
+routes; explicit identification applies to delivery receipts and capture uploads.
+
 ## Optional conversation capture
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.

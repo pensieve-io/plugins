@@ -25,7 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from context_receipt import accepted_contexts, conversation_id
+from context_receipt import USER_AGENT, accepted_contexts, conversation_id
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
 CONFIG_PATH = Path.home() / ".config/pensieve/capture.json"
@@ -840,7 +840,11 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
     request = Request(
         checked_endpoint(endpoint),
         data=batch["body"],
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + key,
+            "User-Agent": USER_AGENT,
+        },
         method="POST",
     )
     opener = build_opener(ProxyHandler({}), NoRedirects())

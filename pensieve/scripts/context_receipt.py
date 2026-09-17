@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 DELIVERY_ENDPOINT = "https://mcp.pensieve.uk/hooks/delivery"
+USER_AGENT = "Pensieve-Plugin/1.0"
 MAX_TRANSCRIPT_BYTES = 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
 MAX_INPUT_BYTES = 64 * 1024
@@ -225,7 +226,7 @@ def send_receipt(token: str, operation: str, endpoint: str = DELIVERY_ENDPOINT) 
     request = Request(
         checked_endpoint(endpoint),
         data=json.dumps({"token": token, "operation": operation}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
         method="POST",
     )
     # Never forward a receipt through an environment-provided proxy or redirect.

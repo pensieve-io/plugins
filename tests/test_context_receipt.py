@@ -294,6 +294,7 @@ def test_receipt_sends_only_token_and_operation_with_timeout_and_no_redirects(mo
     assert request.full_url == receipt.DELIVERY_ENDPOINT
     assert json.loads(request.data) == {"token": TOKEN, "operation": "ack"}
     assert request.get_method() == "POST"
+    assert request.get_header("User-agent") == "Pensieve-Plugin/1.0"
     assert timeout == 2
     assert (
         receipt.NoRedirects().redirect_request(None, None, 302, None, None, "https://evil.invalid")

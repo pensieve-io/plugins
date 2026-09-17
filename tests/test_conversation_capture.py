@@ -184,6 +184,11 @@ def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch
             pass
 
         def do_POST(self):
+            # The production edge rejects urllib's generic default agent.
+            if self.headers.get("User-Agent") != "Pensieve-Plugin/1.0":
+                self.send_response(403)
+                self.end_headers()
+                return
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             batch = json.loads(raw)
             accepted.append(batch)
