@@ -436,6 +436,120 @@ def test_partial_record_retries_and_identical_messages_keep_distinct_ids(tmp_pat
     assert len(answers) == 2 and answers[0]["event_id"] != answers[1]["event_id"]
 
 
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_oversized_record_recovery_is_bounded_and_requires_fresh_attribution(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(capture, "MAX_RECORD_BYTES", 4096)
+    monkeypatch.setattr(capture, "MAX_SCAN_BYTES", 8192)
+    append(
+        path,
+        user("Before", client),
+        hook_record(client),
+        assistant("Before answer", client),
+        assistant("OVERSIZED_PRIVATE_TEXT" * 2000, client),
+        hook_record(client),  # A late receipt cannot repair the skipped turn.
+        assistant("Uncertain old answer", client),
+        user("Unmarked prompt", client),
+        assistant("Unmarked answer", client),
+        hook_record(client),
+        user("Fresh prompt", client),
+        hook_record(client, context=12),
+        assistant("Fresh answer", client),
+    )
+    db = capture.connect_state(state, client, SESSION)
+    previous = capture.load_state(db)["offset"]
+    try:
+        for _ in range(10):
+            run()
+            checkpoint = capture.load_state(db)
+            assert 0 < checkpoint["offset"] - previous <= capture.MAX_SCAN_BYTES
+            previous = checkpoint["offset"]
+            if previous == path.stat().st_size:
+                break
+        else:
+            pytest.fail("Oversized record prevented later capture")
+    finally:
+        db.close()
+    by_context = {}
+    for batch, _ in calls:
+        body = json.loads(batch["body"])
+        by_context.setdefault(body["context_id"], []).extend(
+            event["content"] for event in body["events"]
+        )
+    assert by_context == {497: ["Before", "Before answer"], 12: ["Fresh prompt", "Fresh answer"]}
+    assert pending(state) == 0
+    count = len(calls)
+    run("SessionStart")
+    run()
+    assert len(calls) == count
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_oversized_partial_record_waits_for_its_newline_without_retaining_unmarked_work(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(capture, "MAX_RECORD_BYTES", 4096)
+    append(path, user("Unmarked old prompt", client))
+    raw = json.dumps(assistant("PRIVATE" * 1000, client)).encode()
+    with path.open("ab") as output:
+        output.write(raw[:5000])
+    run()
+    assert not calls and pending(state) == 0
+    run()  # EOF does not end a record that the host is still writing.
+    with path.open("ab") as output:
+        output.write(raw[5000:] + b"\n")
+    append(
+        path,
+        hook_record(client),
+        assistant("Old answer", client),
+        user("Fresh prompt", client),
+        hook_record(client),
+        assistant("Fresh answer", client),
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_oversized_record_does_not_change_pending_retry_bytes(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path, user("Queued prompt", client), hook_record(client), assistant("Queued answer", client)
+    )
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, *args: calls.append((dict(batch), key)) or False,
+    )
+    run()
+    original = calls.pop()[0]
+    monkeypatch.setattr(
+        capture,
+        "upload",
+        lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED,
+    )
+    append(
+        path,
+        assistant("x" * capture.MAX_RECORD_BYTES, client),
+        assistant("Uncertain answer", client),
+        user("Fresh prompt", client),
+        hook_record(client),
+        assistant("Fresh answer", client),
+    )
+    run()
+    assert calls[0][0]["body"] == original["body"]
+    assert [event["content"] for event in events(calls)] == [
+        "Queued prompt",
+        "Queued answer",
+        "Fresh prompt",
+        "Fresh answer",
+    ]
+    assert pending(state) == 0
+
+
 def test_failed_upload_retries_identical_bytes_before_removing_events(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     append(path, user(), hook_record(), assistant())

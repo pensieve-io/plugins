@@ -57,8 +57,11 @@ Reasoning, system/developer instructions, hook payloads and compaction internals
 are excluded. Configured credentials and common secret patterns, including
 quoted JSON credential fields, are redacted; arbitrary prose can still contain
 secrets. Events are limited to 32,000 characters with explicit truncation;
-batches hold at most 100 events / 256 KiB. Unsupported oversized records pause
-parsing without guessing.
+batches hold at most 100 events / 256 KiB. Raw transcript records over 1 MiB
+are skipped without decoding their contents. The helper checkpoints that skip
+within its scan budget, even across hook runs, then waits for a fresh user prompt
+with its matching context marker before saving again. Earlier queued uploads
+keep their original bytes and attribution.
 
 ## Attribution and reliability
 

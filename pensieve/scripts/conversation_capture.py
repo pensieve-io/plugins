@@ -672,18 +672,40 @@ def scan(
         scanned = 0
         while scanned < MAX_SCAN_BYTES and time.monotonic() < deadline:
             offset = handle.tell()
-            line = handle.readline(MAX_RECORD_BYTES + 1)
+            line = handle.readline(min(MAX_RECORD_BYTES + 1, MAX_SCAN_BYTES - scanned))
             if not line:
                 break
-            if not line.endswith(b"\n"):
-                # An incomplete final record is retried later. Oversized raw
-                # records are also held rather than misclassifying hidden text.
-                if len(line) > MAX_RECORD_BYTES:
-                    raise ValueError(
-                        "oversized transcript record; capture paused without discarding it"
-                    )
-                break
             scanned += len(line)
+            if state.get("discarding_record") or len(line) > MAX_RECORD_BYTES:
+                if not state.get("discarding_record"):
+                    # The skipped record could contain a prompt or selection.
+                    # Keep accepted/pending work, but trust no later attribution
+                    # until a fresh user prompt receives its own marker.
+                    db.execute("DELETE FROM events WHERE segment IS NULL")
+                    state.update(
+                        segment=None,
+                        scope=None,
+                        candidate_segment=None,
+                        candidate_scope=None,
+                        awaiting_marker=False,
+                        ambiguous=True,
+                        title="",
+                        title_segment=None,
+                        calls={},
+                        turn_id=None,
+                        turn_group=None,
+                        turn_occurred_at=None,
+                        discard_until_prompt=True,
+                    )
+                # Never decode the skipped bytes. Checkpoint partial progress so
+                # even a record larger than one scan cannot wedge future turns.
+                state["discarding_record"] = not line.endswith(b"\n")
+                state["offset"] = handle.tell()
+                continue
+            if not line.endswith(b"\n"):
+                # Retry a bounded partial record when the host finishes it or
+                # the next hook has a full scan budget available.
+                break
             try:
                 record = json.loads(line)
             except (ValueError, UnicodeDecodeError):
@@ -1051,6 +1073,7 @@ def run_hook(
         if state.pop("capture_paused", False):
             state.update(
                 offset=None,
+                discarding_record=False,
                 segment=None,
                 scope=None,
                 candidate_segment=None,

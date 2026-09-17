@@ -96,7 +96,7 @@ def main():
         )
         sys.exit(1)
     print(
-        "Device configured. Manage capture in Pensieve Settings → Connected clients. Remove the downloaded setup file, then start or resume your work session."
+        "Device configured. Manage capture in Pensieve Settings → Agent transcripts. Remove the downloaded setup file, then start or resume your work session."
     )
 
 
