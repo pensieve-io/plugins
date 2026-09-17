@@ -7,7 +7,10 @@ import json
 import os
 import sqlite3
 import stat
+import threading
+import time
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import conversation_capture as capture
 import pytest
@@ -168,6 +171,68 @@ def pending(state):
         return db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     finally:
         db.close()
+
+
+def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch):
+    real_upload = capture.upload
+    path, cfg, state, _, _ = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", real_upload)
+    accepted = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            batch = json.loads(raw)
+            accepted.append(batch)
+            # Hosted receipts can take longer than the former 650 ms cap,
+            # while still fitting comfortably within an ordinary hook.
+            time.sleep(0.9)
+            body = json.dumps(
+                {
+                    "batch_id": batch["batch_id"],
+                    "batch_sha256": hashlib.sha256(raw).hexdigest(),
+                    "conversation_id": SESSION,
+                    "segment_id": batch["segment_id"],
+                    "accepted_events": len(batch["events"]),
+                    "expires_at": EXPIRY,
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for turn in ("first", "resumed"):
+            append(path, user(turn), hook_record(), assistant(turn))
+            capture.run_hook(
+                {"session_id": SESSION, "hook_event_name": "Stop", "transcript_path": str(path)},
+                "codex",
+                cfg,
+                state,
+                f"http://127.0.0.1:{server.server_port}/hooks/conversations",
+            )
+            assert pending(state) == 0
+        assert len(accepted) == 2
+        assert [event["content"] for batch in accepted for event in batch["events"]] == [
+            "first",
+            "first",
+            "resumed",
+            "resumed",
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_capture_off_does_not_read_transcript_or_create_state(tmp_path, monkeypatch):

@@ -80,6 +80,9 @@ message edit revisions or active/inactive updates. The private SQLite spool is
 bounded at 16 MiB per conversation, retaining valid unacknowledged work when
 full. Pending work retries at later hooks; there is no background daemon.
 Final work can be lost if the machine or local transcript disappears.
+Each upload may use the remaining hook budget, so ordinary hosted receipt
+latency does not pin the queue to an already accepted batch. The host deadlines
+remain unchanged; SessionEnd still uses its shorter best-effort budget.
 
 Each portion expires **90 days after its first accepted upload**; resume does
 not extend it. The server erases bodies, titles and receipts, retaining only

@@ -978,7 +978,7 @@ def flush(db, configured, client, session, endpoint, deadline):
             batch = next_batch(db, segment, client, session)
             if batch is None:
                 continue
-            outcome = upload(batch, key, endpoint, min(0.65, remaining))
+            outcome = upload(batch, key, endpoint, remaining)
             if isinstance(outcome, dict) and outcome["status"] == "capture_disabled":
                 retire_segment(db, segment["id"], None)
                 progressed = True
