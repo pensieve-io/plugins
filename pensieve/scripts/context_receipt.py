@@ -17,12 +17,16 @@ import stat
 import sys
 import uuid
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 DELIVERY_ENDPOINT = "https://mcp.pensieve.uk/hooks/delivery"
-USER_AGENT = "Pensieve-Plugin/1.0"
+# Cloudflare's Browser Integrity Check refuses Python's default urllib
+# signature outright (error 1010), which silently rejected every receipt and
+# left every briefing re-delivered on each prompt. Identify the helper instead;
+# the value carries no conversation, account or installation identity.
+USER_AGENT = "Pensieve-Plugin-Receipt/1.0"
 MAX_TRANSCRIPT_BYTES = 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
 MAX_INPUT_BYTES = 64 * 1024
@@ -233,9 +237,23 @@ def send_receipt(token: str, operation: str, endpoint: str = DELIVERY_ENDPOINT) 
     opener = build_opener(ProxyHandler({}), NoRedirects())
     try:
         with opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            return response.status == 204
-    except (OSError, URLError):
+            status = response.status
+    except HTTPError as error:
+        status = error.code
+    except (OSError, URLError) as error:
+        _report_unaccepted(type(error).__name__)
         return False
+    if status == 204:
+        return True
+    _report_unaccepted(f"HTTP {status}")
+    return False
+
+
+def _report_unaccepted(reason: str) -> None:
+    # The host records hook stderr beside the hook result, so a rejected receipt
+    # is visible in the transcript instead of only as a repeated briefing. The
+    # reason names the failure class alone: never the token, endpoint or body.
+    print(f"pensieve receipt not accepted ({reason}); briefing may repeat", file=sys.stderr)
 
 
 def run_hook(payload: dict, client: str, endpoint: str = DELIVERY_ENDPOINT) -> dict:

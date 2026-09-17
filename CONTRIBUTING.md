@@ -6,6 +6,7 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/.mcp.json`: the hosted Pensieve MCP connection, without credentials.
 - `pensieve/.claude-plugin/` and `pensieve/.codex-plugin/`: client manifests.
 - `pensieve/assets/`: bundled Pensieve branding used by supported client fields.
+- `docs/distribution.md`: canonical directory metadata, listing copy and submission checks.
 - `pensieve/hooks/`: host-specific hook adapters.
 - `pensieve/scripts/context_receipt.py`: the standard-library-only client helper.
 - `pensieve/scripts/conversation_capture.py`: opt-in visible-conversation capture,
@@ -46,12 +47,15 @@ fields. Package tests verify that advertised artwork stays inside the plugin
 and is a real PNG. The existing Claude-compatible marketplace is also accepted
 by Codex and ChatGPT workspace import, so keep one catalogue.
 
-Artwork is copied from Pensieve's existing brand files: `icon.png` from
-`frontend/apps/web/public/icon-512.png`, `logo.png` from
-`assets/branding/logos/logo-black.png`, and `logo-dark.png` from
-`assets/branding/logos/logo-white.png`. The accent colour follows the product's
-light-mode `--primary` token. Update the bundled copies deliberately when the
-brand changes; the plugin has no runtime dependency on the application checkout.
+Artwork uses `assets/branding/logos/logo-fill-grey-rounded.png` from the
+application repository, copied unchanged to `pensieve/assets/icon.png`.
+`composerIcon`, `logo` and `logoDark` all reference this one white mark on its
+own grey background. Keep the background: some client surfaces, including
+ChatGPT's plugin detail MCP row, use only `logo` even in dark mode and add no
+background of their own. The same asset must remain legible in both themes.
+The accent colour follows the product's light-mode `--primary` token. Update
+the bundled copy deliberately; the plugin has no runtime dependency on the
+application checkout.
 
 Installed Claude/Codex CLI probes use synthetic local services and no paid model
 calls. See [client-probes.md](docs/client-probes.md) and the
@@ -85,6 +89,13 @@ Keep the hooks PR in draft until these checks are complete:
 Preserve the `pensieve` marketplace, plugin and MCP server names. This package
 omits a fixed manifest version so Claude Code can use the Git revision for
 updates. Never publish credentials or install a server implementation locally.
+
+Public directory releases also follow [distribution.md](docs/distribution.md).
+Keep Claude's connector and plugin identities aligned; OpenAI takes one combined
+MCP-and-skills submission for ChatGPT and Codex. Directory imports must preserve
+the required adapter/helper and pass native hook checks before claiming the same
+automatic context behaviour as the Git package. OpenAI's imported skill snapshot
+requires a new scan or upload for updates; a Git push does not update it live.
 
 Local/synthetic package tests need no application release. Live tests against
 `mcp.pensieve.uk` require the compatible backend to be released first. A staging

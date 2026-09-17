@@ -40,18 +40,23 @@ receipts, and fences stale nonces. The token authorises only delivery bookkeepin
 it does not authorise access to company data.
 
 Receipt requests contain no transcript text, local file contents or OAuth
-credentials. A reset or missing receipt can cause a repeated briefing. Hook
-execution order and transcript writes are not assumed to be synchronous.
+credentials. They identify themselves with the fixed `User-Agent`
+`Pensieve-Plugin-Receipt/1.0`: the service sits behind Cloudflare, whose
+Browser Integrity Check rejects Python's default `Python-urllib/…` signature
+with error 1010 before the request reaches the server. A reset or missing
+receipt can cause a repeated briefing, and a receipt the service does not accept
+is reported on the helper's stderr (failure class only) so the host's hook
+record shows it. Hook execution order and transcript writes are not assumed to
+be synchronous.
 
 Both repositories test their side of this contract. Client receipt/probe tests
 live here; the server repository tests forced recovery, receipt fencing,
 authentication and conversation selection without importing client code.
 
-Both HTTP helpers identify themselves as `Pensieve-Plugin/1.0`. Production's
-edge rejects urllib's generic default user agent before requests reach these
-routes; explicit identification applies to delivery receipts and capture uploads.
-
 ## Optional conversation capture
+
+Capture requests identify themselves as `Pensieve-Plugin-Capture/1.0`, following
+the receipt helper's explicit identification so the production edge admits them.
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
 Personal Settings → Agent transcripts owns per-user consent across all clients and device
