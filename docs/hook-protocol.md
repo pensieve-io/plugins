@@ -50,7 +50,7 @@ authentication and conversation selection without importing client code.
 ## Optional conversation capture
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-Personal Settings → Connected clients owns per-user consent across all clients and device
+Personal Settings → Agent transcripts owns per-user consent across all clients and device
 keys. The setup command only imports a downloaded upload-only credential into
 private storage. It never reads OAuth credentials. Every upload checks current
 membership and the user's current enabled consent generation.

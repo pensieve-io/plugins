@@ -2,7 +2,7 @@
 
 Capture saves new visible work in Postgres for future team handoffs. It is
 **off by default**, controlled for each person in Pensieve **Settings →
-Connected clients**. One **Save agent transcripts** toggle controls all of your
+Agent transcripts**. One **Save agent transcripts** toggle controls all of your
 supported agents and devices.
 Installing or updating the plugin never opts you in.
 
@@ -16,7 +16,7 @@ same host conversation appends to its existing logical record.
 ## Set up a device
 
 1. Sign in to Pensieve with the same account used for this client's MCP login.
-2. Open personal **Settings → Connected clients**, enable **Save agent transcripts**, and choose
+2. [Open personal transcript settings](https://app.pensieve.uk/dashboard/contexts?modal=settings&settings_section=agent-transcripts), enable **Save agent transcripts**, and choose
    **Set up device**. This downloads a uniquely named JSON file with an upload-only key.
 3. In a terminal, from your installed Pensieve plugin folder, run the command
    shown in settings, using the actual downloaded file path:
