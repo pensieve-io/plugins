@@ -8,6 +8,11 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py\" --client claude",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client claude",
+            "timeout": 3
           }
         ]
       },
@@ -47,6 +52,11 @@
               "event": "${hook_event_name}"
             },
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client claude",
+            "timeout": 3
           }
         ]
       }
@@ -58,6 +68,22 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py\" --client claude",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client claude",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client claude",
+            "timeout": 1
           }
         ]
       }

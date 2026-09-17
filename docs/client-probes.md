@@ -6,6 +6,7 @@ Run from the repository root with Python 3.12 and the installed Claude Code CLI:
 
 ```sh
 python3 scripts/probe_claude_hooks.py > /tmp/pensieve-claude-probe.json
+python3 scripts/probe_claude_hooks.py --capture > /tmp/pensieve-claude-capture-probe.json
 ```
 
 Verified on 15 September 2026 with Claude Code 2.1.267. The probe uses the
@@ -18,6 +19,15 @@ conversation identity across resume and transport reconnection, grounding after
 compaction and clear, ordinary-tool metadata, failed-hook retry, and receipt
 acknowledgement/reset containing only the token and operation. Exit status zero
 requires all twelve to pass; the JSON report records each result.
+
+`--capture` adds a private synthetic upload config, durable local spool and
+loopback upload service. Eight additional assertions cover the first user turn,
+visible prompts/answers, exact-byte retry, inactivity flush, credential and
+internal-payload exclusion, distinct event identities, and one segment across
+the first prompt, resume and post-compaction prompt. All checks passed on the
+same installed version. Claude creates a fresh transcript after `SessionStart`;
+the capture helper records its proven empty baseline before that file exists.
+Claude's typed compaction summaries and local command records are excluded.
 
 ## Codex CLI
 
@@ -49,7 +59,7 @@ Installed `codex-cli 0.154.0`; matching upstream tag `rust-v0.154.0`, commit
 | Ordinary tool identity | The hook and ordinary MCP call both received `_meta.threadId`, matching Codex's durable thread identifier. They used the same MCP process. |
 | Resume | A new MCP process receives the original thread identifier, with the local primer and first-prompt briefing restored. |
 | Compaction | SessionStart with `source=compact` supplies the briefing before the next model request. |
-| Generated plugin | The real plugin reader found five hooks, the `pensieve` MCP server and all three skills using `.codex-plugin/plugin.json`. |
+| Generated plugin | The real plugin reader found nine hooks (five grounding/receipt and four capture), the `pensieve` MCP server and all three skills using `.codex-plugin/plugin.json`. |
 | Portable root manifest | Adding a valid root Agent Plugins manifest suppressed hook discovery. The portable MCP configuration still loaded; this is a hook limitation. |
 
 The runtime fixture consumes the packaged `hooks/codex.json` and bundled
@@ -58,8 +68,45 @@ receipt endpoint; the synthetic MCP server retains the packaged server/tool
 names. Matchers, inputs, timeouts and command syntax stay unchanged. The separate
 manifest probe verifies discovery; the runtime probe executes the adapters.
 The process deadline allows Codex's two 45-second shutdown waits after a
-completed turn; each packaged hook keeps its five-second deadline. A timeout
+completed turn. Grounding/receipt hooks retain five-second deadlines; capture
+uses a shorter budget, including a one-second `SessionEnd` adapter. A timeout
 preserves `events.jsonl` and `stderr.txt` for distinguishing delivery from exit.
+
+### Optional capture runtime
+
+```sh
+python3 scripts/probe_codex_hooks.py --persist --capture --output /tmp/pensieve-capture-start
+python3 scripts/probe_codex_hooks.py --persist --capture --resume ID --capture-state /tmp/pensieve-capture-start/capture-spool --output /tmp/pensieve-capture-resume
+python3 scripts/probe_codex_hooks.py --persist --capture --compact --output /tmp/pensieve-capture-compact
+python3 scripts/probe_codex_hooks.py --persist --capture --context-switch code-mode --output /tmp/pensieve-capture-switch
+```
+
+Use the first command's returned thread ID in the second. Six capture assertions
+cover visible prompts/answers, exact-byte retry after a synthetic 503, captured visible work,
+credential exclusion, internal-payload exclusion and distinct identities.
+Actual start/resume uploads used the same one segment for two distinct user
+turns. The compaction run also passed. No real upload key or hosted capture
+service is used by these probes.
+
+The context-switch variant calls an ordinary source-context tool and then
+`set_context` in one code-mode wrapper. It checks destination attribution and
+that combined output does not cross context boundaries. On 16 September 2026,
+the updated version-2 fixtures passed on installed Codex 0.154.0 for fresh
+capture, resume and code-mode context switching (all ten switch checks passed).
+Claude Code 2.1.273 passed all eight capture checks and twelve grounding/receipt
+checks, including resumed segment identity and compaction. These probes use
+synthetic services and credentials; they do not prove live personal-settings
+setup, account consent or production acceptance. On 17 September, the same
+Claude suite and Codex code-mode switch checks passed again with one
+account-scoped setup credential shared across clients.
+
+Codex 0.154.0 persists visible user turns as `event_msg` / `item_completed`
+records whose `item.type` is `UserMessage`; they carry thread and turn IDs and
+precede accepted hook context. Generic role-user `response_item` records also
+contain harness instructions and are not an accepted user source. Assistant
+capture permits visible commentary/final channels and excludes analysis and
+reasoning records. Capture requires a local `transcript_path`; `--persist` is
+therefore required for these fixtures.
 
 ### Delivery acknowledgement boundary
 

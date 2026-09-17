@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import queue
@@ -24,12 +25,15 @@ from typing import Any, ClassVar
 
 MARKER = "PENSIEVE_SYNTHETIC_GROUNDING_"
 RECEIPT_TOKEN = "a" * 64 + "." + "b" * 32
+CAPTURE_OWNER = "353e0b53-8178-4a3c-8d40-a07414144741"
+CAPTURE_KEY = "synthetic-upload-only-key-not-a-real-credential"
 
 
 class ModelStub(BaseHTTPRequestHandler):
     requests: ClassVar[list[dict[str, Any]]] = []
     mcp_requests: ClassVar[list[dict[str, Any]]] = []
     receipt_requests: ClassVar[list[dict[str, Any]]] = []
+    capture_requests: ClassVar[list[dict[str, Any]]] = []
     fail_hook: bool = False
 
     def reply_json(self, value: dict[str, Any], *, session: str | None = None) -> None:
@@ -46,7 +50,26 @@ class ModelStub(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self) -> None:
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = json.loads(raw)
+        if self.path == "/hooks/conversations":
+            assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
+            self.capture_requests.append({"body": body, "sha": hashlib.sha256(raw).hexdigest()})
+            if len(self.capture_requests) == 1:
+                self.send_response(503)
+                self.end_headers()
+                return
+            self.reply_json(
+                {
+                    "batch_id": body["batch_id"],
+                    "batch_sha256": hashlib.sha256(raw).hexdigest(),
+                    "conversation_id": "c73e0b53-8178-4a3c-8d40-a07414144741",
+                    "segment_id": body["segment_id"],
+                    "expires_at": "2026-12-31T00:00:00+00:00",
+                    "accepted_events": len(body["events"]),
+                }
+            )
+            return
         if self.path == "/hooks/delivery":
             self.receipt_requests.append(body)
             self.send_response(204)
@@ -75,10 +98,29 @@ class ModelStub(BaseHTTPRequestHandler):
             elif method == "tools/call":
                 args = body.get("params", {}).get("arguments", {})
                 event, source = args.get("event", "unknown"), args.get("source", "")
+                capture_marker = ""
+                if event == "UserPromptSubmit":
+                    capture_marker = (
+                        "\n<!-- pensieve-capture-context "
+                        + json.dumps(
+                            {
+                                "v": 2,
+                                "capture_generation": CAPTURE_OWNER,
+                                "kind": "prompt",
+                                "user_id": CAPTURE_OWNER,
+                                "client": "claude",
+                                "conversation_id": args["session_id"],
+                                "context_id": 497,
+                                "turn_id": None,
+                            }
+                        )
+                        + " -->"
+                    )
                 payload = {
                     "hookSpecificOutput": {
                         "hookEventName": event,
-                        "additionalContext": f"{MARKER}{event}_{source}\n<!-- pensieve-delivery token={RECEIPT_TOKEN} -->",
+                        "additionalContext": f"{MARKER}{event}_{source}\n<!-- pensieve-delivery token={RECEIPT_TOKEN} -->"
+                        + capture_marker,
                     }
                 }
                 result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
@@ -287,13 +329,30 @@ def stream_probe(common: list[str], env: dict[str, str], root: Path) -> list[dic
         reader.join(timeout=5)
 
 
-def run_probe(claude: str) -> dict[str, Any]:
+def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
     ModelStub.requests.clear()
     ModelStub.mcp_requests.clear()
     ModelStub.receipt_requests.clear()
+    ModelStub.capture_requests.clear()
     with tempfile.TemporaryDirectory(prefix="pensieve-claude-hooks-") as directory:
         root = Path(directory)
         plugin = root / "plugin"
+        capture_config = root / "capture.json"
+        if capture:
+            capture_config.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "profiles": [
+                            {
+                                "user_id": CAPTURE_OWNER,
+                                "upload_key": CAPTURE_KEY,
+                            }
+                        ],
+                    }
+                )
+            )
+            capture_config.chmod(0o600)
         shutil.copytree(Path(__file__).resolve().parents[1] / "pensieve", plugin)
         server = ThreadingHTTPServer(("127.0.0.1", 0), ModelStub)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -305,9 +364,13 @@ def run_probe(claude: str) -> dict[str, Any]:
         for groups in hooks["hooks"].values():
             for group in groups:
                 for hook in group["hooks"]:
-                    if hook["type"] == "command":
+                    if hook["type"] == "command" and "context_receipt.py" in hook["command"]:
                         hook["command"] += (
                             f" --endpoint http://127.0.0.1:{server.server_port}/hooks/delivery"
+                        )
+                    elif hook["type"] == "command":
+                        hook["command"] += (
+                            f' --config "{capture_config}" --state "{root / "capture-spool"}" --endpoint http://127.0.0.1:{server.server_port}/hooks/conversations'
                         )
         hook_path.write_text(json.dumps(hooks))
         mcp_path = plugin / ".mcp.json"
@@ -427,6 +490,82 @@ def run_probe(claude: str) -> dict[str, Any]:
             report["stream_cases"] = stream_probe(common, env, root)
             report["mcp_events"] = ModelStub.mcp_requests
             report["receipt_requests"] = ModelStub.receipt_requests
+            if capture:
+                attempts = ModelStub.capture_requests
+                accepted = {row["body"]["batch_id"]: row["body"] for row in attempts[1:]}
+                captured = [event for body in accepted.values() for event in body["events"]]
+                resumed_batches = [
+                    body for body in accepted.values() if body["host_conversation_id"] == session
+                ]
+                report["capture_sessions"] = [
+                    {
+                        "conversation_id": conversation,
+                        "segment_ids": sorted(
+                            {
+                                body["segment_id"]
+                                for body in accepted.values()
+                                if body["host_conversation_id"] == conversation
+                            }
+                        ),
+                        "event_count": sum(
+                            len(body["events"])
+                            for body in accepted.values()
+                            if body["host_conversation_id"] == conversation
+                        ),
+                    }
+                    for conversation in sorted(
+                        {body["host_conversation_id"] for body in accepted.values()}
+                    )
+                ]
+                report["capture_checks"] = {
+                    "prompt_and_answer_captured": {"user", "assistant"}
+                    <= {event["kind"] for event in captured},
+                    "first_prompt_captured": any(
+                        event["kind"] == "user" and event["content"] == "Synthetic first prompt."
+                        for event in captured
+                    ),
+                    "retry_identical_bytes": len(attempts) > 1 and attempts[0] == attempts[1],
+                    "captured_visible_work": any(body["events"] for body in accepted.values()),
+                    "credentials_never_reach_model": CAPTURE_KEY
+                    not in json.dumps(ModelStub.requests),
+                    "no_hook_or_reasoning_payload": all(
+                        "pensieve-capture-context" not in event["content"]
+                        and "pensieve-delivery" not in event["content"]
+                        and "hookSpecificOutput" not in event["content"]
+                        and "<command-name>" not in event["content"]
+                        and "This session is being continued" not in event["content"]
+                        for event in captured
+                    ),
+                    "stable_distinct_events": len({event["event_id"] for event in captured})
+                    == len(captured),
+                    "resumed_session_keeps_one_segment": len(
+                        {body["segment_id"] for body in resumed_batches}
+                    )
+                    == 1
+                    and sum(
+                        event["kind"] == "user"
+                        for body in resumed_batches
+                        for event in body["events"]
+                    )
+                    == 3,
+                }
+                report["captured_event_count"] = len(captured)
+                if not all(report["capture_checks"].values()):
+                    # Preserve only synthetic fixture diagnostics on failure.
+                    report["capture_attempts"] = attempts
+                    report["capture_pending"] = []
+                    import sqlite3
+
+                    for path in (root / "capture-spool").glob("*.sqlite3"):
+                        db = sqlite3.connect(path)
+                        report["capture_pending"].append(
+                            {
+                                "session": path.stem,
+                                "state": db.execute("SELECT body FROM state").fetchall(),
+                                "events": db.execute("SELECT body FROM events").fetchall(),
+                            }
+                        )
+                        db.close()
             report["transcript_markers"] = []
             report["compaction_records"] = []
             report["transcript_record_types"] = []
@@ -495,7 +634,11 @@ def verify_report(report: dict[str, Any]) -> dict[str, bool]:
             set(entry) == {"token", "operation"} for entry in report["receipt_requests"]
         ),
     }
-    failures = [name for name, passed in checks.items() if not passed]
+    failures = [
+        name
+        for name, passed in {**checks, **report.get("capture_checks", {})}.items()
+        if not passed
+    ]
     if failures:
         raise RuntimeError("Claude host probe failed: " + ", ".join(failures))
     return checks
@@ -504,13 +647,16 @@ def verify_report(report: dict[str, Any]) -> dict[str, bool]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--claude", default=shutil.which("claude"))
+    parser.add_argument("--capture", action="store_true")
     args = parser.parse_args()
     if not args.claude:
         parser.error("An installed Claude Code CLI is required")
     else:
-        report = run_probe(args.claude)
-        report["checks"] = verify_report(report)
-        print(json.dumps(report, indent=2))
+        report = run_probe(args.claude, capture=args.capture)
+        try:
+            report["checks"] = verify_report(report)
+        finally:
+            print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

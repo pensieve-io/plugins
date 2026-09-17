@@ -52,3 +52,55 @@ be synchronous.
 Both repositories test their side of this contract. Client receipt/probe tests
 live here; the server repository tests forced recovery, receipt fencing,
 authentication and conversation selection without importing client code.
+
+## Optional conversation capture
+
+Capture requests identify themselves as `Pensieve-Plugin-Capture/1.0`, following
+the receipt helper's explicit identification so the production edge admits them.
+
+Capture has separate authorization; delivery receipt tokens remain receipt-only.
+Personal Settings → Agent transcripts owns per-user consent across all clients and device
+keys. The setup command only imports a downloaded upload-only credential into
+private storage. It never reads OAuth credentials. Every upload checks current
+membership and the user's current enabled consent generation.
+
+At every `UserPromptSubmit`, including an unchanged briefing, the service emits
+one terminal, non-secret marker in accepted hook context:
+
+```text
+<!-- pensieve-capture-context {"v":2,"capture_generation":"UUID-or-null","kind":"prompt","user_id":"UUID","client":"codex","conversation_id":"UUID","context_id":497,"turn_id":"UUID"} -->
+```
+
+`context_id` is null when unselected; `capture_generation` is null when disabled
+or consent lookup is unavailable. False → true starts a new generation. `turn_id` is nullable; Codex supplies its
+native turn ID, while the Claude adapter currently uses null. Successful
+`set_context` results carry the same marker with `kind="selection"`. Markers
+reflect the authenticated selection snapshot of that exact call. They never
+contain credentials. The helper does not treat a quoted marker as authorization.
+
+Command capture hooks establish a baseline at `SessionStart`, checkpoint at
+`UserPromptSubmit` and `Stop`, and attempt a bounded flush at `SessionEnd`.
+The last hook has a one-second configured timeout and no native MCP companion:
+Codex does not support native MCP hooks at SessionEnd. Same-event handlers may
+run concurrently, so a checkpoint can be completed by the following hook.
+
+Uploads use `POST https://mcp.pensieve.uk/hooks/conversations` with the key in
+`Authorization: Bearer`. A batch carries `batch_id`, `client`,
+`host_conversation_id`, `segment_id`, `capture_generation`, `events`, `title`,
+and the attributed `context_id`. Every immutable event has `event_id`,
+`sequence`, `kind`, `content`, `occurred_at` and `truncated`. There are no
+presence updates or message revisions.
+
+Limits are 100 events, 32,000 characters per event and 262,144 bytes for the exact
+UTF-8 JSON request. The helper sends only nonempty batches. A successful HTTP
+200 receipt must match `batch_id`, `batch_sha256` of the exact raw request,
+`segment_id`, and `accepted_events`, and include a valid `conversation_id` and fixed `expires_at`.
+Retries preserve the original batch bytes. A failed or mismatched receipt does
+not remove pending events. HTTP 401/403 retains the denied scope's backlog and
+allows other configured scopes to proceed; HTTP 410 securely removes the
+expired segment's old content and retains a local tombstone. A scoped expiry
+response carries `reason: expired`, `segment_id` and `expires_at`; only a proven
+fresh post-expiry user-turn suffix can roll into a new segment. A scoped
+`reason: capture_disabled` response discards the rejected segment's queued work
+without rollover, including old-generation retries after re-enable. See
+[capture setup and boundaries](conversation-capture.md).

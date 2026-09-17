@@ -162,8 +162,12 @@ restores it after the client compacts the conversation. Your last explicit
 context choice is remembered for new conversations; each existing conversation
 keeps its own selection.
 
-The hooks send delivery receipts for the briefing the client received.
-Conversation text and local file contents are not uploaded.
+The context hooks send delivery receipts for the briefing the client received.
+Optional [work conversation capture](docs/conversation-capture.md) is off by
+default. Enable **Save agent transcripts** in personal **Settings → Agent transcripts**,
+once for all your agents. Download device setup and import it with the bundled `scripts/capture_setup.py`.
+New visible work belongs to the selected context for future team handoffs. This
+pilot adds no transcript browser, agent retrieval or automatic extraction.
 
 ## Other ways to use the skills
 

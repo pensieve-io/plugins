@@ -87,12 +87,12 @@ def test_skills_have_valid_identity_and_a_visible_readme_entry():
 )
 def test_host_adapters_use_the_right_mcp_namespace_and_bundled_helper(client, filename, server):
     hooks = read_json(PLUGIN / "hooks" / filename)["hooks"]
-    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "Stop"}
+    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
     flattened = [hook for entries in hooks.values() for entry in entries for hook in entry["hooks"]]
-    assert len(flattened) == 5
+    assert len(flattened) == 9
     for hook in flattened:
-        assert hook["timeout"] == 5
         if hook["type"] == "mcp_tool":
+            assert hook["timeout"] == 5
             assert hook["server"] == server
             assert hook["tool"] == "context_briefing"
             assert hook["input"]["client"] == client
@@ -100,7 +100,21 @@ def test_host_adapters_use_the_right_mcp_namespace_and_bundled_helper(client, fi
             assert hook["input"]["event"] == "${hook_event_name}"
         else:
             assert hook["type"] == "command"
-            assert hook["command"] == (
-                'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py" --client ' + client
-            )
+            if "conversation_capture.py" in hook["command"]:
+                assert hook["timeout"] in {1, 3}
+                assert hook["command"] == (
+                    'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py" --client '
+                    + client
+                )
+            else:
+                assert hook["timeout"] == 5
+                assert hook["command"] == (
+                    'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py" --client ' + client
+                )
     assert (PLUGIN / "scripts/context_receipt.py").is_file()
+    assert (PLUGIN / "scripts/conversation_capture.py").is_file()
+    assert all(
+        hook["type"] == "command" and hook["timeout"] == 1
+        for group in hooks["SessionEnd"]
+        for hook in group["hooks"]
+    )
