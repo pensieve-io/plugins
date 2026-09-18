@@ -25,13 +25,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from capture_config import (
+    CONFIG_PATH,
+    encoded,
+    private_directory,
+    profiles,
+)
 from context_receipt import accepted_contexts, conversation_id
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
-CONFIG_PATH = Path.home() / ".config/pensieve/capture.json"
 STATE_PATH = Path.home() / ".local/state/pensieve/capture"
 MAX_INPUT_BYTES = 65536
-MAX_CONFIG_BYTES = 65536
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_SCAN_BYTES = 4 * 1024 * 1024
 MAX_EVENT_CHARS = 32000
@@ -43,7 +47,7 @@ INTERNAL_MARKER = re.compile(r"<!-- pensieve-(?:capture-context|delivery)\b.*?--
 SECRET = re.compile(
     r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})|"
-    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|upload[_-]?key)"
+    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|upload[_-]?key|poll[_-]?secret)"
     r"[\"']?\s*[=:]\s*[\"']?[^\s\"',}]+)"
 )
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
@@ -52,54 +56,6 @@ SET_CONTEXT_NAMES = {
     "mcp__plugin_pensieve_pensieve__set_context",
     "mcp__plugin:pensieve:pensieve__set_context",
 }
-
-
-def encoded(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
-
-
-def private_file(path: Path, limit: int) -> bytes:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_uid != os.getuid()
-        ):
-            raise ValueError("capture config/state must be an owned regular file with mode 0600")
-        data = handle.read(limit + 1)
-        if len(data) > limit:
-            raise ValueError("capture config exceeds its size limit")
-        return data
-
-
-def profiles(path: Path) -> dict[str, str]:
-    try:
-        value = json.loads(private_file(path, MAX_CONFIG_BYTES))
-    except FileNotFoundError:
-        return {}
-    if not isinstance(value, dict) or set(value) != {"version", "profiles"}:
-        raise ValueError("capture config must contain version and profiles")
-    if value["version"] != 2 or not isinstance(value["profiles"], list):
-        raise ValueError("unsupported capture config")
-    result = {}
-    for profile in value["profiles"]:
-        if not isinstance(profile, dict) or set(profile) != {"user_id", "upload_key"}:
-            raise ValueError("invalid capture profile")
-        owner = conversation_id(profile["user_id"])
-        key = profile["upload_key"]
-        if (
-            owner is None
-            or not isinstance(key, str)
-            or not 16 <= len(key) <= 4096
-            or any(character.isspace() for character in key)
-        ):
-            raise ValueError("invalid capture profile")
-        if owner in result:
-            raise ValueError("duplicate capture profile")
-        result[owner] = key
-    return result
 
 
 def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None:
@@ -197,10 +153,18 @@ def is_set_context(name: object, namespace: object = None) -> bool:
     )
 
 
-def is_hook_tool(name: object, namespace: object = None) -> bool:
+def is_uncaptured_tool(name: object, namespace: object = None) -> bool:
+    # Re-reading private history must not turn old/unconsented text into new
+    # company-eligible tool evidence. Keep archive reads out alongside hooks.
+    private_tools = {"context_briefing", "list_work_conversations", "read_work_conversation"}
     return isinstance(name, str) and (
-        name in {name.replace("set_context", "context_briefing") for name in SET_CONTEXT_NAMES}
-        or (name == "context_briefing" and namespace == "mcp__pensieve")
+        name
+        in {
+            prefix.replace("set_context", tool)
+            for prefix in SET_CONTEXT_NAMES
+            for tool in private_tools
+        }
+        or (name in private_tools and namespace == "mcp__pensieve")
     )
 
 
@@ -281,7 +245,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             return [{"kind": "assistant", "content": text}] if text else []
         if kind in {"function_call", "custom_tool_call"}:
             call = payload.get("call_id")
-            internal = is_hook_tool(payload.get("name"), payload.get("namespace"))
+            internal = is_uncaptured_tool(payload.get("name"), payload.get("namespace"))
             if isinstance(call, str):
                 state.setdefault("calls", {})[call] = {
                     "selection": is_set_context(payload.get("name"), payload.get("namespace")),
@@ -341,7 +305,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             if isinstance(item, dict) and item.get("type") == "tool_use":
                 call, name = item.get("id"), item.get("name")
                 if isinstance(call, str) and isinstance(name, str):
-                    internal = is_hook_tool(name)
+                    internal = is_uncaptured_tool(name)
                     state.setdefault("calls", {})[call] = {
                         "selection": is_set_context(name),
                         "internal": internal,
@@ -384,17 +348,6 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
         if text:
             result.append({"kind": "tool_result", "content": text})
     return result
-
-
-def private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.lstat()
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-    ):
-        raise ValueError("capture state directory must be owned, private (0700), and not a symlink")
 
 
 def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
@@ -862,9 +815,9 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
             if (
                 isinstance(result, dict)
                 and result.get("segment_id") == batch["segment"]
-                and result.get("reason") == "capture_disabled"
+                and result.get("reason") in {"capture_disabled", "deleted"}
             ):
-                return {"status": "capture_disabled"}
+                return {"status": result["reason"]}
             if (
                 isinstance(result, dict)
                 and result.get("segment_id") == batch["segment"]
@@ -885,7 +838,8 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
         and result.get("segment_id") == batch["segment"]
         and result.get("accepted_events") == len(json.loads(batch["event_ids"]))
         and conversation_id(result.get("conversation_id")) is not None
-        and aware_time(result.get("expires_at")) is not None
+        and "expires_at" in result
+        and (result["expires_at"] is None or aware_time(result["expires_at"]) is not None)
     )
     return {"status": "accepted", "expires_at": result["expires_at"]} if accepted else False
 
@@ -983,7 +937,7 @@ def flush(db, configured, client, session, endpoint, deadline):
             if batch is None:
                 continue
             outcome = upload(batch, key, endpoint, remaining)
-            if isinstance(outcome, dict) and outcome["status"] == "capture_disabled":
+            if isinstance(outcome, dict) and outcome["status"] in {"capture_disabled", "deleted"}:
                 retire_segment(db, segment["id"], None)
                 progressed = True
                 continue
@@ -1026,7 +980,17 @@ def run_hook(
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return {}
-    configured = profiles(config)
+    event = payload["hook_event_name"]
+    deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
+    # Pending browser approval can finish on an ordinary hook. One bounded
+    # exchange, no daemon, and no credential-bearing output to the model.
+    from capture_pairing import poll
+
+    try:
+        poll(config, client, timeout=0.25 if event == "SessionEnd" else 0.5)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    configured = profiles(config, client)
     if not configured:
         # Capture-off must be remembered without reading transcript text, or a
         # later re-enable would scan and upload the disabled interval. Never
@@ -1043,10 +1007,8 @@ def run_hook(
             finally:
                 db.close()
         return {}
-    event = payload["hook_event_name"]
     # Plugin SessionEnd runs inside Claude's default 1.5s total budget and
     # Codex's 3s cap. Durability comes from earlier checkpoints, not this flush.
-    deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
     db = connect_state(state_root, client, session)
     source_error = None
     try:
@@ -1071,9 +1033,31 @@ def run_hook(
             owner: hashlib.sha256(key.encode()).hexdigest() for owner, key in configured.items()
         }
         previous_fingerprints = state.get("profile_keys")
+        known_fingerprints = state.get("known_profile_keys", previous_fingerprints or {})
+        replaced_owners = [
+            owner
+            for owner, fingerprint in fingerprints.items()
+            if owner in known_fingerprints and known_fingerprints[owner] != fingerprint
+        ]
+        if replaced_owners:
+            # Re-pairing cannot lend a new installation's credential to an old
+            # revoked device's queued work. Keep already accepted server history;
+            # erase only this private outbox and wait for a fresh user turn.
+            placeholders = ",".join("?" for _ in replaced_owners)
+            retired = f"SELECT id FROM segments WHERE owner IN ({placeholders})"
+            db.execute(f"DELETE FROM events WHERE segment IN ({retired})", replaced_owners)
+            db.execute(f"DELETE FROM batches WHERE segment IN ({retired})", replaced_owners)
+            db.execute(
+                f"UPDATE segments SET retired=1,title='' WHERE owner IN ({placeholders})",
+                replaced_owners,
+            )
+            db.execute("DELETE FROM events WHERE segment IS NULL")
         if previous_fingerprints is not None and previous_fingerprints != fingerprints:
             state["capture_paused"] = True
         state["profile_keys"] = fingerprints
+        # Remember absent profiles' last key too: remove -> re-pair must not make
+        # a replacement key look like the first credential for an old outbox.
+        state["known_profile_keys"] = {**known_fingerprints, **fingerprints}
         if state.pop("capture_paused", False):
             state.update(
                 offset=None,
@@ -1115,6 +1099,20 @@ def run_hook(
         flush(db, configured, client, session, endpoint, deadline)
     finally:
         db.close()
+    # Diagnostics never delay durable capture. Runtime and transcript content
+    # are not inferred or sent; only the host-supplied file's availability is reported.
+    if event != "SessionEnd" and deadline - time.monotonic() > 0.05:
+        from capture_pairing import heartbeat
+
+        try:
+            heartbeat(
+                config,
+                client,
+                source_error is None and isinstance(path, str) and Path(path).is_file(),
+                timeout=min(0.4, deadline - time.monotonic()),
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     if source_error is not None:
         raise source_error
     return {}

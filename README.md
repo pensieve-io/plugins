@@ -6,7 +6,7 @@ connects it to your company's context layer and bundles three things:
 - **MCP tools** to read the company map, follow citations to sources and contribute
   knowledge through Pensieve.
 - **Role skills** that give the agent a way to work as your Chief of Staff, Head
-  of Product or Head of Growth.
+  of Product or Head of Growth, plus a browser-approved conversation setup action.
 - **Context hooks** that load company context automatically, refresh it as the
   company map changes and restore it when the client shortens conversation history.
 
@@ -25,6 +25,7 @@ provides the company knowledge it works from.
 | `chief-of-staff` | Chief of Staff | Reads the whole company and tells the leadership team what changed, what needs deciding, and who owes what by when. |
 | `head-of-product` | Head of Product | Turns customer evidence into the few things product should act on, and knows what has already been tried or declined. |
 | `head-of-growth` | Head of Growth | Judges each channel on what it actually returned, and names the next mechanism worth trying rather than the next idea. |
+| `connect-conversations` | Setup | Connects automatic conversation capture through browser approval, without asking you to handle credentials or run commands. |
 
 ## Install
 
@@ -164,10 +165,12 @@ keeps its own selection.
 
 The context hooks send delivery receipts for the briefing the client received.
 Optional [work conversation capture](docs/conversation-capture.md) is off by
-default. Enable **Save agent transcripts** in personal **Settings → Agent transcripts**,
-once for all your agents. Download device setup and import it with the bundled `scripts/capture_setup.py`.
-New visible work belongs to the selected context for future team handoffs. This
-pilot adds no transcript browser, agent retrieval or automatic extraction.
+default. Ask your agent: **“Use Pensieve’s connect-conversations skill.”** The
+installed helper opens a browser approval link and completes device setup
+privately. Pensieve's Conversations page controls capture and whether useful
+work knowledge may contribute to the selected company's context layer.
+Pairing alone never opts you in, and an ordinary MCP connection alone does not
+provide transcript access. See the supported-runtime limits before connecting.
 
 ## Other ways to use the skills
 

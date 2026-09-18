@@ -164,3 +164,22 @@ Record results separately for CLI, desktop and workspace imports. A successful
 marketplace import or a displayed icon does not prove hooks executed. Where a
 host does not support hooks, verify MCP and skill use and keep hook support
 marked unavailable. Desktop and live OAuth checks are currently pending.
+
+## Conversation pairing candidate, 18 September 2026
+
+The browser-pairing candidate passed the installed Claude Code 2.1.276 probe
+with all twelve grounding/receipt and eight capture checks. The Codex native
+manifest discovered nine hooks, the MCP server and four skills, including
+`connect-conversations`. Its code-mode context-switch capture probe passed all
+ten checks using local synthetic services. The capture fixture now creates its
+credential directory with mode 0700, matching real setup instead of relying on
+a private file inside a public directory. No live capture setting or installed
+plugin was changed, and no paid model call was used.
+
+Package tests exercise the pairing start (HTTP 201), pending/offline retries,
+claim-once exchange, expiry, private files, account/client isolation, legacy
+credential migration, hook completion, nullable expiry and raw-deletion replies.
+These fixtures do not establish live browser approval or desktop compatibility;
+the compatible app deployment and authenticated staging acceptance remain release
+gates. Replacing a key deliberately discards that local unsent backlog so a new
+installation cannot replay a revoked installation's queued work.

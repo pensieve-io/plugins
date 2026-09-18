@@ -135,7 +135,7 @@ def run_probe(
     capture_state: Path | None = None,
     context_switch: str | None = None,
 ) -> dict[str, Any]:
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
     workspace = output / "workspace"
     workspace.mkdir()
     plugin = output / "plugin"

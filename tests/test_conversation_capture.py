@@ -173,7 +173,8 @@ def pending(state):
         db.close()
 
 
-def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch):
+@pytest.mark.parametrize("expiry", [EXPIRY, None])
+def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch, expiry):
     real_upload = capture.upload
     path, cfg, state, _, _ = setup(tmp_path, monkeypatch)
     monkeypatch.setattr(capture, "upload", real_upload)
@@ -202,7 +203,7 @@ def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch
                     "conversation_id": SESSION,
                     "segment_id": batch["segment_id"],
                     "accepted_events": len(batch["events"]),
-                    "expires_at": EXPIRY,
+                    "expires_at": expiry,
                 }
             ).encode()
             self.send_response(200)
@@ -1058,8 +1059,11 @@ def test_claude_compaction_and_local_commands_preserve_segment(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
-def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
-    tmp_path, monkeypatch, client
+@pytest.mark.parametrize(
+    "tool", ["context_briefing", "list_work_conversations", "read_work_conversation"]
+)
+def test_private_tool_results_are_excluded_even_when_called_normally(
+    tmp_path, monkeypatch, client, tool
 ):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
     if client == "codex":
@@ -1068,7 +1072,7 @@ def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
             "payload": {
                 "type": "function_call",
                 "call_id": "hook",
-                "name": "mcp__pensieve__context_briefing",
+                "name": f"mcp__pensieve__{tool}",
             },
         }
         tool_result = {
@@ -1085,7 +1089,7 @@ def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
             {
                 "type": "tool_use",
                 "id": "hook",
-                "name": "mcp__plugin_pensieve_pensieve__context_briefing",
+                "name": f"mcp__plugin_pensieve_pensieve__{tool}",
                 "input": {},
             }
         ]
@@ -1353,12 +1357,10 @@ def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediat
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
     )
     run()
-    assert [event["content"] for event in events(calls)] == ["Enabled prompt", "Enabled answer"]
+    assert not calls and pending(state) == 0
     append(path, user("Reenabled prompt"), hook_record(), assistant("Reenabled answer"))
     run()
     assert [event["content"] for event in events(calls)] == [
-        "Enabled prompt",
-        "Enabled answer",
         "Reenabled prompt",
         "Reenabled answer",
     ]
@@ -1460,3 +1462,56 @@ def test_baseline_mid_turn_does_not_queue_orphan_outputs(tmp_path, monkeypatch, 
     run()
     assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
     assert pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_raw_deletion_drops_queued_history_without_resurrecting_it(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("Deleted question", client),
+        hook_record(client),
+        assistant("Deleted answer", client),
+    )
+    monkeypatch.setattr(capture, "upload", lambda *args: {"status": "deleted"})
+    run()
+    assert pending(state) == 0
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    run()
+    assert not calls
+    append(path, user("New question", client), hook_record(client), assistant("New answer", client))
+    run()
+    assert [event["content"] for event in events(calls)] == ["New question", "New answer"]
+
+
+@pytest.mark.parametrize("remove_first", [False, True])
+def test_repairing_cannot_replay_revoked_installation_outbox(tmp_path, monkeypatch, remove_first):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: "forbidden")
+    append(path, user("Revoked queued question"), hook_record(), assistant("Revoked queued answer"))
+    run()
+    assert pending(state) == 2
+    if remove_first:
+        cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+        run()
+    cfg.write_text(
+        json.dumps(
+            {"version": 2, "profiles": [{"user_id": OWNER, "upload_key": KEY + "-replacement"}]}
+        )
+    )
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    run()
+    assert not calls and pending(state) == 0
+    append(
+        path, user("Fresh authorised question"), hook_record(), assistant("Fresh authorised answer")
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Fresh authorised question",
+        "Fresh authorised answer",
+    ]
+    assert all(key == KEY + "-replacement" for _, key in calls)

@@ -60,8 +60,9 @@ the receipt helper's explicit identification so the production edge admits them.
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
 Personal Settings → Agent transcripts owns per-user consent across all clients and device
-keys. The setup command only imports a downloaded upload-only credential into
-private storage. It never reads OAuth credentials. Every upload checks current
+keys. The installed setup skill pairs through browser approval and stores a
+client-scoped upload-only credential privately. It never reads OAuth credentials.
+Pairing itself does not change capture or contribution consent. Every upload checks current
 membership and the user's current enabled consent generation.
 
 At every `UserPromptSubmit`, including an unchanged briefing, the service emits
@@ -94,7 +95,8 @@ presence updates or message revisions.
 Limits are 100 events, 32,000 characters per event and 262,144 bytes for the exact
 UTF-8 JSON request. The helper sends only nonempty batches. A successful HTTP
 200 receipt must match `batch_id`, `batch_sha256` of the exact raw request,
-`segment_id`, and `accepted_events`, and include a valid `conversation_id` and fixed `expires_at`.
+`segment_id`, and `accepted_events`, and include a valid `conversation_id` and `expires_at`. The latter is either
+a timezone-aware timestamp or null for history retained until deletion.
 Retries preserve the original batch bytes. A failed or mismatched receipt does
 not remove pending events. HTTP 401/403 retains the denied scope's backlog and
 allows other configured scopes to proceed; HTTP 410 securely removes the
@@ -102,5 +104,7 @@ expired segment's old content and retains a local tombstone. A scoped expiry
 response carries `reason: expired`, `segment_id` and `expires_at`; only a proven
 fresh post-expiry user-turn suffix can roll into a new segment. A scoped
 `reason: capture_disabled` response discards the rejected segment's queued work
-without rollover, including old-generation retries after re-enable. See
+without rollover, including old-generation retries after re-enable. A scoped
+`reason: deleted` response also discards the segment without re-uploading its
+old content. Fresh subsequent work needs a new segment. See
 [capture setup and boundaries](conversation-capture.md).
