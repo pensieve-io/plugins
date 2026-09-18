@@ -164,11 +164,11 @@ def is_set_context(name: object, namespace: object = None) -> bool:
     )
 
 
-def is_uncaptured_tool(name: object, namespace: object = None) -> bool:
+def is_uncaptured_tool(name: object, namespace: object = None, arguments: object = None) -> bool:
     # Re-reading archived history must not turn old/unconsented text into new
     # company-eligible tool evidence. Keep archive reads out alongside hooks.
     private_tools = {"context_briefing", "list_work_conversations", "read_work_conversation"}
-    return isinstance(name, str) and (
+    if isinstance(name, str) and (
         name
         in {
             prefix.replace("set_context", tool)
@@ -176,6 +176,26 @@ def is_uncaptured_tool(name: object, namespace: object = None) -> bool:
             for tool in private_tools
         }
         or (name in private_tools and namespace == "mcp__pensieve")
+    ):
+        return True
+    if not isinstance(name, str) or not (
+        name in {prefix.replace("set_context", "search") for prefix in SET_CONTEXT_NAMES}
+        or (name == "search" and namespace == "mcp__pensieve")
+    ):
+        return False
+    # Search can return saved transcript snippets as well as ordinary company
+    # knowledge. Inspect only native inputs, never output text; retain only the
+    # boolean in the call ledger, not the query or other arguments.
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return True
+    if not isinstance(arguments, dict):
+        return True
+    node_types = arguments.get("node_types")
+    return node_types is not None and (
+        not isinstance(node_types, list) or "transcript" in node_types
     )
 
 
@@ -334,7 +354,11 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             return [{"kind": "assistant", "content": text}] if text else []
         if kind in {"function_call", "custom_tool_call"}:
             call = payload.get("call_id")
-            internal = is_uncaptured_tool(payload.get("name"), payload.get("namespace"))
+            internal = is_uncaptured_tool(
+                payload.get("name"),
+                payload.get("namespace"),
+                payload.get("arguments") if kind == "function_call" else payload.get("input"),
+            )
             if isinstance(call, str):
                 state.setdefault("calls", {})[call] = {
                     "selection": is_set_context(payload.get("name"), payload.get("namespace")),
@@ -399,7 +423,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             if isinstance(item, dict) and item.get("type") == "tool_use":
                 call, name = item.get("id"), item.get("name")
                 if isinstance(call, str) and isinstance(name, str):
-                    internal = is_uncaptured_tool(name)
+                    internal = is_uncaptured_tool(name, arguments=item.get("input"))
                     state.setdefault("calls", {})[call] = {
                         "selection": is_set_context(name),
                         "internal": internal,

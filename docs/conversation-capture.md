@@ -130,7 +130,11 @@ These limits do not change the existing future-only live scanner.
 - Artifact references and attachment omission notices, without opening files.
 
 Reasoning, system/developer instructions, hook payloads and compaction internals
-are excluded. Configured credentials and common secret patterns, including
+are excluded. Native Pensieve transcript read/list results and searches that
+request `node_types: ["transcript"]` are excluded too, including mixed searches.
+This uses the native call arguments and persists only a result-exclusion flag;
+search queries are never saved in capture state. Ordinary Page/Data searches
+remain eligible. Configured credentials and common secret patterns, including
 quoted JSON credential fields, are redacted; arbitrary prose can still contain
 secrets. Events are limited to 32,000 characters with explicit truncation;
 batches hold at most 100 events / 256 KiB. Raw transcript records over 1 MiB

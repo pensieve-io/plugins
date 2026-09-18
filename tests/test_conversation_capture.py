@@ -1109,6 +1109,111 @@ def test_private_tool_results_are_excluded_even_when_called_normally(
     assert [event["kind"] for event in events(calls)] == ["user", "assistant"]
 
 
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize(
+    "node_types", [["transcript"], ["page", "transcript"], ["page", "data"], None]
+)
+def test_search_capture_uses_native_arguments_and_persists_result_exclusion(
+    tmp_path, monkeypatch, client, node_types
+):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch, client)
+    arguments = {"query": "Private query must never enter capture state", "node_types": node_types}
+    # The same output text is used for every case. Only the native arguments
+    # establish whether this search can contain archived conversation text.
+    output = "Result text mentioning transcript, page and data"
+    if client == "codex":
+        tool_call = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "search-call",
+                "name": "search",
+                "namespace": "mcp__pensieve",
+                "arguments": json.dumps(arguments),
+            },
+        }
+        tool_result = {
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "search-call", "output": output},
+        }
+    else:
+        tool_call = assistant(client=client)
+        tool_call["message"]["content"] = [
+            {
+                "type": "tool_use",
+                "id": "search-call",
+                "name": "mcp__plugin_pensieve_pensieve__search",
+                "input": arguments,
+            }
+        ]
+        tool_result = user(client=client)
+        tool_result["message"]["content"] = [
+            {"type": "tool_result", "tool_use_id": "search-call", "content": output}
+        ]
+    append(path, user(client=client), hook_record(client), tool_call)
+    run()
+    db = sqlite3.connect(next(state.glob("*.sqlite3")))
+    stored = db.execute("SELECT body FROM state").fetchone()[0]
+    db.close()
+    excluded = "transcript" in (node_types or [])
+    assert json.loads(stored)["calls"]["search-call"]["internal"] is excluded
+    assert arguments["query"] not in stored
+    append(path, tool_result, assistant(client=client))
+    run()
+    captured = events(calls)
+    assert (output in [item["content"] for item in captured]) is not excluded
+    assert [item["kind"] for item in captured] == (
+        ["user", "assistant"] if excluded else ["user", "tool_call", "tool_result", "assistant"]
+    )
+
+
+@pytest.mark.parametrize(
+    "name,namespace",
+    [
+        ("mcp__pensieve__search", None),
+        ("mcp__plugin_pensieve_pensieve__search", None),
+        ("mcp__plugin:pensieve:pensieve__search", None),
+        ("search", "mcp__pensieve"),
+    ],
+)
+def test_transcript_search_guard_requires_native_pensieve_tool_identity(name, namespace):
+    assert capture.is_uncaptured_tool(name, namespace, {"node_types": ["transcript"]})
+    assert not capture.is_uncaptured_tool(name, namespace, {"node_types": ["page", "data"]})
+    assert not capture.is_uncaptured_tool(name, namespace, {})
+    assert not capture.is_uncaptured_tool("search", "mcp__other", {"node_types": ["transcript"]})
+
+
+@pytest.mark.parametrize("arguments", [None, "not valid JSON", [], {"node_types": "transcript"}])
+def test_unknown_native_search_arguments_fail_closed(arguments):
+    assert capture.is_uncaptured_tool("mcp__pensieve__search", arguments=arguments)
+
+
+def test_codex_custom_search_input_excludes_its_matching_result():
+    state = {"calls": {}}
+    tool_call = {
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "mcp__pensieve__search",
+            "call_id": "custom-search",
+            "input": json.dumps({"node_types": ["transcript"]}),
+        },
+    }
+    assert capture.normalise(tool_call, "codex", SESSION, state) == []
+    # A restart restores the durable boolean, without retaining arguments.
+    restored = json.loads(json.dumps(state))
+    tool_result = {
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "custom-search",
+            "output": "Legacy private conversation snippet",
+        },
+    }
+    assert capture.normalise(tool_result, "codex", SESSION, restored) == []
+    assert not restored["calls"]
+
+
 def native_selection(context=12, turn="turn-one", call_id="nested-call", server="pensieve"):
     return {
         "type": "event_msg",

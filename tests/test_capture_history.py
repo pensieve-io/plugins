@@ -415,3 +415,57 @@ def test_import_does_not_follow_symlinked_parent_store(tmp_path):
     (tmp_path / "link").symlink_to(actual, target_is_directory=True)
     with pytest.raises(OSError):
         history.open_source(tmp_path / "link" / "sessions", "chat.jsonl")
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_history_import_does_not_adopt_transcript_search_results(tmp_path, monkeypatch, client):
+    root, _, _, sent, _, run, _ = setup(tmp_path, monkeypatch, client)
+    records = [user("Work question", client)]
+    for index, node_type in enumerate(("transcript", "page")):
+        arguments = {"query": "Do not persist this query", "node_types": [node_type]}
+        output = f"{node_type} search result"
+        if client == "codex":
+            records.extend(
+                [
+                    {
+                        "type": "response_item",
+                        "timestamp": NOW,
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": str(index),
+                            "name": "mcp__pensieve__search",
+                            "arguments": json.dumps(arguments),
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": NOW,
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": str(index),
+                            "output": output,
+                        },
+                    },
+                ]
+            )
+        else:
+            call = assistant(client="claude")
+            call["message"]["content"] = [
+                {
+                    "type": "tool_use",
+                    "id": str(index),
+                    "name": "mcp__pensieve__search",
+                    "input": arguments,
+                }
+            ]
+            result = user("", "claude")
+            result["message"]["content"] = [
+                {"type": "tool_result", "tool_use_id": str(index), "content": output}
+            ]
+            records.extend([call, result])
+    write(root / "chat.jsonl", codex_records(*records) if client == "codex" else records)
+    run()
+    captured = [e["content"] for e in events(sent)]
+    assert "transcript search result" not in captured
+    assert "page search result" in captured
+    assert "Do not persist this query" not in json.dumps(captured)
