@@ -27,6 +27,14 @@ ACCEPTED = {"status": "accepted", "expires_at": EXPIRY}
 EXPIRED = {"status": "expired", "expires_at": EXPIRY}
 
 
+@pytest.fixture(autouse=True)
+def isolated_capture_services(monkeypatch):
+    # Paired fixtures must not contact hosted diagnostics or history services.
+    # Their protocols are tested separately against synthetic services.
+    monkeypatch.setattr("capture_pairing.heartbeat", lambda *a, **kw: None)
+    monkeypatch.setattr("capture_history.sync", lambda *a, **kw: None)
+
+
 def marker(
     client="codex",
     owner=OWNER,
@@ -117,18 +125,31 @@ def append(path, *records):
             handle.write(json.dumps(record).encode() + b"\n")
 
 
-def config(tmp_path, profiles=None):
-    path = tmp_path / "capture.json"
-    path.write_text(
-        json.dumps(
+def config_payload(profiles=None, client="codex"):
+    return {
+        "version": 3,
+        "profiles": [
             {
-                "version": 2,
-                "profiles": profiles
-                if profiles is not None
-                else [{"user_id": OWNER, "upload_key": KEY}],
+                **profile,
+                "client": client,
+                "installation_id": str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"{client}:{profile['user_id']}:{profile['upload_key']}"
+                    )
+                ),
+                "runtime": "unknown",
+                "host_version": "",
             }
-        )
-    )
+            for profile in (
+                profiles if profiles is not None else [{"user_id": OWNER, "upload_key": KEY}]
+            )
+        ],
+    }
+
+
+def config(tmp_path, profiles=None, client="codex"):
+    path = tmp_path / "capture.json"
+    path.write_text(json.dumps(config_payload(profiles, client)))
     path.chmod(0o600)
     return path
 
@@ -139,7 +160,7 @@ def setup(tmp_path, monkeypatch, client="codex", prior=(), profiles=None):
     if client == "codex":
         append(path, {"type": "session_meta", "payload": {"id": SESSION}})
     append(path, *prior)
-    cfg = config(tmp_path, profiles)
+    cfg = config(tmp_path, profiles, client)
     state = tmp_path / "spool"
     calls = []
 
@@ -699,7 +720,7 @@ def test_private_spool_and_removed_profile_preserve_pending_without_upload(tmp_p
     assert pending(state) == 2
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE(next(state.glob("*.sqlite3")).stat().st_mode) == 0o600
-    cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+    cfg.write_text(json.dumps(config_payload([])))
     run()
     assert pending(state) == 2
 
@@ -926,7 +947,7 @@ def test_disabling_and_reenabling_never_backfills_disabled_history(tmp_path, mon
     if missing:
         cfg.unlink()
     else:
-        cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+        cfg.write_text(json.dumps(config_payload([])))
     append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
     original_scan = capture.scan
     monkeypatch.setattr(
@@ -1017,7 +1038,7 @@ def test_selection_destination_never_inherits_previous_owner_title(tmp_path, mon
 
 def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_path, monkeypatch):
     path = tmp_path / "new-transcript.jsonl"
-    cfg = config(tmp_path)
+    cfg = config(tmp_path, client="claude")
     state = tmp_path / "spool"
     calls = []
     monkeypatch.setattr(
@@ -1325,11 +1346,11 @@ def test_removing_one_profile_excludes_its_disabled_interval_and_keeps_old_backl
     append(path, user("Consented prompt"), hook_record(), assistant("Consented answer"))
     monkeypatch.setattr(capture, "upload", lambda *args: False)
     run()
-    cfg.write_text(json.dumps({"version": 2, "profiles": prof[1:]}))
+    cfg.write_text(json.dumps(config_payload(prof[1:])))
     run()  # Observe the per-profile removal before the disabled text exists.
     append(path, assistant("Disabled interval answer"))
     run()
-    cfg.write_text(json.dumps({"version": 2, "profiles": prof}))
+    cfg.write_text(json.dumps(config_payload(prof)))
     monkeypatch.setattr(
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
     )
@@ -1448,16 +1469,9 @@ def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediat
     monkeypatch.setattr(capture, "upload", lambda *args: False)
     append(path, user("Enabled prompt"), hook_record(), assistant("Enabled answer"))
     run()
-    cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+    cfg.write_text(json.dumps(config_payload([])))
     append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
-    cfg.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "profiles": [{"user_id": OWNER, "upload_key": OTHER_KEY}],
-            }
-        )
-    )
+    cfg.write_text(json.dumps(config_payload([{"user_id": OWNER, "upload_key": OTHER_KEY}])))
     monkeypatch.setattr(
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
     )
@@ -1599,12 +1613,10 @@ def test_repairing_cannot_replay_revoked_installation_outbox(tmp_path, monkeypat
     run()
     assert pending(state) == 2
     if remove_first:
-        cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+        cfg.write_text(json.dumps(config_payload([])))
         run()
     cfg.write_text(
-        json.dumps(
-            {"version": 2, "profiles": [{"user_id": OWNER, "upload_key": KEY + "-replacement"}]}
-        )
+        json.dumps(config_payload([{"user_id": OWNER, "upload_key": KEY + "-replacement"}]))
     )
     monkeypatch.setattr(
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED

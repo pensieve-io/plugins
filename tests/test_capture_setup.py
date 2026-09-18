@@ -197,14 +197,88 @@ def test_new_accounts_and_clients_do_not_overwrite_or_broaden_each_other(tmp_pat
     assert credentials.profiles(config, "codex") == {OWNER: KEY, OTHER: KEY}
 
 
-def test_pilot_config_migrates_once_to_invoking_client_without_other_client_access(tmp_path):
+@pytest.mark.parametrize("version", [2, 3])
+def test_obsolete_config_requires_reconnect_without_rewriting_or_reading_transcripts(
+    tmp_path, monkeypatch, version
+):
     config = new_config(tmp_path)
-    credentials.save_private_json(
-        config, {"version": 2, "profiles": [{"user_id": OWNER, "upload_key": KEY}]}
-    )
-    assert credentials.profiles(config, "claude") == {OWNER: KEY}
-    assert json.loads(config.read_text())["version"] == 3
-    assert credentials.profiles(config, "codex") == {}
+    obsolete = {"user_id": OWNER, "upload_key": KEY}
+    if version == 3:
+        obsolete.update(client="codex", installation_id=None, runtime="unknown", host_version="")
+    credentials.save_private_json(config, {"version": version, "profiles": [obsolete]})
+    before = config.read_bytes()
+    for client in ("claude", "codex"):
+        with pytest.raises(credentials.ReconnectRequired, match="Reconnect through Conversations"):
+            credentials.profiles(config, client)
+    monkeypatch.setattr(capture, "scan", lambda *a, **kw: pytest.fail("old setup read history"))
+    monkeypatch.setattr(capture, "upload", lambda *a, **kw: pytest.fail("old setup uploaded"))
+    with pytest.raises(credentials.ReconnectRequired):
+        capture.run_hook(
+            {"session_id": SESSION, "hook_event_name": "Stop", "transcript_path": "/unused"},
+            "codex",
+            config,
+            tmp_path / "spool",
+        )
+    assert config.read_bytes() == before
+    assert not (tmp_path / "spool").exists()
+
+
+@pytest.mark.parametrize("version", [2, 3])
+@pytest.mark.parametrize("action", ["status", "sync"])
+def test_old_setup_has_actionable_secret_free_cli_status(
+    tmp_path, monkeypatch, capsys, version, action
+):
+    config = new_config(tmp_path)
+    obsolete = {"user_id": OWNER, "upload_key": KEY}
+    if version == 3:
+        obsolete.update(client="codex", installation_id=None, runtime="unknown", host_version="")
+    credentials.save_private_json(config, {"version": version, "profiles": [obsolete]})
+    # The autouse fixture avoids all history network calls; exercise its actual
+    # initial credential validation here, which fails before any request.
+    if action == "sync":
+        monkeypatch.setattr(
+            "capture_history.sync", lambda path, client, **kw: credentials.load_config(path, client)
+        )
+    monkeypatch.setattr("sys.argv", ["setup", action, "--client", "codex", "--config", str(config)])
+    setup.main()
+    output = capsys.readouterr().out
+    assert json.loads(output) == {
+        "status": "reconnect_required",
+        "message": "Reconnect through Conversations to save work with this app.",
+    }
+    assert KEY not in output
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_browser_approved_reconnect_replaces_obsolete_keys_and_preserves_paired_profiles(
+    tmp_path, service, version
+):
+    config = new_config(tmp_path)
+    obsolete = {"user_id": OWNER, "upload_key": "obsolete-synthetic-key"}
+    preserved = []
+    if version == 3:
+        approve(config, service, "claude")
+        preserved = json.loads(config.read_text())["profiles"]
+        obsolete.update(client="codex", installation_id=None, runtime="unknown", host_version="")
+    credentials.save_private_json(config, {"version": version, "profiles": preserved + [obsolete]})
+    # Explicit setup may replace credentials, never the existing transcript spool.
+    spool = tmp_path / "spool.sqlite3"
+    spool.write_bytes(b"synthetic durable transcript state")
+    before = config.read_bytes()
+    service["mode"] = "pending"
+    start(config, service)
+    assert config.read_bytes() == before  # Starting/awaiting approval grants nothing.
+    assert pairing.poll(config, "codex")["status"] == "awaiting_approval"
+    assert config.read_bytes() == before
+    service["mode"] = "approved"
+    ready(config, "codex")
+    assert pairing.poll(config, "codex")["status"] == "paired"
+    value = credentials.load_config(config, "codex")
+    assert credentials.profiles(config, "codex") == {OWNER: KEY}
+    assert [p for p in value["profiles"] if p["client"] == "claude"] == preserved
+    assert all(credentials.valid_uuid(p["installation_id"]) for p in value["profiles"])
+    assert b"obsolete-synthetic-key" not in config.read_bytes()
+    assert spool.read_bytes() == b"synthetic durable transcript state"
 
 
 def test_insecure_or_symlink_state_refuses_to_read_secrets(tmp_path, service):

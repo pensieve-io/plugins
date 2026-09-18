@@ -27,6 +27,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from capture_config import (
     CONFIG_PATH,
+    ReconnectRequired,
     encoded,
     private_directory,
     profiles,
@@ -1284,6 +1285,8 @@ def main() -> None:
         payload = json.loads(raw) if len(raw) <= MAX_INPUT_BYTES else None
         if isinstance(payload, dict):
             run_hook(payload, args.client, args.config, args.state, args.endpoint)
+    except ReconnectRequired as error:
+        print(f"Pensieve capture paused: {error}", file=sys.stderr)
     except sqlite3.OperationalError:
         # Concurrent hooks never wait on a lock; the next lifecycle hook retries.
         print(

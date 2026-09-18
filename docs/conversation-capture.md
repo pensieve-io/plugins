@@ -39,8 +39,10 @@ The helper stores credentials in `~/.config/pensieve/capture.json` with mode
 `0600`, under a private `0700` directory. Pending pairing secrets live in a
 separate private file and are removed after completion or expiry. It never reads
 host OAuth credentials. Codex and Claude have separate credentials, and profiles
-for different accounts survive reconnects. A one-off migration binds a legacy
-pilot credential to the first invoking client; other clients must pair separately.
+for different accounts survive reconnects. An older setup without a paired
+installation stops capture and asks the user to reconnect through Conversations.
+It is not migrated. Only a new browser-approved pairing replaces obsolete local
+credential entries; existing paired profiles and transcript spool files remain intact.
 
 The version-3 config holds client-scoped account profiles and installation IDs.
 `PENSIEVE_CAPTURE_CONFIG` and `PENSIEVE_CAPTURE_STATE` can override local paths
@@ -172,9 +174,8 @@ latency does not pin the queue to an already accepted batch. The host deadlines
 remain unchanged; SessionEnd still uses its shorter best-effort budget.
 
 Retention is explicit. A successful upload receipt includes `expires_at`,
-which is null for history kept until deletion. Older pilot portions retain their
-original fixed 90-day deadline unless their owner chooses a different policy;
-resume does not extend a fixed deadline. The helper accepts both forms.
+which is null for history kept until deletion. The server controls retention;
+resume does not extend an explicit fixed deadline. The helper accepts both forms.
 An expired portion can roll forward only from a proven fresh post-expiry user
 turn. A `deleted` response discards that portion's local backlog without rolling
 its old content into a replacement. Capture-disabled responses do the same.
@@ -193,7 +194,7 @@ host stores above. Ordinary Claude Chat and ordinary ChatGPT Chat do not provide
 this capture contract. MCP connectivity and installing skills do not prove
 transcript access. Windows and ephemeral sessions remain unverified.
 
-Package tests cover browser pairing, private storage, one-off config migration,
+Package tests cover browser pairing, private storage, obsolete-setup rejection and reconnect,
 client/account isolation, retry, nullable retention, expiry, unchanged live baselines,
 explicit historical grants and native mutation provenance. Synthetic installed-client probes are
 in [client-probes.md](client-probes.md). Live authenticated browser pairing, fresh installation, updates and resumed

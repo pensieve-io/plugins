@@ -413,11 +413,7 @@ def sync(
     with config_lock(config):
         profiles = load_config(config, client)["profiles"]
     for profile in profiles:
-        if (
-            profile["client"] != client
-            or not profile["installation_id"]
-            or time.monotonic() >= deadline - 0.05
-        ):
+        if profile["client"] != client or time.monotonic() >= deadline - 0.05:
             continue
         code, result = request(
             base,

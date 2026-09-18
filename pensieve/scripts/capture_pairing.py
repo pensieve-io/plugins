@@ -300,7 +300,7 @@ def heartbeat(
         deadline = time.monotonic() + timeout
         for profile in value["profiles"]:
             identity = profile["installation_id"]
-            if profile["client"] != client or identity is None or time.monotonic() >= deadline:
+            if profile["client"] != client or time.monotonic() >= deadline:
                 continue
             if state.get(identity, 0) > time.time() - 60:
                 continue
@@ -319,7 +319,7 @@ def heartbeat(
                 key=profile["upload_key"],
             )
             state[identity] = time.time()
-        live = {p["installation_id"] for p in value["profiles"] if p["installation_id"]}
+        live = {p["installation_id"] for p in value["profiles"]}
         save_private_json(
             path, {identity: at for identity, at in state.items() if identity in live}
         )

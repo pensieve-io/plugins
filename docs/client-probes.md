@@ -98,7 +98,9 @@ checks, including resumed segment identity and compaction. These probes use
 synthetic services and credentials; they do not prove live personal-settings
 setup, account consent or production acceptance. On 17 September, the same
 Claude suite and Codex code-mode switch checks passed again with one
-account-scoped setup credential shared across clients.
+account-scoped setup credential shared across clients. That fixture format is
+retired. Current probes use version-3 profiles with a paired installation for
+the tested client, and keep heartbeat/history requests on their local fake server.
 
 Codex 0.154.0 persists visible user turns as `event_msg` / `item_completed`
 records whose `item.type` is `UserMessage`; they carry thread and turn IDs and
@@ -177,8 +179,9 @@ a private file inside a public directory. No live capture setting or installed
 plugin was changed, and no paid model call was used.
 
 Package tests exercise the pairing start (HTTP 201), pending/offline retries,
-claim-once exchange, expiry, private files, account/client isolation, legacy
-credential migration, hook completion, nullable expiry and raw-deletion replies.
+claim-once exchange, expiry, private files, account/client isolation, obsolete
+credential rejection and browser-approved reconnect, hook completion, nullable
+expiry and raw-deletion replies.
 These fixtures do not establish live browser approval or desktop compatibility;
 the compatible app deployment and authenticated staging acceptance remain release
 gates. Replacing a key deliberately discards that local unsent backlog so a new

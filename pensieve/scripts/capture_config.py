@@ -16,6 +16,13 @@ MAX_CONFIG_BYTES = 65536
 CLIENTS = {"codex", "claude"}
 
 
+class ReconnectRequired(ValueError):
+    """An obsolete local setup must be replaced by browser-approved pairing."""
+
+    def __init__(self):
+        super().__init__("Reconnect through Conversations to save work with this app.")
+
+
 def encoded(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
 
@@ -111,7 +118,7 @@ def validate_profile(profile: object) -> dict:
         or not isinstance(key, str)
         or not 16 <= len(key) <= 4096
         or any(character.isspace() for character in key)
-        or (profile["installation_id"] is not None and not valid_uuid(profile["installation_id"]))
+        or not valid_uuid(profile["installation_id"])
         or not isinstance(profile["runtime"], str)
         or len(profile["runtime"]) > 100
         or not isinstance(profile["host_version"], str)
@@ -121,15 +128,7 @@ def validate_profile(profile: object) -> dict:
     return profile
 
 
-def load_config(path: Path, client: str) -> dict:
-    """Migrate pilot credentials once, to the invoking client only.
-
-    Legacy credentials served all clients. Migration deliberately does not create
-    a credential for a different client; it must pair separately. Callers that
-    modify profiles hold ``config_lock`` around this read and their write.
-    """
-    if client not in CLIENTS:
-        raise ValueError("invalid capture client")
+def _read_config(path: Path) -> dict:
     try:
         value = json.loads(private_file(path, MAX_CONFIG_BYTES))
     except FileNotFoundError:
@@ -138,32 +137,29 @@ def load_config(path: Path, client: str) -> dict:
         raise ValueError("capture config must contain version and profiles")
     if not isinstance(value["profiles"], list) or value["version"] not in {2, 3}:
         raise ValueError("unsupported capture config")
-    legacy = value["version"] == 2
-    if legacy:
-        migrated = []
-        for old in value["profiles"]:
-            if not isinstance(old, dict) or set(old) != {"user_id", "upload_key"}:
-                raise ValueError("invalid capture profile")
-            migrated.append(
-                {
-                    **old,
-                    "client": client,
-                    "installation_id": None,
-                    "runtime": "unknown",
-                    "host_version": "",
-                }
-            )
-        value = {"version": 3, "profiles": migrated}
+    return value
+
+
+def _validate_config(value: dict) -> dict:
+    if value["version"] != 3:
+        raise ReconnectRequired()
     seen = set()
     for profile in value["profiles"]:
+        if isinstance(profile, dict) and profile.get("installation_id") is None:
+            raise ReconnectRequired()
         validate_profile(profile)
         identity = (profile["user_id"], profile["client"])
         if identity in seen:
             raise ValueError("duplicate capture profile")
         seen.add(identity)
-    if legacy:
-        save_private_json(path, value)
     return value
+
+
+def load_config(path: Path, client: str) -> dict:
+    """Read only paired credentials. Never migrate or rewrite an old setup."""
+    if client not in CLIENTS:
+        raise ValueError("invalid capture client")
+    return _validate_config(_read_config(path))
 
 
 def config_lock(path: Path):
@@ -184,9 +180,25 @@ def profiles(path: Path, client: str = "codex") -> dict[str, str]:
 
 
 def install_profile(path: Path, profile: dict) -> None:
+    """Install a newly approved pairing, replacing obsolete credential entries only."""
     validate_profile(profile)
     with config_lock(path):
-        value = load_config(path, profile["client"])
+        value = _read_config(path)
+        # This is reached only after the browser-approved exchange. Old account
+        # keys are not reused or assigned to a client. Existing paired profiles
+        # survive reconnects; transcript spools are not opened or changed here.
+        value = _validate_config(
+            {
+                "version": 3,
+                "profiles": []
+                if value["version"] == 2
+                else [
+                    item
+                    for item in value["profiles"]
+                    if not (isinstance(item, dict) and item.get("installation_id") is None)
+                ],
+            }
+        )
         identity = (profile["user_id"], profile["client"])
         value["profiles"] = [
             item for item in value["profiles"] if (item["user_id"], item["client"]) != identity

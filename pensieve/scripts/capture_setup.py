@@ -9,7 +9,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from capture_config import CONFIG_PATH, config_lock, load_config
+from capture_config import CONFIG_PATH, ReconnectRequired, config_lock, load_config
 from capture_pairing import API_BASE, RUNTIMES, checked_base, pairing_path, start, wait
 
 
@@ -61,6 +61,8 @@ def main() -> None:
                 "client": args.client,
                 "pairing_pending": pairing_path(args.config, args.client).exists(),
             }
+    except ReconnectRequired as error:
+        result = {"status": "reconnect_required", "message": str(error)}
     except BlockingIOError:
         result = {"status": "busy", "message": "Another hook is finishing setup. Retry shortly."}
     except (OSError, ValueError, KeyError, TypeError, sqlite3.DatabaseError):

@@ -150,8 +150,17 @@ def run_probe(
         capture_config.write_text(
             json.dumps(
                 {
-                    "version": 2,
-                    "profiles": [{"user_id": CAPTURE_OWNER, "upload_key": CAPTURE_KEY}],
+                    "version": 3,
+                    "profiles": [
+                        {
+                            "user_id": CAPTURE_OWNER,
+                            "upload_key": CAPTURE_KEY,
+                            "client": "codex",
+                            "installation_id": "57a9c16d-595a-4c28-aa63-0ae62e61c284",
+                            "runtime": "codex_cli",
+                            "host_version": "synthetic-probe",
+                        }
+                    ],
                 }
             )
         )
@@ -162,6 +171,14 @@ def run_probe(
             pass
 
         def do_GET(self) -> None:
+            if self.path == "/users/me/conversation-capture/installations/history-imports":
+                payload = b'{"imports":[]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             payload = json.dumps({"models": []}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -173,6 +190,10 @@ def run_probe(
             nonlocal sequence
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             request = json.loads(raw)
+            if self.path == "/users/me/conversation-capture/installations/heartbeat":
+                self.send_response(204)
+                self.end_headers()
+                return
             if self.path == "/hooks/conversations":
                 assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
                 scope = request["context_id"]
@@ -286,6 +307,15 @@ def run_probe(
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), ModelHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    # Paired fixtures also check diagnostics/history. Confine these requests to
+    # the synthetic service, including their module-level default arguments.
+    pairing_path = plugin / "scripts/capture_pairing.py"
+    pairing_path.write_text(
+        pairing_path.read_text().replace(
+            'API_BASE = "https://api.pensieve.uk/users/me/conversation-capture"',
+            f'API_BASE = "http://127.0.0.1:{server.server_port}/users/me/conversation-capture"',
+        )
+    )
     hooks = json.loads((plugin / "hooks/codex.json").read_text())["hooks"]
     # Direct CLI settings need the plugin-root expansion normally supplied by
     # the loader. Otherwise execute the generated adapters and bundled helper,

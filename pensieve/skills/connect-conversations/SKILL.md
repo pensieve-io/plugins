@@ -48,7 +48,10 @@ Do not run setup in a remote container and describe the user's local app as conn
 
 For a connection check, use action `status` with the same client. Its output is
 safe to display. A paired credential for another client or account does not
-authorise this client. Stop and explain a `setup_error` without opening private
+authorise this client. For `reconnect_required`, start a new browser approval
+through Conversations. Older credentials are never migrated automatically;
+approved pairing replaces obsolete credential entries without deleting transcript
+spools. Stop and explain a `setup_error` without opening private
 configuration files. The user never needs to export chats, download setup files,
 paste tokens, or copy commands into a terminal.
 
