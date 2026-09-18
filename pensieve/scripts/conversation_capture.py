@@ -43,7 +43,18 @@ MAX_BATCH_BYTES = 262144
 MAX_BATCH_EVENTS = 100
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
 CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
-INTERNAL_MARKER = re.compile(r"<!-- pensieve-(?:capture-context|delivery)\b.*?-->", re.DOTALL)
+INTERNAL_MARKER = re.compile(
+    r"<!-- pensieve-(?:capture-context|delivery|mutation-receipt)\b.*?-->", re.DOTALL
+)
+MUTATION_MARKER = re.compile(r"<!-- pensieve-mutation-receipt:([0-9a-f-]{36}) -->")
+MUTATION_KINDS = {
+    "create_page": "create",
+    "edit_page": "edit",
+    "move_page": "move",
+    "merge_pages": "merge",
+    "delete_page": "delete",
+    "save_data": "save",
+}
 SECRET = re.compile(
     r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})|"
@@ -154,7 +165,7 @@ def is_set_context(name: object, namespace: object = None) -> bool:
 
 
 def is_uncaptured_tool(name: object, namespace: object = None) -> bool:
-    # Re-reading private history must not turn old/unconsented text into new
+    # Re-reading archived history must not turn old/unconsented text into new
     # company-eligible tool evidence. Keep archive reads out alongside hooks.
     private_tools = {"context_briefing", "list_work_conversations", "read_work_conversation"}
     return isinstance(name, str) and (
@@ -166,6 +177,61 @@ def is_uncaptured_tool(name: object, namespace: object = None) -> bool:
         }
         or (name in private_tools and namespace == "mcp__pensieve")
     )
+
+
+def mutation_tool(name: object, namespace: object = None) -> str | None:
+    for tool in MUTATION_KINDS:
+        if (name == tool and namespace == "mcp__pensieve") or name in {
+            prefix.replace("set_context", tool) for prefix in SET_CONTEXT_NAMES
+        }:
+            return tool
+    return None
+
+
+def mutation_receipt(tool: str | None, output: object, state: dict) -> str | None:
+    """Accept one receipt on its native successful result, never combined text."""
+    if tool is None:
+        return None
+    if isinstance(output, str):
+        try:
+            parsed = json.loads(output)
+        except ValueError:
+            parsed = None
+    else:
+        parsed = output
+    if isinstance(parsed, dict) and (parsed.get("isError") or parsed.get("is_error")):
+        return None
+    text = (
+        visible_text(parsed.get("content"))
+        if isinstance(parsed, dict) and "content" in parsed
+        else visible_text(output)
+    )
+    if tool == "save_data":
+        matches = MUTATION_MARKER.findall(text)
+        receipt = matches[0] if len(matches) == 1 else None
+    else:
+        if isinstance(parsed, dict) and "structuredContent" in parsed:
+            value = parsed["structuredContent"]
+        elif isinstance(parsed, dict) and "kind" in parsed:
+            value = parsed
+        else:
+            try:
+                value = json.loads(text)
+            except ValueError:
+                return None
+        receipt = (
+            value.get("conversation_receipt_id")
+            if isinstance(value, dict) and value.get("kind") == MUTATION_KINDS[tool]
+            else None
+        )
+    receipt = conversation_id(receipt)
+    seen = state.setdefault("mutation_receipts", [])
+    if receipt is None or receipt in seen:
+        return None
+    seen.append(receipt)
+    # Deduplicate direct/native representations, without unbounded local state.
+    del seen[:-2048]
+    return receipt
 
 
 def normalise(record: dict, client: str, session: str, state: dict) -> list[dict]:
@@ -203,6 +269,29 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                 return [{"kind": "user", "content": text, "new_turn": True}]
         if record.get("type") == "event_msg" and payload.get("type") == "item_completed":
             item = payload.get("item")
+            if (
+                payload.get("thread_id") == session
+                and isinstance(payload.get("turn_id"), str)
+                and payload["turn_id"] == state.get("turn_id")
+                and isinstance(item, dict)
+                and item.get("type") == "McpToolCall"
+                and item.get("server") == "pensieve"
+                and item.get("tool") in MUTATION_KINDS
+                and item.get("status") == "completed"
+            ):
+                # A direct call has its own output representation. Nested
+                # code-mode calls need this native record instead of exec text.
+                if state.get("calls", {}).get(item.get("id"), {}).get("mutation"):
+                    return []
+                output = item.get("result")
+                if not isinstance(output, dict) or output.get("isError"):
+                    return []
+                text = visible_text(output.get("content"))
+                receipt = mutation_receipt(item["tool"], output, state)
+                event = {"kind": "tool_result", "content": text}
+                if receipt:
+                    event["mutation_receipt_id"] = receipt
+                return [event] if text else []
             if (
                 payload.get("thread_id") == session
                 and payload.get("turn_id") == state.get("turn_id")
@@ -251,6 +340,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                     "selection": is_set_context(payload.get("name"), payload.get("namespace")),
                     "internal": internal,
                     "aggregate": is_code_mode_tool(payload.get("name"), payload.get("namespace")),
+                    "mutation": mutation_tool(payload.get("name"), payload.get("namespace")),
                 }
             if internal:
                 return []
@@ -285,7 +375,11 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                     # account/context; stop attributing later text to the old one.
                     result.append({"unknown_boundary": True})
             if text:
-                result.append({"kind": "tool_result", "content": text})
+                event = {"kind": "tool_result", "content": text}
+                receipt = mutation_receipt(call.get("mutation"), output, state)
+                if receipt:
+                    event["mutation_receipt_id"] = receipt
+                result.append(event)
             return result
         return []
     if (
@@ -309,6 +403,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                     state.setdefault("calls", {})[call] = {
                         "selection": is_set_context(name),
                         "internal": internal,
+                        "mutation": mutation_tool(name),
                     }
                     if not internal:
                         result.append({"kind": "tool_call", "content": name[:255]})
@@ -346,7 +441,15 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             elif not item.get("is_error"):
                 result.append({"unknown_boundary": True})
         if text:
-            result.append({"kind": "tool_result", "content": text})
+            event = {"kind": "tool_result", "content": text}
+            receipt = (
+                None
+                if item.get("is_error")
+                else mutation_receipt(call.get("mutation"), item.get("content"), state)
+            )
+            if receipt:
+                event["mutation_receipt_id"] = receipt
+            result.append(event)
     return result
 
 
@@ -540,6 +643,8 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         "occurred_at": occurred_at,
         "truncated": truncated or item.get("truncated", False),
     }
+    if item.get("mutation_receipt_id"):
+        event["mutation_receipt_id"] = item["mutation_receipt_id"]
     db.execute(
         "INSERT OR IGNORE INTO events(id,sequence,turn_group,segment,body,host_timestamp) VALUES (?,?,?,?,?,?)",
         (
@@ -807,6 +912,8 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
                 return False
             result = json.loads(response.read(4097))
     except HTTPError as exc:
+        if exc.code == 409 and batch.get("history_import_id"):
+            return {"status": "history_conflict"}
         if exc.code == 410:
             try:
                 result = json.loads(exc.read(4097))
@@ -1115,6 +1222,21 @@ def run_hook(
             pass
     if source_error is not None:
         raise source_error
+    if event != "SessionEnd" and deadline - time.monotonic() > 0.15:
+        from capture_history import sync
+
+        try:
+            sync(
+                config,
+                client,
+                state_root=state_root,
+                seconds=deadline - time.monotonic(),
+                endpoint=endpoint,
+            )
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.DatabaseError):
+            # History has its own durable checkpoints. It never rolls back or
+            # changes attribution for the live transcript just captured.
+            pass
     return {}
 
 

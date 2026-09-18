@@ -82,11 +82,14 @@ client's command runner for the bundled hook helper.
 4. Open the Pensieve marketplace, install **Pensieve**, sign in when prompted
    and start a new conversation.
 
-**ChatGPT desktop / Codex desktop:** with the
+**Codex desktop:** with the
 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) installed on the same
 computer, run the three Codex commands above. Restart the desktop app, open
 **Plugins**, select the Pensieve marketplace and enable the installed plugin.
-Review any hook permissions, then start a new chat in Work or Codex.
+Review any hook permissions, then start a new Codex task. Capture in this
+runtime remains subject to the acceptance checks below. Ordinary ChatGPT Chat
+is not a transcript capture runtime. ChatGPT Work has a separate execution
+environment and must be verified independently.
 
 **Managed ChatGPT workspaces:** an admin opens **Admin → Plugins → Add → Import
 marketplace**, enters `https://github.com/pensieve-io/plugins` as **Source**, and
@@ -112,9 +115,11 @@ The components available depend on the client and workspace settings:
 | Client | Installation and skills | Automatic context hooks | Verification |
 | --- | --- | --- | --- |
 | Codex CLI | Git marketplace; bundled MCP connection and skills | Supported by the packaged Codex adapter | Synthetic probes on 0.154.0; live install/update pending |
-| Claude Code | Git marketplace; bundled MCP connection and skills | Supported by the packaged Claude adapter | Synthetic probes on 2.1.267; live install/update pending |
+| Claude Code CLI | Git marketplace; bundled MCP connection and skills | Supported by the packaged Claude adapter | Synthetic probes on 2.1.276; live install/update pending |
+| Claude Code desktop | Desktop plugin manager; shared Claude Code settings | Official hook support; requires local helper access | Package capture acceptance pending |
 | Codex desktop app | Plugin marketplace; availability depends on account/workspace | Requires the app to run the packaged hooks and helper | Pending |
-| ChatGPT Desktop / managed workspace | Workspace admins can import this GitHub marketplace; app access and authentication are separate | Package import alone does not establish hook execution | Pending |
+| ChatGPT Work / managed workspace | Workspace admins can import this GitHub marketplace; app access and authentication are separate | Work documents command hooks; package import alone does not establish helper or transcript access | Pending |
+| Ordinary ChatGPT Chat | Available plugin skills and MCP tools | Does not provide this transcript capture contract | Unsupported for capture |
 | Claude Desktop Chat / web chat | Plugin skills and connectors where enabled | Claude documents hooks as unavailable in Chat | Pending |
 | Claude Cowork | Custom Git marketplace or plugin upload; skills and connectors | Claude documents hook support; this adapter still needs a live check | Pending |
 | Other MCP clients | Connect the hosted MCP service; install skills separately where supported | Requires a compatible hook runner | Client-specific |
@@ -123,7 +128,7 @@ Connecting only through MCP does not install skill files or lifecycle hooks.
 ChatGPT imports that declare MCP servers can be marked **Desktop only**, even
 when the server is remote. See [OpenAI's marketplace import guide](https://learn.chatgpt.com/docs/enterprise/plugin-management)
 and [Claude's plugin support guide](https://support.claude.com/en/articles/13837440-use-plugins-in-claude)
-for host capabilities. The table records package verification as of 15 September
+for host capabilities. The table records package verification as of 18 September
 2026; it does not imply production or desktop acceptance.
 
 Follow the [client setup guide](https://docs.pensieve.uk/mcp-server/clients)
@@ -169,12 +174,20 @@ default. Ask your agent: **“Use Pensieve’s connect-conversations skill.”**
 installed helper opens a browser approval link and completes device setup
 privately. Pensieve's Conversations page controls capture and whether useful
 work knowledge may contribute to the selected company's context layer.
+Connection approval makes saved work transcripts visible to that company.
+To include earlier work, choose the connected installation, company, project
+folder and date range in Conversations. The helper automatically imports
+matching local history with original timestamps and resumes after interruption.
+No export or manual upload is needed. Imports wait for the supported app to run;
+only history still available in that app's local store can be imported.
 Pairing alone never opts you in, and an ordinary MCP connection alone does not
 provide transcript access. See the supported-runtime limits before connecting.
 
 ## Other ways to use the skills
 
-Scheduled tasks inherit installed skills, so a role can run on a cadence — a Monday operating brief, a weekly customer-signal review — with the destination and schedule named in the task, never in the skill.
+Scheduled tasks inherit installed skills, so a role can run on a cadence, such as
+a Monday operating brief or a weekly customer-signal review, with the destination
+and schedule named in the task, never in the skill.
 
 `npx skills add pensieve-io/plugins` installs the skill files alone into harnesses
 that read Agent Skills. MCP clients connected to the

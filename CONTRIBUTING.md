@@ -14,6 +14,8 @@ This repository owns the installable plugin. Edit the files here directly:
   [conversation-capture.md](docs/conversation-capture.md).
 - `pensieve/scripts/capture_setup.py`: browser-approved pairing and safe connection status.
 - `pensieve/scripts/capture_pairing.py` and `capture_config.py`: private pairing exchange, client-scoped credentials and bounded hook completion.
+- `pensieve/scripts/capture_history.py`: explicit server-granted project/date
+  imports from standard local transcript stores, with bounded resumable state.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
 The application repository owns the hosted MCP implementation, authentication,

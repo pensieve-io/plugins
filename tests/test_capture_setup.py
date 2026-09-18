@@ -15,6 +15,14 @@ import capture_setup as setup
 import conversation_capture as capture
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def no_external_history_requests(monkeypatch):
+    # Pairing tests own their loopback service. Import worker protocol and hook
+    # wiring are exercised separately against synthetic history fixtures.
+    monkeypatch.setattr("capture_history.sync", lambda *a, **kw: None)
+
+
 OWNER = "353e0b53-8178-4a3c-8d40-a07414144741"
 OTHER = "173e0b53-8178-4a3c-8d40-a07414144741"
 KEY = "synthetic-upload-only-key"
@@ -270,6 +278,7 @@ def test_hook_finishes_pairing_without_reading_or_backfilling_old_work(
         + "\n"
     )
     monkeypatch.setattr(pairing, "heartbeat", lambda *a, **kw: None)
+    monkeypatch.setattr("capture_history.sync", lambda *a, **kw: None)
     monkeypatch.setattr(
         capture, "upload", lambda *a, **kw: pytest.fail("pairing backfilled prior work")
     )

@@ -75,11 +75,16 @@ def timestamp(value: object) -> float:
     return parsed.timestamp()
 
 
-def request(base: str, path: str, body: dict, timeout: float, key: str | None = None):
+def request(base: str, path: str, body: dict | None, timeout: float, key: str | None = None):
     headers = {"Content-Type": "application/json", "User-Agent": "Pensieve-Plugin-Pairing/1.0"}
     if key is not None:
         headers["Authorization"] = "Bearer " + key
-    req = Request(checked_base(base) + path, data=encoded(body), headers=headers, method="POST")
+    req = Request(
+        checked_base(base) + path,
+        data=encoded(body) if body is not None else None,
+        headers=headers,
+        method="POST" if body is not None else "GET",
+    )
     opener = build_opener(ProxyHandler({}), NoRedirects())
     try:
         with opener.open(req, timeout=max(0.05, timeout)) as response:

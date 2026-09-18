@@ -6,10 +6,10 @@ it never enables capture or company knowledge contribution.
 
 The global **Save agent transcripts** control still applies to all of a person's
 supported agents and devices. The Conversations page owns company contribution
-and retention choices. Full history is author-only under the new reader
-contract; explicitly authorised company knowledge and its selected supporting
-excerpts are shared. Installing an upload key grants no transcript-reading or
-MCP authority.
+and retention choices. Connection approval explicitly shares captured work
+conversations with the selected company, including the saved transcript.
+Extracted knowledge can contribute to the company's existing context layer.
+Installing an upload key grants no transcript-reading or MCP authority.
 
 Work belongs to the selected Pensieve context. No selected context means no
 upload. A → B → A saves separate portions without copying the whole session
@@ -77,6 +77,52 @@ fixtures can override the base.
 Retries use one bounded exchange per eligible hook, respect the server poll
 interval and share a private lock with interactive setup. There is no daemon.
 
+## Import previous work automatically
+
+In Conversations, choose the connected installation, company, project folder
+and how far back to import. This is permission to share the matching saved work
+with that company. The plugin does not guess which company an old chat belongs
+to. No chat exports, uploads or terminal commands are required.
+
+The installed helper fetches authorised requests at ordinary agent hooks and
+resumes bounded work after live capture. The setup skill can also run a bounded
+sync directly. An idle or unsupported app cannot receive a browser request by
+itself. The UI must distinguish waiting for the app, running and completed.
+Large imports resume on later hooks; no permanent background process is installed.
+
+Only standard local stores are scanned: Codex's `~/.codex/sessions` and
+`~/.codex/archived_sessions`, and Claude Code's `~/.claude/projects`. The selected
+folder is compared with the transcript's native recorded working directory,
+including descendants. It is never opened as an arbitrary filesystem source.
+Symlinked stores, directories and files are excluded. A folder change inside a
+conversation is respected. Missing working-directory or timestamp evidence is
+not guessed. Only history still retained locally can be imported; deleted files,
+cloud-only chats and history on another machine are unavailable.
+
+The server issues a short-lived import grant with the exact company, client,
+capture generation and original-time window. `GET /installations/history-imports`
+uses the installation's upload key and returns `{imports: [...]}`. Each grant
+contains `id`, `context_id`, `client`, `capture_generation`, nullable
+`publication_generation`, nullable `since`, `until` and `project_path`.
+Upload batches use the normal upload endpoint with an added `history_import_id`
+and the exact approved `history_project_path`.
+`POST /installations/history-imports/{id}/progress` reports `state`,
+`processed_conversations`, `processed_events` and a content-free `error_code`.
+Progress counts processed records, including already-known events.
+
+Original timestamps are preserved. Event identities match live capture's host
+conversation and committed byte position, so the server can deduplicate retries
+and overlapping imports. An import gets its own deterministic segment identity.
+Events already assigned to another company cause an explicit conflict rather
+than being silently moved. Exact pending batches and parser cursors are saved
+atomically in private local SQLite state, then sent. Revoked grants clear pending
+content on the next successful poll. Failed, deleted or expired uploads never
+roll old history into a newly authorised segment.
+
+Each pass has a time and byte budget. Discovery is capped at 10,000 files and
+10,000 directories; oversized or unreadable records fail the request visibly.
+These limits do not change the existing future-only live scanner.
+
 ## What is saved
 
 - Visible user and assistant messages.
@@ -102,6 +148,12 @@ attribution. Codex also matches its turn ID. Only an observed user prompt may
 wait provisionally for its own marker; ambiguous/unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
+Successful native Pensieve page mutations and `save_data` results can include
+an opaque server receipt. Only the matching native result event carries it;
+quoted receipts, failed calls and aggregate output cannot supply provenance.
+The server validates account, company, client and conversation before linking
+the actual write to its transcript evidence. Receipt markers are removed from
+visible transcript text.
 
 SessionStart establishes a baseline, prompt/Stop checkpoints work, and
 SessionEnd attempts a short best-effort flush. Immutable events and exact-byte
@@ -127,12 +179,19 @@ capture and withdrawing shared company knowledge remain separate service actions
 
 ## Supported clients and verification
 
-The pilot targets local macOS Codex CLI and Claude Code. Desktop, ChatGPT Work,
-Cowork, ordinary chat tabs, Windows and ephemeral sessions without a local
-transcript require separate verification. MCP connectivity does not prove capture.
+The tested adapters target local macOS Codex CLI and Claude Code CLI.
+[Claude Code desktop](https://code.claude.com/docs/en/desktop) documents shared
+hook settings, and [Codex/ChatGPT Work](https://developers.openai.com/plugins/guides/submit-claude-plugin)
+documents command hooks. This package still needs live acceptance in each
+desktop runtime. [Cowork supports hooks](https://support.claude.com/en/articles/13837440-use-plugins-in-claude),
+but its local or cloud execution environment does not guarantee access to the
+host stores above. Ordinary Claude Chat and ordinary ChatGPT Chat do not provide
+this capture contract. MCP connectivity and installing skills do not prove
+transcript access. Windows and ephemeral sessions remain unverified.
 
 Package tests cover browser pairing, private storage, one-off config migration,
-client/account isolation, retry, nullable retention, expiry and no-backfill behaviour. Synthetic installed-client probes are
+client/account isolation, retry, nullable retention, expiry, unchanged live baselines,
+explicit historical grants and native mutation provenance. Synthetic installed-client probes are
 in [client-probes.md](client-probes.md). Live authenticated browser pairing, fresh installation, updates and resumed
 sessions remain release checks.
 Deploy the companion app/API/MCP/scheduler before publishing the plugin feature.

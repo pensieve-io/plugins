@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from capture_pairing import API_BASE, RUNTIMES, checked_base, pairing_path, star
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "poll", "status"))
+    parser.add_argument("action", choices=("start", "poll", "status", "sync"))
     parser.add_argument("--client", choices=("codex", "claude"), required=True)
     parser.add_argument("--runtime", choices=sorted(RUNTIMES), default="unknown")
     parser.add_argument("--host-version", default="")
@@ -39,6 +40,14 @@ def main() -> None:
             )
         elif args.action == "poll":
             result = wait(args.config, args.client, args.wait)
+        elif args.action == "sync":
+            from capture_history import sync
+
+            sync(args.config, args.client, seconds=args.wait or 45, base=args.endpoint)
+            result = {
+                "status": "sync_checked",
+                "message": "Check import progress in Pensieve. Pending work resumes on later agent hooks.",
+            }
         else:
             if args.config.exists():
                 with config_lock(args.config):
@@ -54,7 +63,7 @@ def main() -> None:
             }
     except BlockingIOError:
         result = {"status": "busy", "message": "Another hook is finishing setup. Retry shortly."}
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.DatabaseError):
         result = {
             "status": "setup_error",
             "message": "Setup could not finish. Check private config permissions and start again.",
