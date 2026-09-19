@@ -73,7 +73,7 @@ def setup(tmp_path, monkeypatch, client="codex"):
         "publication_generation": GENERATION,
         "since": "2026-09-01T00:00:00+00:00",
         "until": "2026-09-18T00:00:00+00:00",
-        "project_path": "/work/acme",
+        "scope": "all_local",
     }
     profile = {
         "user_id": OWNER,
@@ -124,7 +124,7 @@ def events(sent):
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
-def test_explicit_folder_and_original_time_window_only(tmp_path, monkeypatch, client):
+def test_explicit_app_and_original_time_window_only(tmp_path, monkeypatch, client):
     root, grant, service, sent, progress, run, _ = setup(tmp_path, monkeypatch, client)
     records = [
         user("too old", client, "2026-08-31T00:00:00+00:00"),
@@ -148,7 +148,9 @@ def test_explicit_folder_and_original_time_window_only(tmp_path, monkeypatch, cl
     assert len(sent) == 1
 
 
-def test_changed_cwd_sibling_private_content_and_reasoning_are_excluded(tmp_path, monkeypatch):
+def test_project_changes_do_not_filter_chats_but_secrets_and_reasoning_are_excluded(
+    tmp_path, monkeypatch
+):
     root, _, _, sent, _, run, _ = setup(tmp_path, monkeypatch)
     write(
         root / "chat.jsonl",
@@ -165,10 +167,14 @@ def test_changed_cwd_sibling_private_content_and_reasoning_are_excluded(tmp_path
         ),
     )
     run()
-    assert [e["content"] for e in events(sent)] == ["Work [REDACTED_SECRET]", "Subproject"]
+    assert [e["content"] for e in events(sent)] == [
+        "Work [REDACTED_SECRET]",
+        "Other company",
+        "Subproject",
+    ]
 
 
-def test_unrelated_folder_and_symlinks_are_never_followed(tmp_path, monkeypatch):
+def test_all_projects_import_but_symlinks_are_never_followed(tmp_path, monkeypatch):
     root, _, _, sent, progress, run, _ = setup(tmp_path, monkeypatch)
     write(root / "unrelated.jsonl", codex_records(user("private"), cwd="/private"))
     outside = tmp_path / "outside.jsonl"
@@ -176,7 +182,7 @@ def test_unrelated_folder_and_symlinks_are_never_followed(tmp_path, monkeypatch)
     (root / "linked.jsonl").symlink_to(outside)
     (root / "linked-folder").symlink_to(tmp_path, target_is_directory=True)
     run()
-    assert not sent
+    assert [e["content"] for e in events(sent)] == ["private"]
     assert progress[-1]["state"] == "completed"
 
 
@@ -233,7 +239,7 @@ def test_authority_failure_never_rolls_old_history_into_new_segment(tmp_path, mo
     assert progress[-1]["error_code"] == "import_failed"
 
 
-def test_changed_grant_and_traversal_fail_closed(tmp_path, monkeypatch):
+def test_changed_grant_and_missing_explicit_scope_fail_closed(tmp_path, monkeypatch):
     root, grant, service, sent, progress, run, _ = setup(tmp_path, monkeypatch)
     write(root / "chat.jsonl", codex_records(user("Work")))
     service["result"] = False
@@ -243,7 +249,7 @@ def test_changed_grant_and_traversal_fail_closed(tmp_path, monkeypatch):
     assert len(sent) == 1
     assert progress[-1]["state"] == "failed"
     with pytest.raises(ValueError):
-        history.validate_grant({**grant, "project_path": "/work/../private"}, "codex")
+        history.validate_grant({**grant, "scope": "project"}, "codex")
 
 
 def test_mutation_receipts_require_native_success_and_matching_tool():
@@ -308,7 +314,7 @@ def test_history_protocol_get_grant_and_exact_upload_receipt(tmp_path, monkeypat
         "publication_generation": GENERATION,
         "since": None,
         "until": "2026-09-18T00:00:00+00:00",
-        "project_path": "/work/acme",
+        "scope": "all_local",
     }
     config = tmp_path / "config" / "capture.json"
     install_profile(
@@ -377,7 +383,8 @@ def test_history_protocol_get_grant_and_exact_upload_receipt(tmp_path, monkeypat
         server.server_close()
         thread.join()
     assert requests[0]["history_import_id"] == grant["id"]
-    assert requests[0]["history_project_path"] == grant["project_path"]
+    assert requests[0]["history_scope"] == "all_local"
+    assert "history_project_path" not in requests[0]
     assert progress[-1]["state"] == "completed"
 
 
@@ -469,3 +476,39 @@ def test_history_import_does_not_adopt_transcript_search_results(tmp_path, monke
     assert "transcript search result" not in captured
     assert "page search result" in captured
     assert "Do not persist this query" not in json.dumps(captured)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_all_local_import_includes_multiple_projects_and_folderless_chats(
+    tmp_path, monkeypatch, client
+):
+    root, _, _, sent, progress, run, _ = setup(tmp_path, monkeypatch, client)
+    for index, folder in enumerate(["/work/one", "/work/two", None]):
+        session = str(uuid.uuid4())
+        record = user(f"Chat {index}", client, cwd=folder)
+        records = codex_records(record, cwd=folder) if client == "codex" else [record]
+        if client == "codex":
+            records[0]["payload"]["id"] = session
+        else:
+            record["sessionId"] = session
+        write(root / f"project-{index}/session.jsonl", records)
+    run()
+    assert sorted(e["content"] for e in events(sent)) == ["Chat 0", "Chat 1", "Chat 2"]
+    assert progress[-1]["processed_conversations"] == 3
+    assert all(json.loads(batch["body"])["history_scope"] == "all_local" for batch in sent)
+
+
+@pytest.mark.parametrize("scope", [None, "project", "", "all", 1])
+def test_invalid_or_old_grants_never_start_scanning(tmp_path, monkeypatch, scope):
+    _, grant, _, sent, _, run, _ = setup(tmp_path, monkeypatch)
+    if scope is None:
+        grant.pop("scope")
+        grant["project_path"] = "/work/acme"
+    else:
+        grant["scope"] = scope
+    monkeypatch.setattr(
+        history, "history_roots", lambda client: pytest.fail("Invalid grant must not scan")
+    )
+    with pytest.raises(ValueError):
+        run()
+    assert not sent

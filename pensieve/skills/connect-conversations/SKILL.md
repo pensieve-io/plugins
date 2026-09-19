@@ -38,10 +38,12 @@ Do not run setup in a remote container and describe the user's local app as conn
 4. Invite the user to continue their work with the chosen Pensieve company.
    Capture starts from a fresh local baseline after setup. Confirm actual
    capture from the Conversations page's last upload, never from pairing alone.
-5. To include earlier work, the user chooses the company, project folder and
-   date range in Conversations. Run the helper with action `sync`, the same
-   `--client` and `--wait 45` to check authorised import requests. This reads
-   only the host's standard transcript store under the server's explicit grant.
+5. To include earlier work, the user chooses the company, connected computer
+   and date range in Conversations. This imports all available local conversations
+   from this app, including chats without a project. No folder path is needed.
+   Run the helper with action `sync`, the same `--client` and `--wait 45` to
+   check authorised import requests. This reads
+   only the host's standard transcript store under an explicit `all_local` server grant.
    It never opens arbitrary selected folders or guesses a chat's company.
    Remaining work resumes at later hooks. `sync_checked` means a bounded check
    ran, not that all history finished; show progress from Conversations.

@@ -1,6 +1,6 @@
 """Bounded, browser-authorised local history import. Python 3.9+, stdlib only.
 
-The server grant supplies the destination, folder and original-time window.
+The server grant authorises all local app conversations in an original-time window.
 Nothing infers a company from an old chat, and no user-supplied path is opened.
 """
 
@@ -55,7 +55,7 @@ def validate_grant(value: object, client: str) -> dict:
             "publication_generation",
             "since",
             "until",
-            "project_path",
+            "scope",
         )
     }
     if (
@@ -70,27 +70,12 @@ def validate_grant(value: object, client: str) -> dict:
         )
         or aware_time(result["until"]) is None
         or (result["since"] is not None and aware_time(result["since"]) is None)
-        or not isinstance(result["project_path"], str)
-        or not Path(result["project_path"]).is_absolute()
-        or ".." in Path(result["project_path"]).parts
-        or len(result["project_path"]) > 4096
+        or result["scope"] != "all_local"
     ):
         raise ValueError("Invalid history grant")
     if result["since"] is not None and aware_time(result["since"]) > aware_time(result["until"]):
         raise ValueError("Invalid history window")
     return result
-
-
-def within_project(cwd: object, project: str) -> bool:
-    # Lexical comparison of native recorded paths. Do not resolve or read an
-    # arbitrary project path, and do not interpret a home-directory shorthand.
-    if not isinstance(cwd, str) or not Path(cwd).is_absolute() or ".." in Path(cwd).parts:
-        return False
-    try:
-        Path(cwd).relative_to(project)
-        return True
-    except ValueError:
-        return False
 
 
 def open_source(root: Path, relative: str, *, directory: bool = False):
@@ -162,10 +147,10 @@ def discover(state: dict, roots: list[Path], deadline: float) -> None:
 def source_identity(record: dict, client: str):
     if client == "codex":
         if record.get("type") == "session_meta" and isinstance(record.get("payload"), dict):
-            return record["payload"].get("id"), record["payload"].get("cwd")
+            return record["payload"].get("id")
     elif record.get("isSidechain") is False:
-        return record.get("sessionId"), record.get("cwd")
-    return None, None
+        return record.get("sessionId")
+    return None
 
 
 def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadline: float):
@@ -203,17 +188,11 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
             if not isinstance(record, dict):
                 current["offset"] = handle.tell()
                 continue
-            session, cwd = source_identity(record, grant["client"])
+            session = source_identity(record, grant["client"])
             if current.get("session") is None and valid_uuid(session):
-                current.update(session=session, cwd=cwd)
+                current.update(session=session)
             elif session is not None and session != current.get("session"):
                 raise ValueError("source_changed")
-            if grant["client"] == "codex" and record.get("type") == "turn_context":
-                cwd = record.get("payload", {}).get("cwd")
-            elif grant["client"] == "claude":
-                cwd = record.get("cwd")
-            if isinstance(cwd, str):
-                current["cwd"] = cwd
             if not current.get("session"):
                 current["offset"] = handle.tell()
                 continue
@@ -227,7 +206,6 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
                 occurred is not None
                 and occurred <= aware_time(grant["until"])
                 and (grant["since"] is None or occurred >= aware_time(grant["since"]))
-                and within_project(current.get("cwd"), grant["project_path"])
             ):
                 for index, item in enumerate(items):
                     if "kind" not in item:
@@ -266,7 +244,7 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
         body = {
             "batch_id": str(uuid.uuid5(uuid.UUID(grant["id"]), events[0]["event_id"])),
             "history_import_id": grant["id"],
-            "history_project_path": grant["project_path"],
+            "history_scope": grant["scope"],
             "client": grant["client"],
             "host_conversation_id": current["session"],
             "segment_id": segment,

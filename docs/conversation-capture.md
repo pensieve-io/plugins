@@ -81,9 +81,9 @@ interval and share a private lock with interactive setup. There is no daemon.
 
 ## Import previous work automatically
 
-In Conversations, choose the connected installation, company, project folder
-and how far back to import. This is permission to share the matching saved work
-with that company. The plugin does not guess which company an old chat belongs
+In Conversations, choose the connected computer, company and how far back to
+import. This authorises all available conversations from that app on that computer
+within the selected date range, including chats without a project folder. The plugin does not guess which company an old chat belongs
 to. No chat exports, uploads or terminal commands are required.
 
 The installed helper fetches authorised requests at ordinary agent hooks and
@@ -93,21 +93,21 @@ itself. The UI must distinguish waiting for the app, running and completed.
 Large imports resume on later hooks; no permanent background process is installed.
 
 Only standard local stores are scanned: Codex's `~/.codex/sessions` and
-`~/.codex/archived_sessions`, and Claude Code's `~/.claude/projects`. The selected
-folder is compared with the transcript's native recorded working directory,
-including descendants. It is never opened as an arbitrary filesystem source.
-Symlinked stores, directories and files are excluded. A folder change inside a
-conversation is respected. Missing working-directory or timestamp evidence is
-not guessed. Only history still retained locally can be imported; deleted files,
+`~/.codex/archived_sessions`, and Claude Code's `~/.claude/projects`. Project
+folders do not filter the import. Project changes inside a conversation and
+missing project metadata do not exclude its visible messages. Arbitrary folders
+are never opened; symlinked stores, directories and files are excluded. Native
+session identity and original timestamp evidence are still required. Only history still retained locally can be imported; deleted files,
 cloud-only chats and history on another machine are unavailable.
 
 The server issues a short-lived import grant with the exact company, client,
 capture generation and original-time window. `GET /installations/history-imports`
 uses the installation's upload key and returns `{imports: [...]}`. Each grant
 contains `id`, `context_id`, `client`, `capture_generation`, nullable
-`publication_generation`, nullable `since`, `until` and `project_path`.
+`publication_generation`, nullable `since`, `until` and `scope: "all_local"`.
 Upload batches use the normal upload endpoint with an added `history_import_id`
-and the exact approved `history_project_path`.
+and `history_scope: "all_local"`. Missing or obsolete project scope is rejected,
+not reinterpreted as consent for all local history.
 `POST /installations/history-imports/{id}/progress` reports `state`,
 `processed_conversations`, `processed_events` and a content-free `error_code`.
 Progress counts processed records, including already-known events.

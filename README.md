@@ -175,9 +175,11 @@ installed helper opens a browser approval link and completes device setup
 privately. Pensieve's Conversations page controls capture and whether useful
 work knowledge may contribute to the selected company's context layer.
 Connection approval makes saved work transcripts visible to that company.
-To include earlier work, choose the connected installation, company, project
-folder and date range in Conversations. The helper automatically imports
-matching local history with original timestamps and resumes after interruption.
+To include earlier work, choose the connected computer, company and date range
+in Conversations. The helper imports all available local chats from that app,
+including chats without a project, with original timestamps and resumes after
+interruption. No folder path or project selection is needed. Requests and uploads
+require an explicit `all_local` grant; obsolete project-scoped grants are rejected.
 No export or manual upload is needed. Imports wait for the supported app to run;
 only history still available in that app's local store can be imported.
 Pairing alone never opts you in, and an ordinary MCP connection alone does not
