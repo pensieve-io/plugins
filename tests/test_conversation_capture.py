@@ -27,6 +27,14 @@ ACCEPTED = {"status": "accepted", "expires_at": EXPIRY}
 EXPIRED = {"status": "expired", "expires_at": EXPIRY}
 
 
+@pytest.fixture(autouse=True)
+def isolated_capture_services(monkeypatch):
+    # Paired fixtures must not contact hosted diagnostics or history services.
+    # Their protocols are tested separately against synthetic services.
+    monkeypatch.setattr("capture_pairing.heartbeat", lambda *a, **kw: None)
+    monkeypatch.setattr("capture_history.sync", lambda *a, **kw: None)
+
+
 def marker(
     client="codex",
     owner=OWNER,
@@ -117,18 +125,31 @@ def append(path, *records):
             handle.write(json.dumps(record).encode() + b"\n")
 
 
-def config(tmp_path, profiles=None):
-    path = tmp_path / "capture.json"
-    path.write_text(
-        json.dumps(
+def config_payload(profiles=None, client="codex"):
+    return {
+        "version": 3,
+        "profiles": [
             {
-                "version": 2,
-                "profiles": profiles
-                if profiles is not None
-                else [{"user_id": OWNER, "upload_key": KEY}],
+                **profile,
+                "client": client,
+                "installation_id": str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"{client}:{profile['user_id']}:{profile['upload_key']}"
+                    )
+                ),
+                "runtime": "unknown",
+                "host_version": "",
             }
-        )
-    )
+            for profile in (
+                profiles if profiles is not None else [{"user_id": OWNER, "upload_key": KEY}]
+            )
+        ],
+    }
+
+
+def config(tmp_path, profiles=None, client="codex"):
+    path = tmp_path / "capture.json"
+    path.write_text(json.dumps(config_payload(profiles, client)))
     path.chmod(0o600)
     return path
 
@@ -139,7 +160,7 @@ def setup(tmp_path, monkeypatch, client="codex", prior=(), profiles=None):
     if client == "codex":
         append(path, {"type": "session_meta", "payload": {"id": SESSION}})
     append(path, *prior)
-    cfg = config(tmp_path, profiles)
+    cfg = config(tmp_path, profiles, client)
     state = tmp_path / "spool"
     calls = []
 
@@ -173,7 +194,8 @@ def pending(state):
         db.close()
 
 
-def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch):
+@pytest.mark.parametrize("expiry", [EXPIRY, None])
+def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch, expiry):
     real_upload = capture.upload
     path, cfg, state, _, _ = setup(tmp_path, monkeypatch)
     monkeypatch.setattr(capture, "upload", real_upload)
@@ -202,7 +224,7 @@ def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch
                     "conversation_id": SESSION,
                     "segment_id": batch["segment_id"],
                     "accepted_events": len(batch["events"]),
-                    "expires_at": EXPIRY,
+                    "expires_at": expiry,
                 }
             ).encode()
             self.send_response(200)
@@ -698,7 +720,7 @@ def test_private_spool_and_removed_profile_preserve_pending_without_upload(tmp_p
     assert pending(state) == 2
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE(next(state.glob("*.sqlite3")).stat().st_mode) == 0o600
-    cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+    cfg.write_text(json.dumps(config_payload([])))
     run()
     assert pending(state) == 2
 
@@ -925,7 +947,7 @@ def test_disabling_and_reenabling_never_backfills_disabled_history(tmp_path, mon
     if missing:
         cfg.unlink()
     else:
-        cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+        cfg.write_text(json.dumps(config_payload([])))
     append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
     original_scan = capture.scan
     monkeypatch.setattr(
@@ -1016,7 +1038,7 @@ def test_selection_destination_never_inherits_previous_owner_title(tmp_path, mon
 
 def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_path, monkeypatch):
     path = tmp_path / "new-transcript.jsonl"
-    cfg = config(tmp_path)
+    cfg = config(tmp_path, client="claude")
     state = tmp_path / "spool"
     calls = []
     monkeypatch.setattr(
@@ -1058,8 +1080,11 @@ def test_claude_compaction_and_local_commands_preserve_segment(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
-def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
-    tmp_path, monkeypatch, client
+@pytest.mark.parametrize(
+    "tool", ["context_briefing", "list_work_conversations", "read_work_conversation"]
+)
+def test_private_tool_results_are_excluded_even_when_called_normally(
+    tmp_path, monkeypatch, client, tool
 ):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
     if client == "codex":
@@ -1068,7 +1093,7 @@ def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
             "payload": {
                 "type": "function_call",
                 "call_id": "hook",
-                "name": "mcp__pensieve__context_briefing",
+                "name": f"mcp__pensieve__{tool}",
             },
         }
         tool_result = {
@@ -1085,7 +1110,7 @@ def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
             {
                 "type": "tool_use",
                 "id": "hook",
-                "name": "mcp__plugin_pensieve_pensieve__context_briefing",
+                "name": f"mcp__plugin_pensieve_pensieve__{tool}",
                 "input": {},
             }
         ]
@@ -1103,6 +1128,111 @@ def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
     )
     run()
     assert [event["kind"] for event in events(calls)] == ["user", "assistant"]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize(
+    "node_types", [["transcript"], ["page", "transcript"], ["page", "data"], None]
+)
+def test_search_capture_uses_native_arguments_and_persists_result_exclusion(
+    tmp_path, monkeypatch, client, node_types
+):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch, client)
+    arguments = {"query": "Private query must never enter capture state", "node_types": node_types}
+    # The same output text is used for every case. Only the native arguments
+    # establish whether this search can contain archived conversation text.
+    output = "Result text mentioning transcript, page and data"
+    if client == "codex":
+        tool_call = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "search-call",
+                "name": "search",
+                "namespace": "mcp__pensieve",
+                "arguments": json.dumps(arguments),
+            },
+        }
+        tool_result = {
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "search-call", "output": output},
+        }
+    else:
+        tool_call = assistant(client=client)
+        tool_call["message"]["content"] = [
+            {
+                "type": "tool_use",
+                "id": "search-call",
+                "name": "mcp__plugin_pensieve_pensieve__search",
+                "input": arguments,
+            }
+        ]
+        tool_result = user(client=client)
+        tool_result["message"]["content"] = [
+            {"type": "tool_result", "tool_use_id": "search-call", "content": output}
+        ]
+    append(path, user(client=client), hook_record(client), tool_call)
+    run()
+    db = sqlite3.connect(next(state.glob("*.sqlite3")))
+    stored = db.execute("SELECT body FROM state").fetchone()[0]
+    db.close()
+    excluded = "transcript" in (node_types or [])
+    assert json.loads(stored)["calls"]["search-call"]["internal"] is excluded
+    assert arguments["query"] not in stored
+    append(path, tool_result, assistant(client=client))
+    run()
+    captured = events(calls)
+    assert (output in [item["content"] for item in captured]) is not excluded
+    assert [item["kind"] for item in captured] == (
+        ["user", "assistant"] if excluded else ["user", "tool_call", "tool_result", "assistant"]
+    )
+
+
+@pytest.mark.parametrize(
+    "name,namespace",
+    [
+        ("mcp__pensieve__search", None),
+        ("mcp__plugin_pensieve_pensieve__search", None),
+        ("mcp__plugin:pensieve:pensieve__search", None),
+        ("search", "mcp__pensieve"),
+    ],
+)
+def test_transcript_search_guard_requires_native_pensieve_tool_identity(name, namespace):
+    assert capture.is_uncaptured_tool(name, namespace, {"node_types": ["transcript"]})
+    assert not capture.is_uncaptured_tool(name, namespace, {"node_types": ["page", "data"]})
+    assert not capture.is_uncaptured_tool(name, namespace, {})
+    assert not capture.is_uncaptured_tool("search", "mcp__other", {"node_types": ["transcript"]})
+
+
+@pytest.mark.parametrize("arguments", [None, "not valid JSON", [], {"node_types": "transcript"}])
+def test_unknown_native_search_arguments_fail_closed(arguments):
+    assert capture.is_uncaptured_tool("mcp__pensieve__search", arguments=arguments)
+
+
+def test_codex_custom_search_input_excludes_its_matching_result():
+    state = {"calls": {}}
+    tool_call = {
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "mcp__pensieve__search",
+            "call_id": "custom-search",
+            "input": json.dumps({"node_types": ["transcript"]}),
+        },
+    }
+    assert capture.normalise(tool_call, "codex", SESSION, state) == []
+    # A restart restores the durable boolean, without retaining arguments.
+    restored = json.loads(json.dumps(state))
+    tool_result = {
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "custom-search",
+            "output": "Legacy private conversation snippet",
+        },
+    }
+    assert capture.normalise(tool_result, "codex", SESSION, restored) == []
+    assert not restored["calls"]
 
 
 def native_selection(context=12, turn="turn-one", call_id="nested-call", server="pensieve"):
@@ -1216,11 +1346,11 @@ def test_removing_one_profile_excludes_its_disabled_interval_and_keeps_old_backl
     append(path, user("Consented prompt"), hook_record(), assistant("Consented answer"))
     monkeypatch.setattr(capture, "upload", lambda *args: False)
     run()
-    cfg.write_text(json.dumps({"version": 2, "profiles": prof[1:]}))
+    cfg.write_text(json.dumps(config_payload(prof[1:])))
     run()  # Observe the per-profile removal before the disabled text exists.
     append(path, assistant("Disabled interval answer"))
     run()
-    cfg.write_text(json.dumps({"version": 2, "profiles": prof}))
+    cfg.write_text(json.dumps(config_payload(prof)))
     monkeypatch.setattr(
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
     )
@@ -1339,26 +1469,17 @@ def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediat
     monkeypatch.setattr(capture, "upload", lambda *args: False)
     append(path, user("Enabled prompt"), hook_record(), assistant("Enabled answer"))
     run()
-    cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+    cfg.write_text(json.dumps(config_payload([])))
     append(path, user("Disabled prompt"), hook_record(), assistant("Disabled answer"))
-    cfg.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "profiles": [{"user_id": OWNER, "upload_key": OTHER_KEY}],
-            }
-        )
-    )
+    cfg.write_text(json.dumps(config_payload([{"user_id": OWNER, "upload_key": OTHER_KEY}])))
     monkeypatch.setattr(
         capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
     )
     run()
-    assert [event["content"] for event in events(calls)] == ["Enabled prompt", "Enabled answer"]
+    assert not calls and pending(state) == 0
     append(path, user("Reenabled prompt"), hook_record(), assistant("Reenabled answer"))
     run()
     assert [event["content"] for event in events(calls)] == [
-        "Enabled prompt",
-        "Enabled answer",
         "Reenabled prompt",
         "Reenabled answer",
     ]
@@ -1460,3 +1581,287 @@ def test_baseline_mid_turn_does_not_queue_orphan_outputs(tmp_path, monkeypatch, 
     run()
     assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
     assert pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_raw_deletion_drops_queued_history_without_resurrecting_it(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("Deleted question", client),
+        hook_record(client),
+        assistant("Deleted answer", client),
+    )
+    monkeypatch.setattr(capture, "upload", lambda *args: {"status": "deleted"})
+    run()
+    assert pending(state) == 0
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    run()
+    assert not calls
+    append(path, user("New question", client), hook_record(client), assistant("New answer", client))
+    run()
+    assert [event["content"] for event in events(calls)] == ["New question", "New answer"]
+
+
+@pytest.mark.parametrize("remove_first", [False, True])
+def test_repairing_cannot_replay_revoked_installation_outbox(tmp_path, monkeypatch, remove_first):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: "forbidden")
+    append(path, user("Revoked queued question"), hook_record(), assistant("Revoked queued answer"))
+    run()
+    assert pending(state) == 2
+    if remove_first:
+        cfg.write_text(json.dumps(config_payload([])))
+        run()
+    cfg.write_text(
+        json.dumps(config_payload([{"user_id": OWNER, "upload_key": KEY + "-replacement"}]))
+    )
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    run()
+    assert not calls and pending(state) == 0
+    append(
+        path, user("Fresh authorised question"), hook_record(), assistant("Fresh authorised answer")
+    )
+    run()
+    assert [event["content"] for event in events(calls)] == [
+        "Fresh authorised question",
+        "Fresh authorised answer",
+    ]
+    assert all(key == KEY + "-replacement" for _, key in calls)
+
+
+@pytest.mark.parametrize("source_failure", ["missing", "symlink", "malformed"])
+def test_repairing_retirement_survives_source_failure(tmp_path, monkeypatch, source_failure):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user("Revoked question"), hook_record(), assistant("Revoked answer"))
+    run()
+    assert pending(state) == 2
+    cfg.write_text(json.dumps(config_payload([{"user_id": OWNER, "upload_key": KEY + "-new"}])))
+    if source_failure == "missing":
+        path.unlink()
+    elif source_failure == "symlink":
+        replacement = path.with_suffix(".new")
+        path.rename(replacement)
+        path.symlink_to(replacement)
+    else:
+        # Re-pairing establishes a new baseline, so force an invalid Codex header.
+        path.write_bytes(b"invalid\n")
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    with pytest.raises((OSError, ValueError)):
+        run()
+    assert calls == []
+    assert pending(state) == 0
+
+
+def run_other_session(path, cfg, state, client="codex"):
+    other_session = "f23bbd76-d864-4b8f-b252-c2b7c3692492"
+    other = path.with_name("other.jsonl")
+    if not other.exists():
+        other.touch()
+        if client == "codex":
+            append(other, {"type": "session_meta", "payload": {"id": other_session}})
+    capture.run_hook(
+        {
+            "session_id": other_session,
+            "hook_event_name": "SessionStart",
+            "transcript_path": str(other),
+        },
+        client,
+        cfg,
+        state,
+    )
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_new_chat_recovers_closed_chat_offline_outbox(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(client=client), hook_record(client), assistant(client=client))
+    run("SessionEnd")
+    assert pending(state) == 2
+    # Removing the source must not prevent already committed events from retrying.
+    path.unlink()
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+    assert pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_new_chat_recovers_final_record_written_after_last_hook(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run("Stop")
+    run("SessionEnd")
+    append(path, assistant("Late final reply", client))
+    run_other_session(path, cfg, state, client)
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Late final reply"]
+    assert len({event["event_id"] for event in events(calls)}) == 2
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_recovery_never_rescans_a_replaced_source(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run()
+    replacement = path.with_suffix(".new")
+    replacement.write_bytes(path.read_bytes())
+    append(replacement, assistant("Untrusted replacement", client))
+    os.replace(replacement, path)
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question"]
+
+
+def test_recovery_does_not_replay_old_installation_after_repairing(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run("SessionEnd")
+    cfg.write_text(json.dumps(config_payload([{"user_id": OWNER, "upload_key": KEY + "-new"}])))
+    path.unlink()
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    run_other_session(path, cfg, state)
+    assert calls == []
+    assert pending(state) == 0
+
+
+def test_recovery_rotates_across_spools_and_excludes_other_apps(tmp_path, monkeypatch):
+    state = tmp_path / "spool"
+    state.mkdir(mode=0o700)
+    sessions = [str(uuid.UUID(int=i + 1)) for i in range(10)]
+    for session in sessions:
+        (state / f"codex-{session}.sqlite3").touch(mode=0o600)
+    (state / f"claude-{SESSION}.sqlite3").touch(mode=0o600)
+    recovered = []
+    monkeypatch.setattr(
+        capture, "capture_session", lambda client, session, *a, **kw: recovered.append(session)
+    )
+    # A corrupt but valid JSON cursor must not stop capture or recovery.
+    cursor = state / "recovery-codex.json"
+    cursor.write_text("[]")
+    cursor.chmod(0o600)
+    capture.recover_sessions(
+        "codex", SESSION, {}, state, capture.UPLOAD_ENDPOINT, time.monotonic() + 1
+    )
+    assert recovered == sessions[:8]
+    capture.recover_sessions(
+        "codex", SESSION, {}, state, capture.UPLOAD_ENDPOINT, time.monotonic() + 1
+    )
+    assert recovered[8:10] == sessions[8:]
+    assert set(recovered) == set(sessions)
+
+
+def completed_answer(text="Final answer", client="codex", turn="turn-1"):
+    answer = assistant(text, client)
+    if client == "claude":
+        answer["message"]["stop_reason"] = "end_turn"
+        return [answer]
+    return [
+        {"type": "turn_context", "payload": {"turn_id": turn}},
+        answer,
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": turn, "last_agent_message": text},
+        },
+    ]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_running_turn_uploads_raw_events_without_completion(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run("UserPromptSubmit")
+    append(path, assistant("Still working", client))
+    run_other_session(path, cfg, state, client)
+    run("Stop")  # Hook name alone is never a completion certificate.
+    run("SessionEnd")
+    assert [e["kind"] for e in events(calls)] == ["user", "assistant"]
+    assert all("completed_through_event_id" not in json.loads(b["body"]) for b, _ in calls)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_only_persisted_native_final_advances_completion(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run("UserPromptSubmit")
+    append(path, *completed_answer(client=client))
+    run_other_session(path, cfg, state, client)
+    bodies = [json.loads(b["body"]) for b, _ in calls]
+    assert "completed_through_event_id" not in bodies[0]
+    assert bodies[-1]["completed_through_event_id"] == events(calls)[-1]["event_id"]
+    assert bodies[-1]["events"][-1]["kind"] == "assistant"
+    count = len(calls)
+    run_other_session(path, cfg, state, client)
+    assert len(calls) == count
+    append(path, user("Next unfinished turn", client), hook_record(client))
+    run("UserPromptSubmit")
+    assert "completed_through_event_id" not in json.loads(calls[-1][0]["body"])
+
+
+def test_completion_after_acknowledged_final_retries_exact_empty_batch(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    records = completed_answer()
+    append(path, user(), hook_record(), *records[:-1])
+    run()
+    assert len(events(calls)) == 2
+    assert "completed_through_event_id" not in json.loads(calls[-1][0]["body"])
+    append(path, records[-1])
+    attempts = []
+    monkeypatch.setattr(capture, "upload", lambda batch, *a: attempts.append(batch) or False)
+    run()
+    run()
+    assert attempts[0]["body"] == attempts[1]["body"]
+    body = json.loads(attempts[0]["body"])
+    assert body["events"] == []
+    assert body["completed_through_event_id"] == events(calls)[-1]["event_id"]
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *a: calls.append((batch, key)) or ACCEPTED
+    )
+    run()
+    count = len(calls)
+    run()
+    assert len(calls) == count
+
+
+@pytest.mark.parametrize("mismatch", ["turn", "text", "new_user"])
+def test_old_or_mismatched_codex_completion_cannot_finish_current_turn(
+    tmp_path, monkeypatch, mismatch
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    records = completed_answer()
+    append(path, user(), hook_record(), *records[:-1])
+    completion = records[-1]
+    if mismatch == "turn":
+        completion["payload"]["turn_id"] = "wrong-turn"
+    elif mismatch == "text":
+        completion["payload"]["last_agent_message"] = "Different answer"
+    else:
+        append(path, user("New prompt"), hook_record())
+    append(path, completion)
+    run()
+    assert all("completed_through_event_id" not in json.loads(b["body"]) for b, _ in calls)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_completion_never_overtakes_final_in_later_batch(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    append(path, *(assistant(f"Working {i}", client) for i in range(100)))
+    append(path, *completed_answer(client=client))
+    run()
+    bodies = [json.loads(b["body"]) for b, _ in calls]
+    assert len(bodies) == 2
+    assert "completed_through_event_id" not in bodies[0]
+    assert bodies[1]["completed_through_event_id"] == events(calls)[-1]["event_id"]

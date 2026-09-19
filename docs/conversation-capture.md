@@ -1,51 +1,145 @@
-# Optional work conversation capture
+# Automatic work conversations
 
-Capture saves new visible work in Postgres for future team handoffs. It is
-**off by default**, controlled for each person in Pensieve **Settings →
-Agent transcripts**. One **Save agent transcripts** toggle controls all of your
-supported agents and devices.
-Installing or updating the plugin never opts you in.
+This candidate requires the companion conversation-knowledge app release before
+publication. Capture remains **off by default**. Pairing the plugin or updating
+it never enables capture or company knowledge contribution.
 
-Saved work belongs to the selected context and is intended for its members.
-Only enable this for work you want to share. The pilot has no transcript
-browser, search/read tools, summaries, embeddings or automatic knowledge
-extraction. No selected context means no upload. A → B → A saves separate
-portions without copying the whole session to both companies. Resuming the
-same host conversation appends to its existing logical record.
+The global **Save agent transcripts** control still applies to all of a person's
+supported agents and devices. The Conversations page owns company contribution
+and retention choices. Connection approval explicitly shares captured work
+conversations with the selected company, including the saved transcript.
+Extracted knowledge can contribute to the company's existing context layer.
+Installing an upload key grants no transcript-reading or MCP authority.
 
-## Set up a device
+Work belongs to the selected Pensieve context. No selected context means no
+upload. A → B → A saves separate portions without copying the whole session
+between companies. Resuming the same host conversation preserves its identity.
+The plugin does not extract company knowledge itself; the hosted processing
+service owns that policy and the connection to curated Pages.
 
-1. Sign in to Pensieve with the same account used for this client's MCP login.
-2. [Open personal transcript settings](https://app.pensieve.uk/dashboard/contexts?modal=settings&settings_section=agent-transcripts), enable **Save agent transcripts**, and choose
-   **Set up device**. This downloads a uniquely named JSON file with an upload-only key.
-3. In a terminal, from your installed Pensieve plugin folder, run the command
-   shown in settings, using the actual downloaded file path:
+## Connect in the browser
 
-   ```sh
-   python3 scripts/capture_setup.py ~/Downloads/pensieve-capture-DEVICE_ID.json
-   ```
+1. Install the Pensieve plugin in a supported agent and sign in to Pensieve.
+2. Ask the agent: **“Use Pensieve’s connect-conversations skill.”**
+3. Open the approval link it shows, review the company and settings, and approve
+   using the same Pensieve account as the agent's MCP connection.
+4. Continue working. The helper completes pairing privately. If the short wait
+   ends before approval, the next ordinary agent hook finishes it automatically.
+   The Conversations page shows the last actual upload separately from pairing.
 
-4. Delete the downloaded setup file, then start or resume your work session.
+There are no setup files, pasted credentials, exports or user terminal commands
+in this connection flow. The agent runs the bundled helper. Its model-visible
+output contains only a non-secret approval URL and safe status. A pairing lasts
+for the server's short expiry period, can be claimed once, and is bound to the
+invoking client. An expired, revoked or already-claimed exchange requires a new
+pairing. If the exchange response is lost after the server claims it, start a
+new pairing rather than exposing the old secret for recovery.
 
-An agent can help locate the plugin folder, but do not paste the setup file or
-key into chat. The importer makes no network calls, opens no sign-in flow and
-never reads host credentials. It stores the key in
-`~/.config/pensieve/capture.json` with mode `0600`, under a private `0700`
-directory. It preserves profiles for other accounts; one setup works across supported
-clients on this device.
+The helper stores credentials in `~/.config/pensieve/capture.json` with mode
+`0600`, under a private `0700` directory. Pending pairing secrets live in a
+separate private file and are removed after completion or expiry. It never reads
+host OAuth credentials. Codex and Claude have separate credentials, and profiles
+for different accounts survive reconnects. An older setup without a paired
+installation stops capture and asks the user to reconnect through Conversations.
+It is not migrated. Only a new browser-approved pairing replaces obsolete local
+credential entries; existing paired profiles and transcript spool files remain intact.
 
-Settings is the only opt-in control. Turning capture off stops new and queued
-uploads for every client on every device. Re-enabling starts a new consent period;
-it never backfills the disabled period or retries an older period's backlog.
-Saved content keeps its original expiry. **Remove device** revokes only that
-upload key, including queued retries; it does not disconnect MCP or delete
-saved history. Device IDs in settings match their downloaded setup filenames.
+The version-3 config holds client-scoped account profiles and installation IDs.
+`PENSIEVE_CAPTURE_CONFIG` and `PENSIEVE_CAPTURE_STATE` can override local paths
+for isolated fixtures. Keys and preference flags never belong in hook manifests.
+Turning the global capture setting off stops new and queued uploads. Re-enabling
+starts a new consent period without importing the disabled interval. Revoking a
+device stops its credential, without disconnecting MCP or deleting saved work.
+Re-pairing with a replacement key drops the old local unsent backlog and starts
+from a fresh prompt. Already accepted server history remains. Company
+contribution is separate from capture and is enforced by the service.
 
-The version-2 private config holds `user_id` and `upload_key` profiles.
-Keys cannot read transcripts or call MCP tools. The server checks current
-consent, key status and membership for every batch. `PENSIEVE_CAPTURE_CONFIG`
-and `PENSIEVE_CAPTURE_STATE` may override local paths; no preference flag or
-secret belongs in the hook/marketplace definition.
+## Pairing protocol
+
+All pairing requests use the fixed
+`https://api.pensieve.uk/users/me/conversation-capture` base, reject redirects,
+and send the explicit `Pensieve-Plugin-Pairing/1.0` user agent. Only HTTP loopback
+fixtures can override the base.
+
+- `POST /pairings/start` sends client, runtime, label, plugin version and host
+  version. It returns `id`, `poll_secret`, `verification_url`, `expires_at` and
+  `poll_interval_seconds`. Only the approval link and expiry are displayed.
+- The user approves at `/oauth/conversation-capture?pairing_id=<public UUID>`.
+  Pairing creates an installation key but does not itself enable capture or
+  contribution.
+- `POST /pairings/{id}/exchange` sends the polling secret directly. A pending
+  response keeps the private challenge. An approved response returns the
+  account, company, installation ID and upload key once. The helper atomically
+  installs the credential without sending it through agent output.
+- Hooks can report `POST /installations/heartbeat` using the upload key. Only
+  runtime metadata and a transcript-available flag are included. Existing hooks
+  cannot distinguish every CLI/desktop runtime, so their heartbeat reports
+  `unknown` rather than claiming desktop verification.
+
+Retries use one bounded exchange per eligible hook, respect the server poll
+interval and share a private lock with interactive setup. There is no daemon.
+
+## Import previous work automatically
+
+In Conversations, choose the connected computer, company and how far back to
+import. This authorises all available conversations from that app on that computer
+within the selected date range, including chats without a project folder. The plugin does not guess which company an old chat belongs
+to. No chat exports, uploads or terminal commands are required.
+
+The installed helper fetches authorised requests at ordinary agent hooks and
+resumes bounded work after live capture. The setup skill can also run a bounded
+sync directly. An idle or unsupported app cannot receive a browser request by
+itself. The UI must distinguish waiting for the app, running and completed.
+Large imports resume on later hooks; no permanent background process is installed.
+
+Only standard local stores are scanned: Codex's `~/.codex/sessions` and
+`~/.codex/archived_sessions`, and Claude Code's `~/.claude/projects`. Project
+folders do not filter the import. Project changes inside a conversation and
+missing project metadata do not exclude its visible messages. Arbitrary folders
+are never opened; symlinked stores, directories and files are excluded. Native
+session identity and original timestamp evidence are still required. Only history still retained locally can be imported; deleted files,
+cloud-only chats and history on another machine are unavailable.
+
+The server issues a short-lived import grant with the exact company, client,
+capture generation and original-time window. `GET /installations/history-imports`
+uses the installation's upload key and returns `{imports: [...]}`. Each grant
+contains `id`, `context_id`, `client`, `capture_generation`, nullable
+`publication_generation`, nullable `since`, `until` and `scope: "all_local"`.
+Upload batches use the normal upload endpoint with an added `history_import_id`
+and `history_scope: "all_local"`. Missing or obsolete project scope is rejected,
+not reinterpreted as consent for all local history.
+`POST /installations/history-imports/{id}/progress` reports `state`,
+`processed_conversations`, `processed_events` and a content-free `error_code`.
+Progress counts processed records, including already-known events.
+
+Original timestamps are preserved. Event identities match live capture's host
+conversation and committed byte position, so the server can deduplicate retries
+and overlapping imports. Historical segment identity is stable for the same host
+conversation, app, company and capture generation, independent of the import grant.
+A cancelled import retried with a new grant therefore keeps its existing prefix
+and later correction together. Event sequence counts the full normalized visible
+transcript before date filtering, so widening the date range preserves positions.
+A new company or capture generation uses a separate segment.
+
+Historical learning requires both a completed import grant and native completion
+covering its captured events. An imported snapshot ending in a running turn stays
+available as raw history but cannot teach the company brain. Re-importing that
+same conversation after it finishes can advance its completion watermark.
+Historical certificate batches include the exact final assistant event, repeating
+it idempotently when necessary. If deduplication keeps that final reply in another
+segment, the imported prefix stays raw-only because its learning evidence would
+otherwise omit the final reply.
+An older transcript without reliable native completion stays raw.
+
+Events already assigned to another company cause an explicit conflict rather
+than being silently moved. Exact pending batches and parser cursors are saved
+atomically in private local SQLite state, then sent. Revoked grants clear pending
+content on the next successful poll. Failed, deleted or expired uploads never
+roll old history into a newly authorised segment.
+
+Each pass has a time and byte budget. Discovery is capped at 10,000 files and
+10,000 directories; oversized or unreadable records fail the request visibly.
+These limits do not change the existing future-only live scanner.
 
 ## What is saved
 
@@ -54,7 +148,11 @@ secret belongs in the hook/marketplace definition.
 - Artifact references and attachment omission notices, without opening files.
 
 Reasoning, system/developer instructions, hook payloads and compaction internals
-are excluded. Configured credentials and common secret patterns, including
+are excluded. Native Pensieve transcript read/list results and searches that
+request `node_types: ["transcript"]` are excluded too, including mixed searches.
+This uses the native call arguments and persists only a result-exclusion flag;
+search queries are never saved in capture state. Ordinary Page/Data searches
+remain eligible. Configured credentials and common secret patterns, including
 quoted JSON credential fields, are redacted; arbitrary prose can still contain
 secrets. Events are limited to 32,000 characters with explicit truncation;
 batches hold at most 100 events / 256 KiB. Raw transcript records over 1 MiB
@@ -72,34 +170,71 @@ attribution. Codex also matches its turn ID. Only an observed user prompt may
 wait provisionally for its own marker; ambiguous/unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
+Successful native Pensieve page mutations and `save_data` results can include
+an opaque server receipt. Only the matching native result event carries it;
+quoted receipts, failed calls and aggregate output cannot supply provenance.
+The server validates account, company, client and conversation before linking
+the actual write to its transcript evidence. Receipt markers are removed from
+visible transcript text.
 
 SessionStart establishes a baseline, prompt/Stop checkpoints work, and
 SessionEnd attempts a short best-effort flush. Immutable events and exact-byte
-receipts tolerate retries, resume and out-of-order delivery. There are no
-message edit revisions or active/inactive updates. The private SQLite spool is
-bounded at 16 MiB per conversation, retaining valid unacknowledged work when
-full. Pending work retries at later hooks; there is no background daemon.
-Final work can be lost if the machine or local transcript disappears.
+receipts tolerate retries, resume and out-of-order delivery. Raw capture continues
+while a turn is running. Learning additionally requires a native completion
+certificate and the quiet window; inactivity alone cannot promote a partial turn.
+
+For live capture, `completed_through_event_id` identifies a captured final assistant
+event in the same segment. Codex supplies a matching `task_complete` turn ID and
+final-message text. Claude supplies a persisted main-session assistant record with
+`stop_reason: "end_turn"`. The helper matches that native evidence to the current
+attributed turn and actual event ID; a bare Stop or SessionEnd never certifies a
+missing final reply. The certificate travels with its final event, or in an
+exact-byte retryable empty batch after that event was acknowledged. A newer user
+prompt or later work lies beyond the completed prefix and blocks learning until
+its own completion arrives. Completion does not cancel the quiet window: a host
+may continue after a stop hook. Historical imports additionally require their
+completed grant. There are no message edit revisions or active-presence leases.
+The private SQLite spool is bounded at 16 MiB per conversation, retaining valid unacknowledged work when
+full. Ordinary hooks also recover up to eight existing spools from the same app
+within a bounded shared deadline, rotating through them across invocations. A
+closed chat's pending uploads and delayed final transcript records can therefore
+recover when another chat is used, without reopening the original. Recovery
+reads only previously registered paths with their original file/session identity
+and rechecks credential changes before scanning or sending. Missing source files
+do not prevent already committed uploads. Key replacement retirement is committed
+before source reads, so a read failure cannot revive an old installation's backlog.
+There is no background daemon: no further app hooks means no further retries.
+Final work can be lost if the machine or local transcript disappears before it
+has been durably captured. Native final-message text is not invented as a second
+event with a different identity; the durable transcript remains the source.
 Each upload may use the remaining hook budget, so ordinary hosted receipt
 latency does not pin the queue to an already accepted batch. The host deadlines
 remain unchanged; SessionEnd still uses its shorter best-effort budget.
 
-Each portion expires **90 days after its first accepted upload**; resume does
-not extend it. The server erases bodies, titles and receipts, retaining only
-content-free tombstones against retry resurrection. A fresh post-expiry user
-turn can begin a new portion of the same conversation. If expiry is discovered
-while work is queued, only a host-timestamped post-expiry turn can roll over.
-Account/context deletion removes its stored content. The pilot has no individual
-transcript delete action.
+Retention is explicit. A successful upload receipt includes `expires_at`,
+which is null for history kept until deletion. The server controls retention;
+resume does not extend an explicit fixed deadline. The helper accepts both forms.
+An expired portion can roll forward only from a proven fresh post-expiry user
+turn. A `deleted` response discards that portion's local backlog without rolling
+its old content into a replacement. Capture-disabled responses do the same.
+Server tombstones prevent retry resurrection. Deleting raw history, stopping
+capture and withdrawing shared company knowledge remain separate service actions.
 
 ## Supported clients and verification
 
-The pilot targets local macOS Codex CLI and Claude Code. Desktop, ChatGPT Work,
-Cowork, ordinary chat tabs, Windows and ephemeral sessions without a local
-transcript require separate verification. MCP connectivity does not prove capture.
+The tested adapters target local macOS Codex CLI and Claude Code CLI.
+[Claude Code desktop](https://code.claude.com/docs/en/desktop) documents shared
+hook settings, and [Codex/ChatGPT Work](https://developers.openai.com/plugins/guides/submit-claude-plugin)
+documents command hooks. This package still needs live acceptance in each
+desktop runtime. [Cowork supports hooks](https://support.claude.com/en/articles/13837440-use-plugins-in-claude),
+but its local or cloud execution environment does not guarantee access to the
+host stores above. Ordinary Claude Chat and ordinary ChatGPT Chat do not provide
+this capture contract. MCP connectivity and installing skills do not prove
+transcript access. Windows and ephemeral sessions remain unverified.
 
-Package tests cover credential import, private storage, client/consent boundaries,
-retry, expiry and no-backfill behavior. Synthetic installed-client probes are
-in [client-probes.md](client-probes.md). Live authenticated personal-settings
-setup, fresh installation, updates and resumed sessions remain release checks.
+Package tests cover browser pairing, private storage, obsolete-setup rejection and reconnect,
+client/account isolation, retry, nullable retention, expiry, unchanged live baselines,
+explicit historical grants and native mutation provenance. Synthetic installed-client probes are
+in [client-probes.md](client-probes.md). Live authenticated browser pairing, fresh installation, updates and resumed
+sessions remain release checks.
 Deploy the companion app/API/MCP/scheduler before publishing the plugin feature.

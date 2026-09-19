@@ -49,9 +49,20 @@ class ModelStub(BaseHTTPRequestHandler):
     def log_message(self, *_args: Any) -> None:
         pass
 
+    def do_GET(self) -> None:
+        if self.path == "/users/me/conversation-capture/installations/history-imports":
+            self.reply_json({"imports": []})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_POST(self) -> None:
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         body = json.loads(raw)
+        if self.path == "/users/me/conversation-capture/installations/heartbeat":
+            self.send_response(204)
+            self.end_headers()
+            return
         if self.path == "/hooks/conversations":
             assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
             self.capture_requests.append({"body": body, "sha": hashlib.sha256(raw).hexdigest()})
@@ -342,11 +353,15 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
             capture_config.write_text(
                 json.dumps(
                     {
-                        "version": 2,
+                        "version": 3,
                         "profiles": [
                             {
                                 "user_id": CAPTURE_OWNER,
                                 "upload_key": CAPTURE_KEY,
+                                "client": "claude",
+                                "installation_id": "57a9c16d-595a-4c28-aa63-0ae62e61c284",
+                                "runtime": "claude_code_cli",
+                                "host_version": "synthetic-probe",
                             }
                         ],
                     }
@@ -357,6 +372,14 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
         server = ThreadingHTTPServer(("127.0.0.1", 0), ModelStub)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        # Keep paired diagnostics/history on the disposable local service too.
+        pairing_path = plugin / "scripts/capture_pairing.py"
+        pairing_path.write_text(
+            pairing_path.read_text().replace(
+                'API_BASE = "https://api.pensieve.uk/users/me/conversation-capture"',
+                f'API_BASE = "http://127.0.0.1:{server.server_port}/users/me/conversation-capture"',
+            )
+        )
         hook_path = plugin / "hooks/hooks.json"
         hooks = json.loads(hook_path.read_text())
         # Keep generated inputs, matchers, timeouts and the bundled helper;
@@ -526,6 +549,22 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                     ),
                     "retry_identical_bytes": len(attempts) > 1 and attempts[0] == attempts[1],
                     "captured_visible_work": any(body["events"] for body in accepted.values()),
+                    "native_completion_reaches_service": any(
+                        body.get("completed_through_event_id") for body in accepted.values()
+                    )
+                    and all(
+                        any(
+                            prior["segment_id"] == body["segment_id"]
+                            and any(
+                                event["event_id"] == body["completed_through_event_id"]
+                                and event["kind"] == "assistant"
+                                for event in prior["events"]
+                            )
+                            for prior in accepted.values()
+                        )
+                        for body in accepted.values()
+                        if body.get("completed_through_event_id")
+                    ),
                     "credentials_never_reach_model": CAPTURE_KEY
                     not in json.dumps(ModelStub.requests),
                     "no_hook_or_reasoning_payload": all(

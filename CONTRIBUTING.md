@@ -12,7 +12,10 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/scripts/conversation_capture.py`: opt-in visible-conversation capture,
   private retry state and separately authorized uploads. See
   [conversation-capture.md](docs/conversation-capture.md).
-- `pensieve/scripts/capture_setup.py`: private import of the account-scoped setup file from personal settings.
+- `pensieve/scripts/capture_setup.py`: browser-approved pairing and safe connection status.
+- `pensieve/scripts/capture_pairing.py` and `capture_config.py`: private pairing exchange, client-scoped credentials and bounded hook completion.
+- `pensieve/scripts/capture_history.py`: explicit server-granted app/date
+  imports from standard local transcript stores, with bounded resumable state.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
 The application repository owns the hosted MCP implementation, authentication,
@@ -64,12 +67,17 @@ behaviour separately from live OAuth and desktop checks.
 
 ## Release order
 
-Conversation capture requires standalone Pensieve PR #886, including the upload
-route, consent generations, personal settings and account-scoped device keys.
-It has no transcript retrieval or task-ledger dependency.
-Keep the capture PR in draft until that compatible service is deployed and
-live client acceptance is recorded. Installing this candidate remains capture-off
-without both server-side opt-in and a private account credential.
+Browser pairing requires the companion conversation-knowledge application
+release, including pairing start/exchange/approval, installation heartbeat,
+nullable retention receipts and explicit deletion responses. Publish that
+service before this plugin candidate. The earlier capture pilot (PR #886)
+remains the attribution and consent baseline. Installing this candidate never
+enables capture or company contribution. Obsolete pilot credentials are rejected with a reconnect instruction. Each client
+must pair separately, and no old credential is silently migrated.
+
+The `connect-conversations` setup skill depends on this installed helper. It is
+not a self-contained hosted MCP role skill, so do not add it to the application's
+hosted skill import without providing an equivalent executable local workflow.
 
 The first hooks release requires the server-side work from Pensieve PR #881.
 Keep the hooks PR in draft until these checks are complete:
