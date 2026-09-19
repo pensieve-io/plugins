@@ -30,7 +30,10 @@ from capture_config import (
     ReconnectRequired,
     encoded,
     private_directory,
+    private_file,
+    private_lock,
     profiles,
+    save_private_json,
 )
 from context_receipt import accepted_contexts, conversation_id
 
@@ -255,6 +258,15 @@ def mutation_receipt(tool: str | None, output: object, state: dict) -> str | Non
     return receipt
 
 
+def matches_completion(item: dict, final: dict | None) -> bool:
+    """Native completion must match the current persisted assistant, not a hook name."""
+    return bool(
+        final
+        and isinstance(item.get("completed_text"), str)
+        and final["text_sha"] == hashlib.sha256(item["completed_text"].encode()).hexdigest()
+    )
+
+
 def normalise(record: dict, client: str, session: str, state: dict) -> list[dict]:
     """Return only allowed visible events and provenance-checked boundaries.
 
@@ -283,6 +295,14 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
     payload = record.get("payload") if client == "codex" else record.get("message")
     if client == "codex":
         if not isinstance(payload, dict):
+            return []
+        if record.get("type") == "event_msg" and payload.get("type") == "task_complete":
+            if (
+                isinstance(payload.get("turn_id"), str)
+                and payload["turn_id"] == state.get("turn_id")
+                and isinstance(payload.get("last_agent_message"), str)
+            ):
+                return [{"completed_text": payload["last_agent_message"]}]
             return []
         if record.get("type") == "event_msg" and payload.get("type") == "user_message":
             text = payload.get("message")
@@ -432,6 +452,15 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                     }
                     if not internal:
                         result.append({"kind": "tool_call", "content": name[:255]})
+        if (
+            text
+            and payload.get("stop_reason") == "end_turn"
+            and not any(
+                isinstance(item, dict) and item.get("type") == "tool_use"
+                for item in (content if isinstance(content, list) else [])
+            )
+        ):
+            result.append({"completed_text": text})
         return result
     if kind != "user" or payload.get("role") != "user":
         return []
@@ -528,6 +557,7 @@ def renewal_segment(segment: str, user_event: str) -> str:
 
 def apply_item(db, state, item, identity, occurred_at, client, session, configured, host_timestamp):
     if item.get("new_turn"):
+        state.pop("last_assistant", None)
         # A later turn can never authorise an earlier unmarked one.
         db.execute("DELETE FROM events WHERE segment IS NULL")
         state.update(
@@ -636,6 +666,21 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                 (segment, state.get("turn_group")),
             )
         return
+    if "completed_text" in item:
+        final = state.get("last_assistant")
+        if (
+            final
+            and final["segment"] == state.get("segment")
+            and not state.get("ambiguous")
+            and not state.get("awaiting_marker")
+            and not state.get("discard_until_prompt")
+            and matches_completion(item, final)
+        ):
+            state.setdefault("completions", {})[final["segment"]] = {
+                "event_id": final["event_id"],
+                "sequence": final["sequence"],
+            }
+        return
     if "kind" not in item:
         return
     if state.get("discard_until_prompt"):
@@ -681,6 +726,13 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             int(host_timestamp),
         ),
     )
+    if item["kind"] == "assistant" and state.get("segment"):
+        state["last_assistant"] = {
+            "segment": state["segment"],
+            "event_id": identity,
+            "sequence": state["sequence"],
+            "text_sha": hashlib.sha256(item["content"].encode()).hexdigest(),
+        }
     if item["kind"] == "user":
         state["title"] = text[:200]
         state["title_segment"] = None
@@ -846,7 +898,8 @@ def next_batch(db, segment, client, session):
         "SELECT id,body FROM events WHERE segment=? ORDER BY sequence LIMIT ?",
         (segment["id"], MAX_BATCH_EVENTS),
     ).fetchall()
-    if not rows:
+    completion = load_state(db).get("completions", {}).get(segment["id"])
+    if not rows and not completion:
         return None
     body = {
         "batch_id": str(uuid.uuid4()),
@@ -866,6 +919,16 @@ def next_batch(db, segment, client, session):
             body["events"].pop()
             break
         selected.append(row["id"])
+    if completion:
+        pending = db.execute(
+            "SELECT 1 FROM events WHERE id=?", (completion["event_id"],)
+        ).fetchone()
+        if pending is None or completion["event_id"] in selected:
+            # A completion can never outrun its final assistant event. It may
+            # follow an earlier acknowledged event in a metadata-only batch.
+            body["completed_through_event_id"] = completion["event_id"]
+            if len(encoded(body)) > MAX_BATCH_BYTES:
+                body.pop("completed_through_event_id")
     raw = encoded(body)
     checksum = hashlib.sha256(raw).hexdigest()
     db.execute(
@@ -980,6 +1043,9 @@ def retire_segment(db, segment_id, expires_at):
     """Erase old content; an expiry can preserve a proven fresh user-turn suffix."""
     db.execute("BEGIN IMMEDIATE")
     state = load_state(db)
+    state.get("completions", {}).pop(segment_id, None)
+    if state.get("last_assistant", {}).get("segment") == segment_id:
+        state.pop("last_assistant", None)
     expiry = aware_time(expires_at)
     if expiry:
         rows = db.execute(
@@ -1056,8 +1122,13 @@ def flush(db, configured, client, session, endpoint, deadline):
     denied = set()
     while time.monotonic() < deadline:
         progressed = False
+        completions = list(load_state(db).get("completions", {}))
+        placeholders = ",".join("?" for _ in completions) or "NULL"
         segments = db.execute(
-            "SELECT * FROM segments WHERE retired=0 AND (id IN (SELECT segment FROM events) OR id IN (SELECT segment FROM batches)) ORDER BY rowid"
+            "SELECT * FROM segments WHERE retired=0 AND (id IN (SELECT segment FROM events) "
+            "OR id IN (SELECT segment FROM batches) "
+            f"OR id IN ({placeholders})) ORDER BY rowid",
+            completions,
         ).fetchall()
         for segment in segments:
             scope = (segment["owner"], segment["context"])
@@ -1094,10 +1165,186 @@ def flush(db, configured, client, session, endpoint, deadline):
             for identity in json.loads(batch["event_ids"]):
                 db.execute("DELETE FROM events WHERE id=?", (identity,))
             db.execute("DELETE FROM batches WHERE id=?", (batch["id"],))
+            completed_id = json.loads(batch["body"]).get("completed_through_event_id")
+            if completed_id:
+                state = load_state(db)
+                if (
+                    state.get("completions", {}).get(segment["id"], {}).get("event_id")
+                    == completed_id
+                ):
+                    state["completions"].pop(segment["id"])
+                    save_state(db, state)
             db.commit()
             progressed = True
         if not progressed:
             break
+
+
+def capture_session(
+    client: str,
+    session: str,
+    path: str | None,
+    configured: dict,
+    state_root: Path,
+    endpoint: str,
+    deadline: float,
+    *,
+    allow_new_file: bool = False,
+    recover: bool = False,
+):
+    """Checkpoint one previously authorised transcript and its immutable outbox."""
+    db = connect_state(state_root, client, session)
+    source_error = None
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        state = load_state(db)
+        disabled = any(
+            scope is not None and scope[0] not in configured
+            for scope in (state.get("scope"), state.get("candidate_scope"))
+        )
+        if disabled:
+            # Consent is per account; another enabled account grants no upload rights.
+            state.update(
+                segment=None,
+                candidate_segment=None,
+                candidate_scope=None,
+                awaiting_marker=False,
+                ambiguous=True,
+                title="",
+                title_segment=None,
+            )
+        fingerprints = {
+            owner: hashlib.sha256(key.encode()).hexdigest() for owner, key in configured.items()
+        }
+        previous_fingerprints = state.get("profile_keys")
+        known_fingerprints = state.get("known_profile_keys", previous_fingerprints or {})
+        replaced_owners = [
+            owner
+            for owner, fingerprint in fingerprints.items()
+            if owner in known_fingerprints and known_fingerprints[owner] != fingerprint
+        ]
+        if replaced_owners:
+            # Re-pairing cannot lend a new installation's credential to an old
+            # revoked device's queued work. Keep already accepted server history;
+            # erase only this private outbox and wait for a fresh user turn.
+            placeholders = ",".join("?" for _ in replaced_owners)
+            retired = f"SELECT id FROM segments WHERE owner IN ({placeholders})"
+            for row in db.execute(retired, replaced_owners):
+                state.get("completions", {}).pop(row["id"], None)
+            state.pop("last_assistant", None)
+            db.execute(f"DELETE FROM events WHERE segment IN ({retired})", replaced_owners)
+            db.execute(f"DELETE FROM batches WHERE segment IN ({retired})", replaced_owners)
+            db.execute(
+                f"UPDATE segments SET retired=1,title='' WHERE owner IN ({placeholders})",
+                replaced_owners,
+            )
+            db.execute("DELETE FROM events WHERE segment IS NULL")
+        if previous_fingerprints is not None and previous_fingerprints != fingerprints:
+            state["capture_paused"] = True
+        state["profile_keys"] = fingerprints
+        # Remember absent profiles' last key too: remove -> re-pair must not make
+        # a replacement key look like the first credential for an old outbox.
+        state["known_profile_keys"] = {**known_fingerprints, **fingerprints}
+        if state.pop("capture_paused", False):
+            state.update(
+                offset=None,
+                discarding_record=False,
+                segment=None,
+                scope=None,
+                candidate_segment=None,
+                candidate_scope=None,
+                awaiting_marker=False,
+                ambiguous=True,
+                title="",
+                title_segment=None,
+                calls={},
+                discard_until_prompt=True,
+            )
+        # Credential retirement must survive any later source-read rollback.
+        save_state(db, state)
+        db.commit()
+        db.execute("BEGIN IMMEDIATE")
+        if recover:
+            path = state.get("path")
+        if isinstance(path, str):
+            try:
+                scan(
+                    db,
+                    state,
+                    Path(path),
+                    client,
+                    session,
+                    configured,
+                    deadline,
+                    allow_new_file=allow_new_file,
+                )
+            except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+                # Loss of the source must not strand already-durable uploads.
+                # Roll back this scan and flush only the previously committed
+                # events, with their original ownership and exact batch bytes.
+                db.rollback()
+                db.execute("BEGIN IMMEDIATE")
+                state = load_state(db)
+                source_error = exc
+        save_state(db, state)
+        db.commit()
+        flush(db, configured, client, session, endpoint, deadline)
+    finally:
+        db.close()
+    return source_error
+
+
+def recover_sessions(client, current, configured, state_root, endpoint, deadline):
+    """Bounded round-robin recovery of this app's existing private spools only.
+
+    No discovery of host history or newly enabled conversations. Each resumed
+    reader uses its stored path, inode, native session identity and consent
+    markers. Credential reconciliation runs before either scanning or flushing.
+    """
+    cursor_path = state_root / f"recovery-{client}.json"
+    try:
+        with private_lock(cursor_path.with_suffix(".lock")):
+            try:
+                value = json.loads(private_file(cursor_path, 4096))
+                cursor = value.get("after", "") if isinstance(value, dict) else ""
+            except FileNotFoundError:
+                cursor = ""
+            if not isinstance(cursor, str):
+                cursor = ""
+            # Directory traversal and processing both share the recovery budget.
+            candidates = []
+            with os.scandir(state_root) as entries:
+                for entry in entries:
+                    if time.monotonic() >= deadline - 0.05:
+                        return
+                    prefix = client + "-"
+                    if not entry.name.startswith(prefix) or not entry.name.endswith(".sqlite3"):
+                        continue
+                    session = entry.name[len(prefix) : -8]
+                    if session != current and conversation_id(session) is not None:
+                        candidates.append(session)
+            candidates.sort(key=lambda session: (session <= cursor, session))
+            for session in candidates[:8]:
+                if time.monotonic() >= deadline - 0.05:
+                    break
+                try:
+                    capture_session(
+                        client,
+                        session,
+                        None,
+                        configured,
+                        state_root,
+                        endpoint,
+                        deadline,
+                        recover=True,
+                    )
+                except (OSError, ValueError, sqlite3.DatabaseError):
+                    # A busy or damaged spool never blocks other conversations.
+                    pass
+                save_private_json(cursor_path, {"after": session})
+    except (OSError, ValueError, sqlite3.DatabaseError):
+        # Concurrent hooks share one opportunistic recovery pass.
+        pass
 
 
 def run_hook(
@@ -1139,98 +1386,29 @@ def run_hook(
             finally:
                 db.close()
         return {}
-    # Plugin SessionEnd runs inside Claude's default 1.5s total budget and
-    # Codex's 3s cap. Durability comes from earlier checkpoints, not this flush.
-    db = connect_state(state_root, client, session)
-    source_error = None
-    try:
-        db.execute("BEGIN IMMEDIATE")
-        state = load_state(db)
-        disabled = any(
-            scope is not None and scope[0] not in configured
-            for scope in (state.get("scope"), state.get("candidate_scope"))
+    path = payload.get("transcript_path")
+    # Reserve recovery time so activity in a new chat can deliver a closed
+    # chat's durable outbox or a final record written after its last hook.
+    ordinary = event != "SessionEnd"
+    source_error = capture_session(
+        client,
+        session,
+        path,
+        configured,
+        state_root,
+        endpoint,
+        deadline - (0.8 if ordinary else 0),
+        allow_new_file=event == "SessionStart",
+    )
+    if ordinary:
+        recover_sessions(
+            client,
+            session,
+            configured,
+            state_root,
+            endpoint,
+            min(deadline - 0.15, time.monotonic() + 0.6),
         )
-        if disabled:
-            # Consent is per account; another enabled account grants no upload rights.
-            state.update(
-                segment=None,
-                candidate_segment=None,
-                candidate_scope=None,
-                awaiting_marker=False,
-                ambiguous=True,
-                title="",
-                title_segment=None,
-            )
-        fingerprints = {
-            owner: hashlib.sha256(key.encode()).hexdigest() for owner, key in configured.items()
-        }
-        previous_fingerprints = state.get("profile_keys")
-        known_fingerprints = state.get("known_profile_keys", previous_fingerprints or {})
-        replaced_owners = [
-            owner
-            for owner, fingerprint in fingerprints.items()
-            if owner in known_fingerprints and known_fingerprints[owner] != fingerprint
-        ]
-        if replaced_owners:
-            # Re-pairing cannot lend a new installation's credential to an old
-            # revoked device's queued work. Keep already accepted server history;
-            # erase only this private outbox and wait for a fresh user turn.
-            placeholders = ",".join("?" for _ in replaced_owners)
-            retired = f"SELECT id FROM segments WHERE owner IN ({placeholders})"
-            db.execute(f"DELETE FROM events WHERE segment IN ({retired})", replaced_owners)
-            db.execute(f"DELETE FROM batches WHERE segment IN ({retired})", replaced_owners)
-            db.execute(
-                f"UPDATE segments SET retired=1,title='' WHERE owner IN ({placeholders})",
-                replaced_owners,
-            )
-            db.execute("DELETE FROM events WHERE segment IS NULL")
-        if previous_fingerprints is not None and previous_fingerprints != fingerprints:
-            state["capture_paused"] = True
-        state["profile_keys"] = fingerprints
-        # Remember absent profiles' last key too: remove -> re-pair must not make
-        # a replacement key look like the first credential for an old outbox.
-        state["known_profile_keys"] = {**known_fingerprints, **fingerprints}
-        if state.pop("capture_paused", False):
-            state.update(
-                offset=None,
-                discarding_record=False,
-                segment=None,
-                scope=None,
-                candidate_segment=None,
-                candidate_scope=None,
-                awaiting_marker=False,
-                ambiguous=True,
-                title="",
-                title_segment=None,
-                calls={},
-                discard_until_prompt=True,
-            )
-        path = payload.get("transcript_path")
-        if isinstance(path, str):
-            try:
-                scan(
-                    db,
-                    state,
-                    Path(path),
-                    client,
-                    session,
-                    configured,
-                    deadline,
-                    allow_new_file=event == "SessionStart",
-                )
-            except (OSError, ValueError, sqlite3.DatabaseError) as exc:
-                # Loss of the source must not strand already-durable uploads.
-                # Roll back this scan and flush only the previously committed
-                # events, with their original ownership and exact batch bytes.
-                db.rollback()
-                db.execute("BEGIN IMMEDIATE")
-                state = load_state(db)
-                source_error = exc
-        save_state(db, state)
-        db.commit()
-        flush(db, configured, client, session, endpoint, deadline)
-    finally:
-        db.close()
     # Diagnostics never delay durable capture. Runtime and transcript content
     # are not inferred or sent; only the host-supplied file's availability is reported.
     if event != "SessionEnd" and deadline - time.monotonic() > 0.05:

@@ -1632,3 +1632,236 @@ def test_repairing_cannot_replay_revoked_installation_outbox(tmp_path, monkeypat
         "Fresh authorised answer",
     ]
     assert all(key == KEY + "-replacement" for _, key in calls)
+
+
+@pytest.mark.parametrize("source_failure", ["missing", "symlink", "malformed"])
+def test_repairing_retirement_survives_source_failure(tmp_path, monkeypatch, source_failure):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user("Revoked question"), hook_record(), assistant("Revoked answer"))
+    run()
+    assert pending(state) == 2
+    cfg.write_text(json.dumps(config_payload([{"user_id": OWNER, "upload_key": KEY + "-new"}])))
+    if source_failure == "missing":
+        path.unlink()
+    elif source_failure == "symlink":
+        replacement = path.with_suffix(".new")
+        path.rename(replacement)
+        path.symlink_to(replacement)
+    else:
+        # Re-pairing establishes a new baseline, so force an invalid Codex header.
+        path.write_bytes(b"invalid\n")
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    with pytest.raises((OSError, ValueError)):
+        run()
+    assert calls == []
+    assert pending(state) == 0
+
+
+def run_other_session(path, cfg, state, client="codex"):
+    other_session = "f23bbd76-d864-4b8f-b252-c2b7c3692492"
+    other = path.with_name("other.jsonl")
+    if not other.exists():
+        other.touch()
+        if client == "codex":
+            append(other, {"type": "session_meta", "payload": {"id": other_session}})
+    capture.run_hook(
+        {
+            "session_id": other_session,
+            "hook_event_name": "SessionStart",
+            "transcript_path": str(other),
+        },
+        client,
+        cfg,
+        state,
+    )
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_new_chat_recovers_closed_chat_offline_outbox(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(client=client), hook_record(client), assistant(client=client))
+    run("SessionEnd")
+    assert pending(state) == 2
+    # Removing the source must not prevent already committed events from retrying.
+    path.unlink()
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+    assert pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_new_chat_recovers_final_record_written_after_last_hook(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run("Stop")
+    run("SessionEnd")
+    append(path, assistant("Late final reply", client))
+    run_other_session(path, cfg, state, client)
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Late final reply"]
+    assert len({event["event_id"] for event in events(calls)}) == 2
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_recovery_never_rescans_a_replaced_source(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run()
+    replacement = path.with_suffix(".new")
+    replacement.write_bytes(path.read_bytes())
+    append(replacement, assistant("Untrusted replacement", client))
+    os.replace(replacement, path)
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question"]
+
+
+def test_recovery_does_not_replay_old_installation_after_repairing(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run("SessionEnd")
+    cfg.write_text(json.dumps(config_payload([{"user_id": OWNER, "upload_key": KEY + "-new"}])))
+    path.unlink()
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    run_other_session(path, cfg, state)
+    assert calls == []
+    assert pending(state) == 0
+
+
+def test_recovery_rotates_across_spools_and_excludes_other_apps(tmp_path, monkeypatch):
+    state = tmp_path / "spool"
+    state.mkdir(mode=0o700)
+    sessions = [str(uuid.UUID(int=i + 1)) for i in range(10)]
+    for session in sessions:
+        (state / f"codex-{session}.sqlite3").touch(mode=0o600)
+    (state / f"claude-{SESSION}.sqlite3").touch(mode=0o600)
+    recovered = []
+    monkeypatch.setattr(
+        capture, "capture_session", lambda client, session, *a, **kw: recovered.append(session)
+    )
+    # A corrupt but valid JSON cursor must not stop capture or recovery.
+    cursor = state / "recovery-codex.json"
+    cursor.write_text("[]")
+    cursor.chmod(0o600)
+    capture.recover_sessions(
+        "codex", SESSION, {}, state, capture.UPLOAD_ENDPOINT, time.monotonic() + 1
+    )
+    assert recovered == sessions[:8]
+    capture.recover_sessions(
+        "codex", SESSION, {}, state, capture.UPLOAD_ENDPOINT, time.monotonic() + 1
+    )
+    assert recovered[8:10] == sessions[8:]
+    assert set(recovered) == set(sessions)
+
+
+def completed_answer(text="Final answer", client="codex", turn="turn-1"):
+    answer = assistant(text, client)
+    if client == "claude":
+        answer["message"]["stop_reason"] = "end_turn"
+        return [answer]
+    return [
+        {"type": "turn_context", "payload": {"turn_id": turn}},
+        answer,
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": turn, "last_agent_message": text},
+        },
+    ]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_running_turn_uploads_raw_events_without_completion(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run("UserPromptSubmit")
+    append(path, assistant("Still working", client))
+    run_other_session(path, cfg, state, client)
+    run("Stop")  # Hook name alone is never a completion certificate.
+    run("SessionEnd")
+    assert [e["kind"] for e in events(calls)] == ["user", "assistant"]
+    assert all("completed_through_event_id" not in json.loads(b["body"]) for b, _ in calls)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_only_persisted_native_final_advances_completion(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run("UserPromptSubmit")
+    append(path, *completed_answer(client=client))
+    run_other_session(path, cfg, state, client)
+    bodies = [json.loads(b["body"]) for b, _ in calls]
+    assert "completed_through_event_id" not in bodies[0]
+    assert bodies[-1]["completed_through_event_id"] == events(calls)[-1]["event_id"]
+    assert bodies[-1]["events"][-1]["kind"] == "assistant"
+    count = len(calls)
+    run_other_session(path, cfg, state, client)
+    assert len(calls) == count
+    append(path, user("Next unfinished turn", client), hook_record(client))
+    run("UserPromptSubmit")
+    assert "completed_through_event_id" not in json.loads(calls[-1][0]["body"])
+
+
+def test_completion_after_acknowledged_final_retries_exact_empty_batch(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    records = completed_answer()
+    append(path, user(), hook_record(), *records[:-1])
+    run()
+    assert len(events(calls)) == 2
+    assert "completed_through_event_id" not in json.loads(calls[-1][0]["body"])
+    append(path, records[-1])
+    attempts = []
+    monkeypatch.setattr(capture, "upload", lambda batch, *a: attempts.append(batch) or False)
+    run()
+    run()
+    assert attempts[0]["body"] == attempts[1]["body"]
+    body = json.loads(attempts[0]["body"])
+    assert body["events"] == []
+    assert body["completed_through_event_id"] == events(calls)[-1]["event_id"]
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *a: calls.append((batch, key)) or ACCEPTED
+    )
+    run()
+    count = len(calls)
+    run()
+    assert len(calls) == count
+
+
+@pytest.mark.parametrize("mismatch", ["turn", "text", "new_user"])
+def test_old_or_mismatched_codex_completion_cannot_finish_current_turn(
+    tmp_path, monkeypatch, mismatch
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    records = completed_answer()
+    append(path, user(), hook_record(), *records[:-1])
+    completion = records[-1]
+    if mismatch == "turn":
+        completion["payload"]["turn_id"] = "wrong-turn"
+    elif mismatch == "text":
+        completion["payload"]["last_agent_message"] = "Different answer"
+    else:
+        append(path, user("New prompt"), hook_record())
+    append(path, completion)
+    run()
+    assert all("completed_through_event_id" not in json.loads(b["body"]) for b, _ in calls)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_completion_never_overtakes_final_in_later_batch(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    append(path, *(assistant(f"Working {i}", client) for i in range(100)))
+    append(path, *completed_answer(client=client))
+    run()
+    bodies = [json.loads(b["body"]) for b, _ in calls]
+    assert len(bodies) == 2
+    assert "completed_through_event_id" not in bodies[0]
+    assert bodies[1]["completed_through_event_id"] == events(calls)[-1]["event_id"]

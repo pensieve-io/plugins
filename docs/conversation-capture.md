@@ -114,7 +114,23 @@ Progress counts processed records, including already-known events.
 
 Original timestamps are preserved. Event identities match live capture's host
 conversation and committed byte position, so the server can deduplicate retries
-and overlapping imports. An import gets its own deterministic segment identity.
+and overlapping imports. Historical segment identity is stable for the same host
+conversation, app, company and capture generation, independent of the import grant.
+A cancelled import retried with a new grant therefore keeps its existing prefix
+and later correction together. Event sequence counts the full normalized visible
+transcript before date filtering, so widening the date range preserves positions.
+A new company or capture generation uses a separate segment.
+
+Historical learning requires both a completed import grant and native completion
+covering its captured events. An imported snapshot ending in a running turn stays
+available as raw history but cannot teach the company brain. Re-importing that
+same conversation after it finishes can advance its completion watermark.
+Historical certificate batches include the exact final assistant event, repeating
+it idempotently when necessary. If deduplication keeps that final reply in another
+segment, the imported prefix stays raw-only because its learning evidence would
+otherwise omit the final reply.
+An older transcript without reliable native completion stays raw.
+
 Events already assigned to another company cause an explicit conflict rather
 than being silently moved. Exact pending batches and parser cursors are saved
 atomically in private local SQLite state, then sent. Revoked grants clear pending
@@ -163,12 +179,34 @@ visible transcript text.
 
 SessionStart establishes a baseline, prompt/Stop checkpoints work, and
 SessionEnd attempts a short best-effort flush. Immutable events and exact-byte
-receipts tolerate retries, resume and out-of-order delivery. There are no
-message edit revisions or explicit presence updates. The hosted service tracks
-newly accepted events for inactivity-based processing. The private SQLite spool is
-bounded at 16 MiB per conversation, retaining valid unacknowledged work when
-full. Pending work retries at later hooks; there is no background daemon.
-Final work can be lost if the machine or local transcript disappears.
+receipts tolerate retries, resume and out-of-order delivery. Raw capture continues
+while a turn is running. Learning additionally requires a native completion
+certificate and the quiet window; inactivity alone cannot promote a partial turn.
+
+For live capture, `completed_through_event_id` identifies a captured final assistant
+event in the same segment. Codex supplies a matching `task_complete` turn ID and
+final-message text. Claude supplies a persisted main-session assistant record with
+`stop_reason: "end_turn"`. The helper matches that native evidence to the current
+attributed turn and actual event ID; a bare Stop or SessionEnd never certifies a
+missing final reply. The certificate travels with its final event, or in an
+exact-byte retryable empty batch after that event was acknowledged. A newer user
+prompt or later work lies beyond the completed prefix and blocks learning until
+its own completion arrives. Completion does not cancel the quiet window: a host
+may continue after a stop hook. Historical imports additionally require their
+completed grant. There are no message edit revisions or active-presence leases.
+The private SQLite spool is bounded at 16 MiB per conversation, retaining valid unacknowledged work when
+full. Ordinary hooks also recover up to eight existing spools from the same app
+within a bounded shared deadline, rotating through them across invocations. A
+closed chat's pending uploads and delayed final transcript records can therefore
+recover when another chat is used, without reopening the original. Recovery
+reads only previously registered paths with their original file/session identity
+and rechecks credential changes before scanning or sending. Missing source files
+do not prevent already committed uploads. Key replacement retirement is committed
+before source reads, so a read failure cannot revive an old installation's backlog.
+There is no background daemon: no further app hooks means no further retries.
+Final work can be lost if the machine or local transcript disappears before it
+has been durably captured. Native final-message text is not invented as a second
+event with a different identity; the durable transcript remains the source.
 Each upload may use the remaining hook budget, so ordinary hosted receipt
 latency does not pin the queue to an already accepted batch. The host deadlines
 remain unchanged; SessionEnd still uses its shorter best-effort budget.

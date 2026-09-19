@@ -14,7 +14,7 @@ This repository owns the installable plugin. Edit the files here directly:
   [conversation-capture.md](docs/conversation-capture.md).
 - `pensieve/scripts/capture_setup.py`: browser-approved pairing and safe connection status.
 - `pensieve/scripts/capture_pairing.py` and `capture_config.py`: private pairing exchange, client-scoped credentials and bounded hook completion.
-- `pensieve/scripts/capture_history.py`: explicit server-granted project/date
+- `pensieve/scripts/capture_history.py`: explicit server-granted app/date
   imports from standard local transcript stores, with bounded resumable state.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
@@ -72,8 +72,8 @@ release, including pairing start/exchange/approval, installation heartbeat,
 nullable retention receipts and explicit deletion responses. Publish that
 service before this plugin candidate. The earlier capture pilot (PR #886)
 remains the attribution and consent baseline. Installing this candidate never
-enables capture or company contribution. Its one-off local migration binds a
-pilot credential to the first invoking client; other clients must pair separately.
+enables capture or company contribution. Obsolete pilot credentials are rejected with a reconnect instruction. Each client
+must pair separately, and no old credential is silently migrated.
 
 The `connect-conversations` setup skill depends on this installed helper. It is
 not a self-contained hosted MCP role skill, so do not add it to the application's

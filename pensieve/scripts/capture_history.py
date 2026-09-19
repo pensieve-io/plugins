@@ -26,6 +26,7 @@ from conversation_capture import (
     aware_time,
     clean_content,
     connect_state,
+    matches_completion,
     normalise,
     save_state,
     upload,
@@ -202,20 +203,36 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
             items = normalise(record, grant["client"], current["session"], current["parser"])
             occurred = aware_time(record.get("timestamp"))
             selected = []
-            if (
+            final = current.get("last_assistant")
+            completed_id = current.get("completed_id")
+            # Sequence belongs to the original transcript, not the requested
+            # date window. A broader re-import must keep existing positions.
+            native_count = 0
+            in_window = (
                 occurred is not None
                 and occurred <= aware_time(grant["until"])
                 and (grant["since"] is None or occurred >= aware_time(grant["since"]))
-            ):
-                for index, item in enumerate(items):
-                    if "kind" not in item:
-                        continue
-                    text, truncated = clean_content(item["content"], [profile["upload_key"]])
-                    if not text:
-                        continue
+            )
+            for index, item in enumerate(items):
+                if item.get("new_turn"):
+                    final = None
+                if matches_completion(item, final):
+                    completed_id = final["event"]["event_id"]
+                    if completed_id not in {e["event_id"] for e in events + selected}:
+                        # A historical final may already exist in a live segment.
+                        # Resend its exact event with the native history position,
+                        # allowing the server to certify the historical prefix.
+                        selected.append(final["event"])
+                if "kind" not in item:
+                    continue
+                text, truncated = clean_content(item["content"], [profile["upload_key"]])
+                if not text:
+                    continue
+                native_count += 1
+                if in_window:
                     event = {
                         "event_id": f"{grant['client']}:{current['session']}:{offset}:{index}",
-                        "sequence": current["sequence"] + len(selected) + 1,
+                        "sequence": current["sequence"] + native_count,
                         "kind": item["kind"],
                         "content": text,
                         "occurred_at": occurred.isoformat(),
@@ -224,6 +241,13 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
                     if item.get("mutation_receipt_id"):
                         event["mutation_receipt_id"] = item["mutation_receipt_id"]
                     selected.append(event)
+                    if item["kind"] == "assistant":
+                        final = {
+                            "event": event,
+                            "text_sha": hashlib.sha256(item["content"].encode()).hexdigest(),
+                        }
+                elif item["kind"] == "assistant":
+                    final = None
             if events and (
                 len(events) + len(selected) > MAX_BATCH_EVENTS
                 or len(encoded(events + selected)) > MAX_BATCH_BYTES - 4096
@@ -233,16 +257,31 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
             if len(selected) > MAX_BATCH_EVENTS or len(encoded(selected)) > MAX_BATCH_BYTES - 4096:
                 raise ValueError("source_record_too_large")
             events.extend(selected)
-            current["sequence"] += len(selected)
+            current["sequence"] += native_count
+            current["last_assistant"] = final
+            current["completed_id"] = completed_id
+            current["selected_events"] = current.get("selected_events", 0) + len(selected)
             current["offset"] = handle.tell()
             if not current.get("title"):
                 current["title"] = next(
                     (e["content"][:200] for e in selected if e["kind"] == "user"), ""
                 )
     if events:
-        segment = str(uuid.uuid5(uuid.UUID(grant["id"]), f"{grant['client']}:{current['session']}"))
+        # Grants authorise a window; they do not define the conversation. A
+        # cancelled/retried import must keep corrections beside its prefix.
+        segment = str(
+            uuid.uuid5(
+                uuid.UUID(current["session"]),
+                f"history:{grant['client']}:{grant['context_id']}:{grant['capture_generation']}",
+            )
+        )
         body = {
-            "batch_id": str(uuid.uuid5(uuid.UUID(grant["id"]), events[0]["event_id"])),
+            "batch_id": str(
+                uuid.uuid5(
+                    uuid.UUID(grant["id"]),
+                    f"{events[0]['event_id']}:through:{current['offset']}:complete:{current.get('completed_id')}",
+                )
+            ),
             "history_import_id": grant["id"],
             "history_scope": grant["scope"],
             "client": grant["client"],
@@ -253,6 +292,9 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
             "events": events,
             "title": current.get("title", ""),
         }
+        if current.get("completed_id") != current.get("emitted_completion"):
+            body["completed_through_event_id"] = current["completed_id"]
+            current["emitted_completion"] = current["completed_id"]
         raw = encoded(body)
         state["pending"] = {
             "body": body,
@@ -263,7 +305,7 @@ def scan_file(state: dict, grant: dict, profile: dict, roots: list[Path], deadli
             "event_ids": json.dumps([e["event_id"] for e in events]),
         }
     if current["offset"] >= current["size"]:
-        state["processed_conversations"] += int(current["sequence"] > 0)
+        state["processed_conversations"] += int(current.get("selected_events", 0) > 0)
         state["current"] = None
 
 

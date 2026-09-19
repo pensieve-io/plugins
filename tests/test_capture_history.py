@@ -512,3 +512,177 @@ def test_invalid_or_old_grants_never_start_scanning(tmp_path, monkeypatch, scope
     with pytest.raises(ValueError):
         run()
     assert not sent
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_broader_reimport_preserves_segment_and_native_order(tmp_path, monkeypatch, client):
+    root, grant, service, sent, progress, run, _ = setup(tmp_path, monkeypatch, client)
+    records = [
+        user("Earlier decision", client, "2026-08-15T00:00:00+00:00"),
+        user("Recent correction", client),
+        assistant(client=client),
+    ]
+    write(root / "chat.jsonl", codex_records(*records) if client == "codex" else records)
+    run()
+    narrow = events(sent)
+    first_segment = json.loads(sent[0]["body"])["segment_id"]
+    assert [e["sequence"] for e in narrow] == [2, 3]
+    service["imports"] = [{**grant, "id": str(uuid.uuid4()), "since": None}]
+    sent.clear()
+    run()
+    broad = events(sent)
+    assert [e["sequence"] for e in broad] == [1, 2, 3]
+    assert broad[1:] == narrow
+    assert {json.loads(batch["body"])["segment_id"] for batch in sent} == {first_segment}
+    assert progress[-1]["processed_conversations"] == 1
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_cancelled_import_retry_keeps_correction_with_original_prefix(
+    tmp_path, monkeypatch, client
+):
+    root, grant, service, sent, progress, run, _ = setup(tmp_path, monkeypatch, client)
+    records = [user(f"Provisional proposal {i}", client) for i in range(100)] + [
+        user("Correction: discard those proposals", client)
+    ]
+    write(root / "chat.jsonl", codex_records(*records) if client == "codex" else records)
+    original_upload = history.upload
+
+    def interrupt(batch, *args):
+        result = original_upload(batch, *args)
+        return result if len(sent) == 1 else False
+
+    monkeypatch.setattr(history, "upload", interrupt)
+    run()
+    first = json.loads(sent[0]["body"])
+    assert progress[-1]["state"] == "running"
+    service["imports"] = [{**grant, "id": str(uuid.uuid4())}]
+    monkeypatch.setattr(history, "upload", original_upload)
+    sent.clear()
+    run()
+    assert {json.loads(batch["body"])["segment_id"] for batch in sent} == {first["segment_id"]}
+    assert events(sent)[:100] == first["events"]
+    assert events(sent)[-1]["content"] == "Correction: discard those proposals"
+    assert events(sent)[-1]["sequence"] == 101
+    assert progress[-1]["state"] == "completed"
+
+
+@pytest.mark.parametrize("changed", ["context_id", "capture_generation"])
+def test_history_identity_never_crosses_company_or_consent_generation(
+    tmp_path, monkeypatch, changed
+):
+    root, grant, service, sent, _, run, _ = setup(tmp_path, monkeypatch)
+    write(root / "chat.jsonl", codex_records(user("Decision")))
+    run()
+    first_segment = json.loads(sent[0]["body"])["segment_id"]
+    service["imports"] = [
+        {
+            **grant,
+            "id": str(uuid.uuid4()),
+            changed: 999 if changed == "context_id" else str(uuid.uuid4()),
+        }
+    ]
+    sent.clear()
+    run()
+    assert json.loads(sent[0]["body"])["segment_id"] != first_segment
+
+
+def test_outside_window_records_do_not_count_as_imported_conversation(tmp_path, monkeypatch):
+    root, _, _, sent, progress, run, _ = setup(tmp_path, monkeypatch)
+    write(
+        root / "chat.jsonl", codex_records(user("Too old", timestamp="2020-01-01T00:00:00+00:00"))
+    )
+    run()
+    assert not sent
+    assert progress[-1]["state"] == "completed"
+    assert progress[-1]["processed_conversations"] == 0
+
+
+def native_final(text="Verified final", client="codex"):
+    answer = assistant(text, client)
+    if client == "claude":
+        answer["message"]["stop_reason"] = "end_turn"
+        return [answer]
+    return [
+        {"type": "turn_context", "payload": {"turn_id": "history-turn"}},
+        answer,
+        {
+            "type": "event_msg",
+            "timestamp": NOW,
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "history-turn",
+                "last_agent_message": text,
+            },
+        },
+    ]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_running_historical_snapshot_stays_raw_without_completion(tmp_path, monkeypatch, client):
+    root, _, _, sent, progress, run, _ = setup(tmp_path, monkeypatch, client)
+    records = [user("Still running", client), assistant("Provisional thinking", client)]
+    write(root / "chat.jsonl", codex_records(*records) if client == "codex" else records)
+    run()
+    assert progress[-1]["state"] == "completed"
+    assert [e["content"] for e in events(sent)] == ["Still running", "Provisional thinking"]
+    assert all("completed_through_event_id" not in json.loads(b["body"]) for b in sent)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_history_certifies_only_completed_prefix_until_later_reimport(
+    tmp_path, monkeypatch, client
+):
+    root, grant, service, sent, _, run, _ = setup(tmp_path, monkeypatch, client)
+    records = [
+        user("Initial question", client),
+        *native_final(client=client),
+        user("Next unfinished question", client),
+    ]
+    path = root / "chat.jsonl"
+    write(path, codex_records(*records) if client == "codex" else records)
+    run()
+    body = json.loads(sent[-1]["body"])
+    certified = next(
+        e for e in body["events"] if e["event_id"] == body["completed_through_event_id"]
+    )
+    assert certified["kind"] == "assistant"
+    assert certified["sequence"] < body["events"][-1]["sequence"]
+    old_segment = body["segment_id"]
+    records += native_final("Next final answer", client)
+    write(path, codex_records(*records) if client == "codex" else records)
+    service["imports"] = [{**grant, "id": str(uuid.uuid4())}]
+    sent.clear()
+    run()
+    body = json.loads(sent[-1]["body"])
+    assert body["segment_id"] == old_segment
+    assert body["completed_through_event_id"] == body["events"][-1]["event_id"]
+    assert body["events"][-1]["content"] == "Next final answer"
+
+
+def test_history_completion_resends_prior_final_with_distinct_batch_id(tmp_path, monkeypatch):
+    root, _, _, sent, _, run, _ = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(history, "MAX_BATCH_EVENTS", 1)
+    write(root / "chat.jsonl", codex_records(user("Question"), *native_final()))
+    run()
+    bodies = [json.loads(b["body"]) for b in sent]
+    assert len(bodies) == 3
+    assert len({b["batch_id"] for b in bodies}) == 3
+    assert bodies[1]["events"] == bodies[2]["events"]
+    assert "completed_through_event_id" not in bodies[1]
+    assert bodies[2]["completed_through_event_id"] == bodies[2]["events"][0]["event_id"]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_final_outside_history_window_does_not_certify_selected_partial_turn(
+    tmp_path, monkeypatch, client
+):
+    root, grant, _, sent, _, run, _ = setup(tmp_path, monkeypatch, client)
+    final = native_final(client=client)
+    for record in final:
+        record["timestamp"] = "2026-09-19T00:00:00+00:00"
+    records = [user("Selected partial turn", client), *final]
+    write(root / "chat.jsonl", codex_records(*records) if client == "codex" else records)
+    run()
+    assert [e["content"] for e in events(sent)] == ["Selected partial turn"]
+    assert all("completed_through_event_id" not in json.loads(b["body"]) for b in sent)

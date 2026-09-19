@@ -549,6 +549,22 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                     ),
                     "retry_identical_bytes": len(attempts) > 1 and attempts[0] == attempts[1],
                     "captured_visible_work": any(body["events"] for body in accepted.values()),
+                    "native_completion_reaches_service": any(
+                        body.get("completed_through_event_id") for body in accepted.values()
+                    )
+                    and all(
+                        any(
+                            prior["segment_id"] == body["segment_id"]
+                            and any(
+                                event["event_id"] == body["completed_through_event_id"]
+                                and event["kind"] == "assistant"
+                                for event in prior["events"]
+                            )
+                            for prior in accepted.values()
+                        )
+                        for body in accepted.values()
+                        if body.get("completed_through_event_id")
+                    ),
                     "credentials_never_reach_model": CAPTURE_KEY
                     not in json.dumps(ModelStub.requests),
                     "no_hook_or_reasoning_payload": all(
