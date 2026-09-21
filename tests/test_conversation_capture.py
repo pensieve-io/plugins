@@ -173,6 +173,298 @@ def pending(state):
         db.close()
 
 
+def codex_lifecycle(kind, turn="native-turn", ordinal=None):
+    return {
+        "type": "event_msg",
+        "timestamp": NOW,
+        "ordinal": ordinal,
+        "payload": {"type": kind, "turn_id": turn},
+    }
+
+
+def claude_stop(**changes):
+    return {
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "sessionId": SESSION,
+        "isSidechain": False,
+        "timestamp": NOW,
+        "stopReason": "",
+        "preventedContinuation": False,
+        "hookErrors": [],
+        **changes,
+    }
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_native_turns_link_after_ack_and_resume(tmp_path, monkeypatch, client):
+    path, _, _, calls, run = setup(tmp_path, monkeypatch, client)
+    prompt = user(client=client)
+    if client == "codex":
+        append(path, codex_lifecycle("task_started"))
+    append(path, prompt, hook_record(client), assistant(client=client))
+    run()
+    first = events(calls)
+    turn = "native-turn" if client == "codex" else prompt["uuid"]
+    assert first[0]["capture"] == {"turn_id": turn}
+    assert first[1]["capture"] == {
+        "turn_id": turn,
+        "parent": {"host_conversation_id": SESSION, "event_id": first[0]["event_id"]},
+    }
+    run("SessionEnd")
+    run("SessionStart")
+    if client == "codex":
+        append(path, codex_lifecycle("task_started", "second-turn"))
+    append(path, user("Second", client), hook_record(client), assistant("Second answer", client))
+    run()
+    saved = events(calls)
+    assert len(saved) == 4
+    assert saved[2]["capture"]["turn_id"] != turn
+    assert saved[2]["capture"]["parent"]["event_id"] == first[-1]["event_id"]
+    assert saved[3]["capture"]["turn_id"] == saved[2]["capture"]["turn_id"]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_tool_identity_and_terminal_event_are_retry_stable(tmp_path, monkeypatch, client):
+    path, _, _, calls, run = setup(tmp_path, monkeypatch, client)
+    if client == "codex":
+        append(path, codex_lifecycle("task_started"))
+        call = {
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "read", "call_id": "native-call"},
+        }
+        result = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "native-call",
+                "output": "Result",
+            },
+        }
+        end = codex_lifecycle("task_complete")
+    else:
+        call = assistant(client=client)
+        call["message"]["content"] = [{"type": "tool_use", "id": "native-call", "name": "read"}]
+        result = user(client=client)
+        result["message"]["content"] = [
+            {"type": "tool_result", "tool_use_id": "native-call", "content": "Result"}
+        ]
+        end = claude_stop()
+    answer = assistant(client=client)
+    if client == "claude":
+        answer["message"]["stop_reason"] = "end_turn"
+    append(path, user(client=client), hook_record(client), call, result, answer)
+    run()
+    # A Stop invocation alone does not certify completion, even at EOF.
+    assert "turn_end" not in {event["kind"] for event in events(calls)}
+    append(path, end)
+    run("SessionEnd")
+    saved = events(calls)
+    assert [event["kind"] for event in saved] == [
+        "user",
+        "tool_call",
+        "tool_result",
+        "assistant",
+        "turn_end",
+    ]
+    assert {event["capture"]["tool_call_id"] for event in saved[1:3]} == {"native-call"}
+    assert saved[-1]["content"] == ""
+    assert saved[-1]["capture"]["completion"] == "completed"
+    assert saved[-1]["capture"]["parent"]["event_id"] == saved[-2]["event_id"]
+    assert len({event["capture"]["turn_id"] for event in saved}) == 1
+    append(path, end)
+    run()
+    assert events(calls) == saved
+
+
+@pytest.mark.parametrize(
+    "native_kind,expected", [("turn_aborted", "interrupted"), ("task_complete", "completed")]
+)
+def test_codex_completion_requires_current_native_turn(
+    tmp_path, monkeypatch, native_kind, expected
+):
+    path, _, _, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        codex_lifecycle("task_started"),
+        user(),
+        hook_record(),
+        codex_lifecycle(native_kind, "different-turn"),
+    )
+    run()
+    assert len(events(calls)) == 1
+    append(path, codex_lifecycle(native_kind))
+    run()
+    assert events(calls)[-1]["capture"]["completion"] == expected
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"stopReason": "continue"},
+        {"preventedContinuation": True},
+        {"hookErrors": ["failed"]},
+        {"isSidechain": True},
+    ],
+)
+def test_claude_unsettled_stop_never_marks_complete(tmp_path, monkeypatch, changes):
+    path, _, _, calls, run = setup(tmp_path, monkeypatch, "claude")
+    answer = assistant(client="claude")
+    answer["message"]["stop_reason"] = "end_turn"
+    append(path, user(client="claude"), hook_record("claude"), answer, claude_stop(**changes))
+    run("SessionEnd")
+    assert [event["kind"] for event in events(calls)] == ["user", "assistant"]
+
+
+def test_legacy_turn_ids_are_distinct_and_malformed_native_ids_are_omitted(tmp_path, monkeypatch):
+    path, _, _, calls, run = setup(tmp_path, monkeypatch)
+    for turn in ("bad id", "x" * 256, None):
+        append(path, codex_lifecycle("task_started", turn), user(), hook_record(), assistant())
+        run()
+    saved = events(calls)
+    assert len({event["capture"]["turn_id"] for event in saved}) == 3
+    assert all(
+        event["capture"]["turn_id"] == saved[i // 2 * 2]["event_id"]
+        for i, event in enumerate(saved)
+    )
+
+
+@pytest.mark.parametrize("boundary", ["context", "generation", "unmarked", "rollback"])
+def test_lineage_stops_at_unproven_or_changed_scope(tmp_path, monkeypatch, boundary):
+    path, _, _, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(), assistant())
+    run()
+    args = {}
+    if boundary == "context":
+        args["context"] = 12
+    elif boundary == "generation":
+        args["generation"] = OTHER_OWNER
+    elif boundary == "unmarked":
+        append(path, user("Unmarked"), assistant("Unattributed"))
+    else:
+        append(path, codex_lifecycle("thread_rolled_back"))
+    append(path, user("New"), hook_record(**args), assistant("New answer"))
+    run()
+    saved = events(calls)
+    assert "parent" not in saved[-2]["capture"]
+    assert saved[-1]["capture"]["parent"]["event_id"] == saved[-2]["event_id"]
+
+
+def test_upgrade_keeps_legacy_outbox_exact_and_does_not_enrich_old_turn(tmp_path, monkeypatch):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run()
+    db = capture.connect_state(state, "codex", SESSION)
+    with db:
+        for row in db.execute("SELECT id,body FROM events").fetchall():
+            event = json.loads(row["body"])
+            event.pop("capture")
+            db.execute(
+                "UPDATE events SET body=? WHERE id=?", (capture.encoded(event).decode(), row["id"])
+            )
+        db.execute("DELETE FROM batches")
+        st = capture.load_state(db)
+        for key in ("capture_turn_id", "tail", "turn_closed", "claude_end_turn"):
+            st.pop(key, None)
+        capture.save_state(db, st)
+    old_batch = capture.next_batch(
+        db, db.execute("SELECT * FROM segments").fetchone(), "codex", SESSION
+    )
+    db.execute("DROP TABLE anchors")  # Previous plugin schema.
+    db.commit()
+    db.close()
+
+    def send(batch, *args):
+        calls.append((batch, KEY))
+        return ACCEPTED
+
+    monkeypatch.setattr(capture, "upload", send)
+    append(path, assistant("Old turn continues"))
+    run()
+    assert calls[0][0]["body"] == old_batch["body"]
+    assert calls[0][0]["sha"] == old_batch["sha"]
+    assert all("capture" not in event for event in events(calls))
+    append(path, user("New turn"), hook_record(), assistant("New answer"))
+    run()
+    assert "parent" not in events(calls)[-2]["capture"]
+
+
+@pytest.mark.parametrize(
+    "scope,endpoint",
+    [("same", 4), ("same", 6), ("same", 5), ("other", 4), ("expired", 4), ("missing", 4)],
+)
+def test_codex_fork_uses_exact_captured_endpoint_only(tmp_path, monkeypatch, scope, endpoint):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    answer = assistant()
+    answer["ordinal"] = 3
+    append(
+        path,
+        codex_lifecycle("task_started"),
+        user(),
+        hook_record(),
+        answer,
+        codex_lifecycle("task_complete", ordinal=5),
+    )
+    run()
+    source_events = events(calls)
+    if scope in {"expired", "missing"}:
+        db = capture.connect_state(state, "codex", SESSION)
+        with db:
+            if scope == "expired":
+                db.execute("UPDATE segments SET expires_at='2020-01-01T00:00:00Z'")
+            else:
+                db.execute("DELETE FROM anchors")
+        db.close()
+    fork = str(uuid.uuid4())
+    fork_path = tmp_path / "fork.jsonl"
+    append(
+        fork_path,
+        {
+            "type": "session_meta",
+            "payload": {
+                "id": fork,
+                "forked_from_id": SESSION,
+                "forked_from_ordinal_exclusive": endpoint,
+            },
+        },
+    )
+
+    def fork_run(event):
+        capture.run_hook(
+            {"session_id": fork, "hook_event_name": event, "transcript_path": str(fork_path)},
+            "codex",
+            cfg,
+            state,
+        )
+
+    fork_run("SessionStart")
+    append(
+        fork_path,
+        user("Fork prompt"),
+        hook_record(session=fork, context=12 if scope == "other" else 497),
+        assistant("Fork answer"),
+    )
+    fork_run("Stop")
+    first = events(calls)[-2]
+    if scope == "same" and endpoint in {4, 6}:
+        parent = source_events[1 if endpoint == 4 else 2]
+        assert first["capture"]["parent"] == {
+            "host_conversation_id": SESSION,
+            "event_id": parent["event_id"],
+        }
+    else:
+        assert "parent" not in first["capture"]
+    # The source remains independently resumable and is never relinked to the fork.
+    append(path, user("Original continues"), hook_record(), assistant("Original answer"))
+    run()
+    resumed = events(calls)[-2]["capture"]
+    if scope == "expired":
+        assert "parent" not in resumed
+    else:
+        assert resumed["parent"]["host_conversation_id"] == SESSION
+
+
 def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch):
     real_upload = capture.upload
     path, cfg, state, _, _ = setup(tmp_path, monkeypatch)
@@ -1306,6 +1598,7 @@ def test_lost_receipt_expiry_preserves_only_proven_fresh_unacknowledged_turns(
         append(path, assistant("More fresh work"))
         run()
         assert events(calls)[-1]["content"] == "More fresh work"
+        assert events(calls)[-1]["capture"]["parent"]["event_id"] == original_events[-1]["event_id"]
     else:
         assert not calls
     assert pending(state) == 0

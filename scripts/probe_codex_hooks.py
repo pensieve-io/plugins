@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -130,6 +131,8 @@ def run_probe(
     *,
     persist: bool = False,
     resume: str | None = None,
+    fork: str | None = None,
+    interrupt: bool = False,
     compact: bool = False,
     capture: bool = False,
     capture_state: Path | None = None,
@@ -142,6 +145,8 @@ def run_probe(
     shutil.copytree(Path(__file__).resolve().parents[1] / "pensieve", plugin)
     sequence = 0
     capture_attempts = []
+    model_waiting = threading.Event()
+    release_model = threading.Event()
     capture_batch_scopes = {}
     capture_config = output / "capture-config.json"
     if capture:
@@ -187,7 +192,7 @@ def run_probe(
                         "context_id": scope,
                     },
                 )
-                if len(capture_attempts) == 1:
+                if len(capture_attempts) == 1 and not interrupt:
                     self.send_response(503)
                     self.end_headers()
                     return
@@ -232,6 +237,10 @@ def run_probe(
                 item.get("type") in {"function_call_output", "custom_tool_call_output"}
                 for item in items
             )
+            if interrupt:
+                model_waiting.set()
+                release_model.wait(timeout=120)
+                return
             if not has_result and (not compact or sequence == 1):
                 item = {
                     "type": "function_call",
@@ -355,26 +364,44 @@ def run_probe(
         command.append("--ephemeral")
     for key, value in settings.items():
         command.extend(["-c", key + "=" + toml(value)])
-    if resume:
+    if fork:
+        command.extend(["fork", fork])
+    elif resume:
         command.extend(["resume", resume])
     command.append("Run the synthetic fixture.")
     try:
         # Codex 0.154.0 can drain its in-process client through two 45-second
         # shutdown waits after turn.completed. Allow those plus the fixture
         # turn; individual generated hooks retain their five-second timeout.
-        result = subprocess.run(
-            command, input="", text=True, capture_output=True, timeout=120, check=False
-        )
+        if interrupt:
+            with subprocess.Popen(
+                command,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ) as process:
+                if not model_waiting.wait(timeout=30):
+                    process.kill()
+                    raise RuntimeError("Codex never reached the interrupt fixture")
+                process.send_signal(signal.SIGINT)
+                stdout, stderr = process.communicate(timeout=120)
+                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        else:
+            result = subprocess.run(
+                command, input="", text=True, capture_output=True, timeout=120, check=False
+            )
     except subprocess.TimeoutExpired as exc:
         (output / "events.jsonl").write_bytes(exc.stdout or b"")
         (output / "stderr.txt").write_bytes(exc.stderr or b"")
         raise RuntimeError(f"Codex timed out; inspect {output / 'events.jsonl'}") from None
     finally:
+        release_model.set()
         server.shutdown()
         server.server_close()
     (output / "events.jsonl").write_text(result.stdout)
     (output / "stderr.txt").write_text(result.stderr)
-    if result.returncode:
+    if result.returncode and not interrupt:
         raise RuntimeError(f"Codex exited {result.returncode}; inspect {output / 'stderr.txt'}")
     calls = [json.loads(line) for line in (output / "mcp.jsonl").read_text().splitlines()]
     model_requests = [
@@ -405,13 +432,34 @@ def run_probe(
     )
     assert all(set(receipt) == {"token", "operation"} for receipt in receipts)
     operations = {receipt["operation"] for receipt in receipts}
-    if persist:
+    if persist and not interrupt:
         assert "ack" in operations
     capture_checks = {}
     if capture:
-        accepted = {body["batch_id"]: body for body, _ in capture_attempts[1:]}
+        accepted = {body["batch_id"]: body for body, _ in capture_attempts[0 if interrupt else 1 :]}
         captured = [event for body in accepted.values() for event in body["events"]]
         capture_checks = {
+            "native_turn_identity": all(
+                event.get("capture", {}).get("turn_id")
+                in {
+                    call["arguments"].get("turn_id")
+                    for call in calls
+                    if call["name"] == "context_briefing"
+                    and call["arguments"].get("event") == "UserPromptSubmit"
+                }
+                for event in captured
+            ),
+            "explicit_completion": sum(
+                event["kind"] == "turn_end"
+                and event.get("capture", {}).get("completion") == "completed"
+                for event in captured
+            )
+            == 1,
+            "tool_call_ids": all(
+                event.get("capture", {}).get("tool_call_id")
+                for event in captured
+                if event["kind"] in {"tool_call", "tool_result"}
+            ),
             "prompt_and_answer_captured": {"user", "assistant"}
             <= {event["kind"] for event in captured},
             "retry_identical_bytes": len(capture_attempts) > 1
@@ -428,6 +476,49 @@ def run_probe(
             "stable_distinct_events": len({event["event_id"] for event in captured})
             == len(captured),
         }
+        if interrupt:
+            capture_checks.pop("prompt_and_answer_captured")
+            capture_checks.pop("retry_identical_bytes")
+            capture_checks.pop("explicit_completion")
+            capture_checks["interrupted_without_completion"] = (
+                any(event["kind"] == "user" for event in captured)
+                and any(
+                    event.get("capture", {}).get("completion") == "interrupted"
+                    for event in captured
+                )
+                and not any(
+                    event.get("capture", {}).get("completion") == "completed" for event in captured
+                )
+            )
+        for segment in {body["segment_id"] for body in accepted.values()}:
+            ordered = sorted(
+                (
+                    event
+                    for body in accepted.values()
+                    if body["segment_id"] == segment
+                    for event in body["events"]
+                ),
+                key=lambda event: event["sequence"],
+            )
+            capture_checks["ordered_" + segment] = all(
+                current["capture"].get("parent")
+                == {
+                    "host_conversation_id": next(iter(thread_ids)),
+                    "event_id": previous["event_id"],
+                }
+                for previous, current in zip(ordered, ordered[1:])
+            )
+        if fork:
+            first = min(captured, key=lambda event: event["sequence"])
+            capture_checks["exact_fork_parent"] = (
+                first["capture"].get("parent", {}).get("host_conversation_id") == fork
+                and next(iter(thread_ids)) != fork
+            )
+        elif resume:
+            first = min(captured, key=lambda event: event["sequence"])
+            capture_checks["resumed_parent"] = (
+                first["capture"].get("parent", {}).get("host_conversation_id") == resume
+            )
         if context_switch:
             source_events = [
                 event
@@ -484,6 +575,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path)
     parser.add_argument("--persist", action="store_true")
     parser.add_argument("--resume")
+    parser.add_argument("--fork")
+    parser.add_argument("--interrupt", action="store_true")
     parser.add_argument("--compact", action="store_true")
     parser.add_argument("--capture", action="store_true")
     parser.add_argument("--capture-state", type=Path)
@@ -501,6 +594,8 @@ if __name__ == "__main__":
                     destination,
                     persist=args.persist,
                     resume=args.resume,
+                    fork=args.fork,
+                    interrupt=args.interrupt,
                     compact=args.compact,
                     capture=args.capture,
                     capture_state=args.capture_state,

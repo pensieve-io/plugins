@@ -35,6 +35,8 @@ class ModelStub(BaseHTTPRequestHandler):
     receipt_requests: ClassVar[list[dict[str, Any]]] = []
     capture_requests: ClassVar[list[dict[str, Any]]] = []
     fail_hook: bool = False
+    interrupt_waiting = threading.Event()
+    release_interrupted = threading.Event()
 
     def reply_json(self, value: dict[str, Any], *, session: str | None = None) -> None:
         data = json.dumps(value).encode()
@@ -89,10 +91,11 @@ class ModelStub(BaseHTTPRequestHandler):
                 result = {
                     "tools": [
                         {
-                            "name": "context_briefing",
+                            "name": name,
                             "description": "Synthetic hook probe",
                             "inputSchema": {"type": "object", "additionalProperties": True},
                         }
+                        for name in ("context_briefing", "ordinary")
                     ]
                 }
             elif method == "tools/call":
@@ -124,6 +127,8 @@ class ModelStub(BaseHTTPRequestHandler):
                     }
                 }
                 result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
+                if args.get("ordinary"):
+                    result = {"content": [{"type": "text", "text": "Synthetic ordinary result."}]}
                 if self.fail_hook and event == "UserPromptSubmit":
                     result = {
                         "isError": True,
@@ -168,6 +173,10 @@ class ModelStub(BaseHTTPRequestHandler):
             "usage": {"input_tokens": 100, "output_tokens": 5},
         }
         messages = body.get("messages", [])
+        if messages and "Synthetic interrupt probe." in json.dumps(messages[-1]):
+            self.interrupt_waiting.set()
+            self.release_interrupted.wait(timeout=60)
+            return
         if "Synthetic ordinary tool probe" in json.dumps(messages) and not any(
             entry.get("type") == "tool_result"
             for message in messages
@@ -175,9 +184,7 @@ class ModelStub(BaseHTTPRequestHandler):
             if isinstance(entry, dict)
         ):
             tool_name = next(
-                tool["name"]
-                for tool in body.get("tools", [])
-                if tool["name"].endswith("context_briefing")
+                tool["name"] for tool in body.get("tools", []) if tool["name"].endswith("ordinary")
             )
             response["content"] = [
                 {
@@ -272,7 +279,12 @@ def stream_probe(common: list[str], env: dict[str, str], root: Path) -> list[dic
     reader.start()
     report = []
     try:
-        for prompt in ["Synthetic stream first prompt.", "/clear", "Synthetic stream after clear."]:
+        for prompt in [
+            "Synthetic stream first prompt.",
+            "/clear",
+            "Synthetic stream after clear.",
+            "Synthetic interrupt probe.",
+        ]:
             before = len(ModelStub.requests)
             before_mcp = len(ModelStub.mcp_requests)
             assert process.stdin is not None
@@ -290,6 +302,20 @@ def stream_probe(common: list[str], env: dict[str, str], root: Path) -> list[dic
                 + "\n"
             )
             process.stdin.flush()
+            if prompt == "Synthetic interrupt probe.":
+                if not ModelStub.interrupt_waiting.wait(timeout=30):
+                    raise RuntimeError("Claude never reached the interrupt fixture")
+                process.stdin.write(
+                    json.dumps(
+                        {
+                            "type": "control_request",
+                            "request_id": str(uuid.uuid4()),
+                            "request": {"subtype": "interrupt"},
+                        }
+                    )
+                    + "\n"
+                )
+                process.stdin.flush()
             received = []
             while True:
                 event = events.get(timeout=30)
@@ -319,6 +345,7 @@ def stream_probe(common: list[str], env: dict[str, str], root: Path) -> list[dic
             )
         return report
     finally:
+        ModelStub.release_interrupted.set()
         if process.stdin:
             process.stdin.close()
         try:
@@ -420,6 +447,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
             "dontAsk",
             "--allowedTools",
             "mcp__plugin_pensieve_pensieve__context_briefing",
+            "mcp__plugin_pensieve_pensieve__ordinary",
             "--model",
             "claude-sonnet-4-6",
             "--system-prompt",
@@ -435,6 +463,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                 ("resume", ["--resume", session], "Synthetic resumed prompt."),
                 ("compact", ["--resume", session], "/compact"),
                 ("after_compact", ["--resume", session], "Synthetic post-compaction prompt."),
+                ("fork", ["--resume", session, "--fork-session"], "Synthetic fork prompt."),
                 ("ordinary_tool", [], "Synthetic ordinary tool probe."),
                 ("hook_failure", ["--session-id", failed_session], "Synthetic failed hook."),
                 ("retry_after_failure", ["--resume", failed_session], "Synthetic retry hook."),
@@ -550,6 +579,59 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                     == 3,
                 }
                 report["captured_event_count"] = len(captured)
+                report["capture_batches"] = list(accepted.values())
+                fork_events = [
+                    event for event in captured if event["content"] == "Synthetic fork prompt."
+                ]
+                interrupted_turns = {
+                    event["capture"]["turn_id"]
+                    for event in captured
+                    if event["content"] == "Synthetic interrupt probe."
+                }
+                report["capture_checks"].update(
+                    {
+                        "turn_identity_present": all(
+                            event.get("capture", {}).get("turn_id") for event in captured
+                        ),
+                        "explicit_completions": sum(
+                            event["kind"] == "turn_end" for event in captured
+                        )
+                        >= 3,
+                        "tool_call_ids": all(
+                            event.get("capture", {}).get("tool_call_id")
+                            for event in captured
+                            if event["kind"] in {"tool_call", "tool_result"}
+                        ),
+                        "fork_starts_without_guessed_ancestry": len(fork_events) == 1
+                        and "parent" not in fork_events[0]["capture"],
+                        "interruption_never_marked_complete": len(interrupted_turns) == 1
+                        and not any(
+                            event["kind"] == "turn_end"
+                            and event["capture"]["turn_id"] in interrupted_turns
+                            for event in captured
+                        ),
+                        "tool_call_and_result_match": [
+                            event["capture"].get("tool_call_id")
+                            for event in captured
+                            if event["kind"] in {"tool_call", "tool_result"}
+                        ]
+                        == ["probe_tool_call", "probe_tool_call"],
+                    }
+                )
+                for segment in {body["segment_id"] for body in accepted.values()}:
+                    ordered = sorted(
+                        (
+                            event
+                            for body in accepted.values()
+                            if body["segment_id"] == segment
+                            for event in body["events"]
+                        ),
+                        key=lambda event: event["sequence"],
+                    )
+                    report["capture_checks"]["ordered_" + segment] = all(
+                        current["capture"].get("parent", {}).get("event_id") == previous["event_id"]
+                        for previous, current in zip(ordered, ordered[1:])
+                    )
                 if not all(report["capture_checks"].values()):
                     # Preserve only synthetic fixture diagnostics on failure.
                     report["capture_attempts"] = attempts
@@ -569,8 +651,28 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
             report["transcript_markers"] = []
             report["compaction_records"] = []
             report["transcript_record_types"] = []
+            report["native_lifecycle_records"] = []
             for path in (root / "config").rglob("*.jsonl"):
                 records = [json.loads(line) for line in path.read_text().splitlines()]
+                report["native_lifecycle_records"].extend(
+                    {
+                        key: value
+                        for key, value in entry.items()
+                        if key
+                        in {
+                            "type",
+                            "subtype",
+                            "uuid",
+                            "parentUuid",
+                            "sessionId",
+                            "stopReason",
+                            "preventedContinuation",
+                        }
+                    }
+                    | {"message_stop_reason": entry.get("message", {}).get("stop_reason")}
+                    for entry in records
+                    if entry.get("type") in {"system", "user", "assistant"}
+                )
                 report["transcript_record_types"].append(
                     {
                         "file": str(path.relative_to(root)),
@@ -582,6 +684,15 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                 )
                 report["compaction_records"].extend(
                     entry for entry in records if "compact" in str(entry.get("subtype", ""))
+                )
+            if capture:
+                native_users = {
+                    entry["uuid"]
+                    for entry in report["native_lifecycle_records"]
+                    if entry["type"] == "user"
+                }
+                report["capture_checks"]["native_user_turn_identity"] = all(
+                    event["capture"]["turn_id"] in native_users for event in captured
                 )
             return report
         finally:
@@ -598,7 +709,7 @@ def verify_report(report: dict[str, Any]) -> dict[str, bool]:
 
     first = calls(cases["startup"])[0]
     resumed = calls(cases["resume"])[0]
-    stream_first, clear, after_clear = report["stream_cases"]
+    stream_first, clear, after_clear, interrupted = report["stream_cases"]
     clear_call = calls(clear)[0]
     stream_call = calls(stream_first)[0]
     ordinary = next(

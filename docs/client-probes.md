@@ -77,6 +77,8 @@ preserves `events.jsonl` and `stderr.txt` for distinguishing delivery from exit.
 ```sh
 python3 scripts/probe_codex_hooks.py --persist --capture --output /tmp/pensieve-capture-start
 python3 scripts/probe_codex_hooks.py --persist --capture --resume ID --capture-state /tmp/pensieve-capture-start/capture-spool --output /tmp/pensieve-capture-resume
+python3 scripts/probe_codex_hooks.py --persist --capture --fork ID --capture-state /tmp/pensieve-capture-start/capture-spool --output /tmp/pensieve-capture-fork
+python3 scripts/probe_codex_hooks.py --persist --capture --interrupt --output /tmp/pensieve-capture-interrupt
 python3 scripts/probe_codex_hooks.py --persist --capture --compact --output /tmp/pensieve-capture-compact
 python3 scripts/probe_codex_hooks.py --persist --capture --context-switch code-mode --output /tmp/pensieve-capture-switch
 ```
@@ -107,6 +109,37 @@ contain harness instructions and are not an accepted user source. Assistant
 capture permits visible commentary/final channels and excludes analysis and
 reasoning records. Capture requires a local `transcript_path`; `--persist` is
 therefore required for these fixtures.
+
+### Turn capture verification — 21 September 2026
+
+The adapter candidate was exercised on **Codex CLI 0.155.1** and
+**Claude Code 2.1.278** with local synthetic services. Package tests run on
+Python 3.9 and 3.12 (168 passed on each). Native upload bodies were also validated against
+Pensieve #973's actual `UploadBatch` schema.
+
+The capture probes now assert native turn identity, ordered predecessor links,
+tool-call/result identity and explicit completion, alongside the existing
+privacy, attribution and exact retry checks. Codex covers fresh capture,
+resume, fork, compaction, code-mode context switches and SIGINT during inference.
+Claude covers startup, resume, compaction, clear, fork, a visible ordinary tool,
+failed grounding and a stream-control interruption. Claude's report includes
+synthetic upload batches and a content-free native lifecycle inventory.
+
+Codex's fork fixture uses the source's exact ordinal, while a later resume keeps
+the source branch independent. A unit fixture additionally forks before a
+captured turn's terminal event, proving the suffix is excluded. Claude's fork
+fixture verifies new work is captured once with unknown parentage; no source
+conversation is inferred from matching text or UUIDs. Codex interruptions carry
+`interrupted`; Claude's observed interruption has no trustworthy terminal
+record and remains incomplete. Neither is marked completed.
+
+The interruption variant uses the native interrupt mechanism while the local
+model fixture waits. It intentionally omits the synthetic 503 on Codex so that
+the best-effort exit flush can be inspected without another resumed process.
+Codex exit code 1 is expected for that case; the probe exits zero only when its
+interruption assertions pass. Other variants retain the exact-byte 503 retry.
+Use a new source session captured by this candidate for `--fork`, sharing its
+`--capture-state`; an older plugin's spool has no ordinal index.
 
 ### Delivery acknowledgement boundary
 

@@ -64,6 +64,12 @@ behaviour separately from live OAuth and desktop checks.
 
 ## Release order
 
+Turn-aware capture additionally requires
+[Pensieve #973](https://github.com/pensieve-io/pensieve/pull/973), including its
+nullable capture column and upload-contract deployment. Older services reject
+the new event fields. Keep this adapter candidate in draft until that deployment
+and live acceptance are recorded. Local/synthetic tests do not publish it.
+
 Conversation capture requires standalone Pensieve PR #886, including the upload
 route, consent generations, personal settings and account-scoped device keys.
 It has no transcript retrieval or task-ledger dependency.

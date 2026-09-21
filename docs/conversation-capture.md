@@ -73,6 +73,51 @@ wait provisionally for its own marker; ambiguous/unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
 
+### Turn identity and lineage
+
+Newly observed turns carry the additive `capture` envelope from
+[Pensieve #973](https://github.com/pensieve-io/pensieve/pull/973): a turn ID,
+an exact preceding captured event reference, native tool-call IDs on tool
+events, and separate empty `turn_end` events when completion is known.
+Codex supplies its native turn ID; Claude uses the initiating user message UUID.
+Older records without a usable native ID use the stable prompt event ID.
+Existing event IDs remain file-position based, so repeated identical text
+remains distinct. Tool arguments remain excluded.
+
+Predecessors describe retained visible events, not every internal host record.
+They survive upload acknowledgement and resume. Account, context, consent,
+retention and unknown attribution boundaries break the chain. A plugin upgrade
+preserves existing spool rows and exact queued batch bytes; it never enriches
+already captured events or reconstructs older turns. Metadata starts with the
+next observed prompt. These references are client reports, not authorization
+or server-authenticated evidence of a successful tool write.
+
+Codex forks can link to the exact `forked_from_ordinal_exclusive` boundary when
+that native record has a captured endpoint in this device's source spool.
+A content-free ordinal index survives acknowledgement, stays within the
+existing 16 MiB spool bound and is pruned on later hooks after expiry/retirement.
+The new prompt must confirm the same account, context and consent generation;
+the source must have a known, unexpired retention deadline. The adapter neither
+reads the source transcript nor substitutes its latest head. This supports
+forks at captured messages inside a turn as well as completed turns.
+
+Missing source spools, uncaptured/legacy boundaries and boundaries ending on
+unindexed internal records leave ancestry unknown. Claude's tested fork records
+retain message UUIDs but do not identify their source conversation, so its
+fork starts a new capture chain without re-uploading copied history. Rewinds
+reported as an in-place Codex rollback also break lineage. Graph storage and
+resolution of these references are a later application PR.
+
+Codex's native `task_complete` and `turn_aborted` records certify completed and
+interrupted turns respectively. Claude completion requires an `end_turn`
+assistant message followed by a successful native Stop summary with no
+continuation reason. A Stop invocation, tool result or process exit alone never
+certifies completion. Claude interruption and unrecognised failure signals
+remain incomplete. Native terminal records can be written **after** Stop;
+their marker uploads at the next prompt/SessionEnd checkpoint, while visible
+content still uploads at Stop. There is no polling process to eliminate that
+delay.
+
 SessionStart establishes a baseline, prompt/Stop checkpoints work, and
 SessionEnd attempts a short best-effort flush. Immutable events and exact-byte
 receipts tolerate retries, resume and out-of-order delivery. There are no
@@ -103,3 +148,7 @@ retry, expiry and no-backfill behavior. Synthetic installed-client probes are
 in [client-probes.md](client-probes.md). Live authenticated personal-settings
 setup, fresh installation, updates and resumed sessions remain release checks.
 Deploy the companion app/API/MCP/scheduler before publishing the plugin feature.
+This turn-metadata candidate specifically requires #973's additive database
+column and compatible upload service to be deployed before plugin publication.
+Transcript content still goes to Postgres in this stage; Neo4j storage,
+retrieval, successful-write links and extraction remain separate PRs.

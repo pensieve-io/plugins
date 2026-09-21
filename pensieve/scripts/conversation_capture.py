@@ -204,6 +204,12 @@ def is_hook_tool(name: object, namespace: object = None) -> bool:
     )
 
 
+def capture_id(value: object) -> str | None:
+    if isinstance(value, str) and 0 < len(value) <= 255 and not re.search(r"[\s\x00]", value):
+        return value
+    return None
+
+
 def normalise(record: dict, client: str, session: str, state: dict) -> list[dict]:
     """Return only allowed visible events and provenance-checked boundaries.
 
@@ -220,6 +226,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
         payload = record.get("payload", {})
         if isinstance(payload, dict) and isinstance(payload.get("turn_id"), str):
             state["turn_id"] = payload["turn_id"]
+            state["pending_turn_id"] = payload["turn_id"]
         return result
     # Context receipts require accepted hook provenance, never text quoted by
     # a user, assistant, tool, hook error, or nested compaction history.
@@ -233,10 +240,30 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
     if client == "codex":
         if not isinstance(payload, dict):
             return []
+        if record.get("type") == "event_msg":
+            if payload.get("type") == "task_started":
+                state["turn_id"] = capture_id(payload.get("turn_id"))
+                state["pending_turn_id"] = state["turn_id"]
+            if payload.get("type") == "thread_rolled_back":
+                # The discarded suffix remains captured, but is no longer the
+                # ancestor of new work. Do not link to its former head.
+                return [{"unknown_boundary": True}]
+            completion = {"task_complete": "completed", "turn_aborted": "interrupted"}.get(
+                payload.get("type")
+            )
+            if completion and payload.get("turn_id") == state.get("capture_turn_id"):
+                return [{"kind": "turn_end", "content": "", "completion": completion}]
         if record.get("type") == "event_msg" and payload.get("type") == "user_message":
             text = payload.get("message")
             if isinstance(text, str):
-                return [{"kind": "user", "content": text, "new_turn": True}]
+                return [
+                    {
+                        "kind": "user",
+                        "content": text,
+                        "new_turn": True,
+                        "native_turn_id": state.get("pending_turn_id"),
+                    }
+                ]
         if record.get("type") == "event_msg" and payload.get("type") == "item_completed":
             item = payload.get("item")
             if (
@@ -258,7 +285,10 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                 text = visible_text(output.get("content"))
                 marker = parse_marker(text, client, session, "selection")
                 if marker:
-                    return [{"boundary": marker}, {"kind": "tool_result", "content": text}]
+                    return [
+                        {"boundary": marker},
+                        {"kind": "tool_result", "content": text, "tool_call_id": item.get("id")},
+                    ]
                 return [{"unknown_boundary": True}]
             if (
                 payload.get("thread_id") == session
@@ -268,7 +298,18 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             ):
                 state["turn_id"] = payload["turn_id"]
                 text = visible_text(item.get("content"))
-                return [{"kind": "user", "content": text, "new_turn": True}] if text else []
+                return (
+                    [
+                        {
+                            "kind": "user",
+                            "content": text,
+                            "new_turn": True,
+                            "native_turn_id": payload["turn_id"],
+                        }
+                    ]
+                    if text
+                    else []
+                )
         if record.get("type") != "response_item":
             return []
         kind = payload.get("type")
@@ -294,7 +335,9 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             # version retains the tool's name and results, not arbitrary input.
             name = payload.get("name")
             return (
-                [{"kind": "tool_call", "content": str(name)[:255]}] if isinstance(name, str) else []
+                [{"kind": "tool_call", "content": str(name)[:255], "tool_call_id": call}]
+                if isinstance(name, str)
+                else []
             )
         if kind in {"function_call_output", "custom_tool_call_output"}:
             output = payload.get("output")
@@ -309,6 +352,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                 return [
                     {
                         "kind": "tool_result",
+                        "tool_call_id": payload.get("call_id"),
                         "content": "[Combined code-mode tool output omitted; original remains in the host conversation]",
                     }
                 ]
@@ -321,9 +365,20 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                     # account/context; stop attributing later text to the old one.
                     result.append({"unknown_boundary": True})
             if text:
-                result.append({"kind": "tool_result", "content": text})
+                result.append(
+                    {"kind": "tool_result", "content": text, "tool_call_id": payload.get("call_id")}
+                )
             return result
         return []
+    if (
+        record.get("type") == "system"
+        and record.get("subtype") == "stop_hook_summary"
+        and record.get("stopReason") == ""
+        and record.get("preventedContinuation") is False
+        and record.get("hookErrors") == []
+        and state.get("claude_end_turn")
+    ):
+        return [{"kind": "turn_end", "content": "", "completion": "completed"}]
     if (
         record.get("isMeta") is True
         or record.get("isCompactSummary") is True
@@ -334,6 +389,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
     kind = record.get("type")
     content = payload.get("content")
     if kind == "assistant" and payload.get("role") == "assistant":
+        state["claude_end_turn"] = payload.get("stop_reason") == "end_turn"
         text = visible_text(content)
         if text:
             result.append({"kind": "assistant", "content": text})
@@ -347,7 +403,9 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                         "internal": internal,
                     }
                     if not internal:
-                        result.append({"kind": "tool_call", "content": name[:255]})
+                        result.append(
+                            {"kind": "tool_call", "content": name[:255], "tool_call_id": call}
+                        )
         return result
     if kind != "user" or payload.get("role") != "user":
         return []
@@ -367,7 +425,18 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             # Claude's local /compact and /clear records are synthetic user
             # messages without prompt provenance, not fresh model turns.
             return []
-        return [{"kind": "user", "content": text, "new_turn": True}] if text else []
+        return (
+            [
+                {
+                    "kind": "user",
+                    "content": text,
+                    "new_turn": True,
+                    "native_turn_id": record.get("uuid"),
+                }
+            ]
+            if text
+            else []
+        )
     for item in tool_results:
         text = visible_text(item.get("content"))
         call = state.setdefault("calls", {}).pop(item.get("tool_use_id"), {})
@@ -382,7 +451,9 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             elif not item.get("is_error"):
                 result.append({"unknown_boundary": True})
         if text:
-            result.append({"kind": "tool_result", "content": text})
+            result.append(
+                {"kind": "tool_result", "content": text, "tool_call_id": item.get("tool_use_id")}
+            )
     return result
 
 
@@ -428,6 +499,8 @@ def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS batches (
             id TEXT PRIMARY KEY, segment TEXT UNIQUE NOT NULL, body BLOB NOT NULL,
             sha TEXT NOT NULL, event_ids TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS anchors (
+            ordinal INTEGER PRIMARY KEY, event_id TEXT NOT NULL, segment TEXT);
     """)
     return db
 
@@ -447,6 +520,10 @@ def renewal_segment(segment: str, user_event: str) -> str:
 
 def apply_item(db, state, item, identity, occurred_at, client, session, configured, host_timestamp):
     if item.get("new_turn"):
+        if state.get("awaiting_marker"):
+            state["tail"] = None
+            state["fork_parent"] = None
+        state.pop("pending_turn_id", None)
         # A later turn can never authorise an earlier unmarked one.
         db.execute("DELETE FROM events WHERE segment IS NULL")
         state.update(
@@ -459,10 +536,20 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             ambiguous=False,
             discard_until_prompt=False,
             turn_occurred_at=occurred_at if host_timestamp else None,
+            capture_turn_id=capture_id(item.get("native_turn_id")) or identity,
+            turn_closed=False,
+            claude_end_turn=False,
         )
     if item.get("unknown_boundary"):
         db.execute("DELETE FROM events WHERE segment IS NULL")
-        state.update(segment=None, scope=None, ambiguous=True, awaiting_marker=False)
+        state.update(
+            segment=None,
+            scope=None,
+            ambiguous=True,
+            awaiting_marker=False,
+            tail=None,
+            fork_parent=None,
+        )
         return
     marker = item.get("boundary")
     if marker:
@@ -471,7 +558,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                 # Never apply a late/unpaired hook marker to another user turn.
                 return
             if marker["turn_id"] is not None and marker["turn_id"] != state.get("turn_id"):
-                state.update(segment=None, scope=None, ambiguous=True)
+                state.update(segment=None, scope=None, ambiguous=True, tail=None)
                 return
             state["awaiting_marker"] = False
         elif state.get("ambiguous") or state.get("awaiting_marker"):
@@ -493,7 +580,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         ):
             # A changed opt-in period cannot authorise the rest of an old turn.
             # Wait for the next user prompt and its matching receipt.
-            state.update(segment=None, scope=None, discard_until_prompt=True)
+            state.update(segment=None, scope=None, discard_until_prompt=True, tail=None)
             db.execute("DELETE FROM events WHERE segment IS NULL")
             return
         if marker["kind"] == "selection" and previous != [owner, context, generation]:
@@ -503,6 +590,8 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         state["scope"] = [owner, context, generation]
         if context is None or generation is None or owner not in configured:
             state["segment"] = None
+            state["tail"] = None
+            state["fork_parent"] = None
             state.update(title="", title_segment=None)
             # An explicit disabled scope is not an upload backlog. Only its
             # current provisional user row is removed, never acknowledged work.
@@ -550,6 +639,30 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             (segment, owner, context, generation, state.get("title", "")),
         )
         if marker["kind"] == "prompt":
+            # Only a provisional, never-uploaded prompt can be completed here.
+            # Existing queued events and exact-byte batches are immutable.
+            rows = db.execute(
+                "SELECT id,body FROM events WHERE segment IS NULL AND turn_group=? ORDER BY sequence",
+                (state.get("turn_group"),),
+            ).fetchall()
+            for row in rows:
+                event = json.loads(row["body"])
+                if "capture" in event:
+                    fork = state.pop("fork_parent", None)
+                    if (
+                        fork
+                        and fork["scope"] == state["scope"]
+                        and (expiry := aware_time(fork["expires_at"]))
+                        and expiry > datetime.now(timezone.utc)
+                    ):
+                        event["capture"]["parent"] = fork["reference"]
+                    link_event(state, event, segment, session)
+                    db.execute(
+                        "UPDATE events SET body=? WHERE id=?", (encoded(event).decode(), row["id"])
+                    )
+                    db.execute(
+                        "UPDATE anchors SET segment=? WHERE event_id=?", (segment, row["id"])
+                    )
             db.execute(
                 "UPDATE events SET segment=? WHERE segment IS NULL AND turn_group=?",
                 (segment, state.get("turn_group")),
@@ -567,6 +680,8 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
     if item["kind"] != "user" and state.get("awaiting_marker"):
         state["ambiguous"] = True
     if state.get("ambiguous"):
+        state["tail"] = None
+        state["fork_parent"] = None
         # Its own prompt receipt can no longer repair this turn. Keep no
         # unuploadable text that could fill the spool and block future work.
         db.execute("DELETE FROM events WHERE segment IS NULL")
@@ -576,7 +691,10 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
     if state.get("scope") is not None and state.get("segment") is None:
         return
     text, truncated = clean_content(item["content"], list(configured.values()))
-    if not text:
+    if item["kind"] == "turn_end":
+        if not state.get("capture_turn_id") or state.get("turn_closed"):
+            return
+    elif not text:
         return
     state["sequence"] += 1
     event = {
@@ -587,6 +705,15 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         "occurred_at": occurred_at,
         "truncated": truncated or item.get("truncated", False),
     }
+    if state.get("capture_turn_id"):
+        event["capture"] = {"turn_id": state["capture_turn_id"]}
+        if call_id := capture_id(item.get("tool_call_id")):
+            event["capture"]["tool_call_id"] = call_id
+        if item["kind"] == "turn_end":
+            event["capture"]["completion"] = item["completion"]
+            state["turn_closed"] = True
+        if state.get("segment"):
+            link_event(state, event, state["segment"], session)
     db.execute(
         "INSERT OR IGNORE INTO events(id,sequence,turn_group,segment,body,host_timestamp) VALUES (?,?,?,?,?,?)",
         (
@@ -608,6 +735,55 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         )
 
 
+def link_event(state, event, segment, session):
+    """Link only to the previous retained event in this authorised portion."""
+    tail = state.get("tail")
+    if tail and tail["segment"] == segment:
+        event["capture"]["parent"] = {"host_conversation_id": session, "event_id": tail["event_id"]}
+    state["tail"] = {"segment": segment, "event_id": event["event_id"]}
+
+
+def fork_parent(db, metadata, session):
+    """Resolve an exact Codex boundary from this device's captured metadata.
+
+    Missing/expired/legacy endpoints stay unknown. Never open the source
+    transcript, search other sessions, or substitute the source's latest head.
+    """
+    source = conversation_id(metadata.get("forked_from_id"))
+    end = metadata.get("forked_from_ordinal_exclusive")
+    if not source or source == session or type(end) is not int or end <= 0:
+        return None
+    root = Path(db.execute("PRAGMA database_list").fetchone()["file"]).parent
+    path = root / f"codex-{source}.sqlite3"
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.getuid()
+        ):
+            return None
+        source_db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)
+        try:
+            row = source_db.execute(
+                "SELECT a.event_id,s.owner,s.context,s.generation,s.expires_at "
+                "FROM anchors a JOIN segments s ON s.id=a.segment "
+                "WHERE a.ordinal=? AND s.retired=0",
+                (end - 1,),
+            ).fetchone()
+        finally:
+            source_db.close()
+        if row:
+            return {
+                "reference": {"host_conversation_id": source, "event_id": row[0]},
+                "scope": list(row[1:4]),
+                "expires_at": row[4],
+            }
+    except (OSError, sqlite3.DatabaseError):
+        pass
+    return None
+
+
 def scan(
     db,
     state,
@@ -619,6 +795,14 @@ def scan(
     *,
     allow_new_file: bool = False,
 ) -> None:
+    # Anchors contain identities only and share the spool's size/retention bounds.
+    db.execute(
+        "DELETE FROM anchors WHERE segment IS NULL AND event_id NOT IN (SELECT id FROM events)"
+    )
+    db.execute(
+        "DELETE FROM anchors WHERE segment IN (SELECT id FROM segments WHERE retired=1 "
+        "OR julianday(expires_at)<=julianday('now'))"
+    )
     if not path.is_absolute():
         raise ValueError("host transcript path must be absolute")
     try:
@@ -659,7 +843,17 @@ def scan(
             tail = handle.read(MAX_RECORD_BYTES)
             final_newline = tail.rfind(b"\n")
             baseline = max(0, details.st_size - MAX_RECORD_BYTES) + final_newline + 1
-            state.update(offset=baseline, file_id=file_id, path=str(path), segment=None)
+            state.update(
+                offset=baseline,
+                file_id=file_id,
+                path=str(path),
+                segment=None,
+                tail=None,
+                capture_turn_id=None,
+            )
+            state["fork_parent"] = (
+                fork_parent(db, metadata["payload"], session) if client == "codex" else None
+            )
             return
         if (
             state.get("file_id") != file_id
@@ -696,6 +890,10 @@ def scan(
                         turn_group=None,
                         turn_occurred_at=None,
                         discard_until_prompt=True,
+                        tail=None,
+                        capture_turn_id=None,
+                        pending_turn_id=None,
+                        fork_parent=None,
                     )
                 # Never decode the skipped bytes. Checkpoint partial progress so
                 # even a record larger than one scan cannot wedge future turns.
@@ -713,7 +911,12 @@ def scan(
             if isinstance(record, dict):
                 previous_state = copy.deepcopy(state)
                 items = normalise(record, client, session, state)
-                if items:
+                discards_unmarked = (
+                    state.get("awaiting_marker")
+                    and any(item.get("kind") not in {None, "user"} for item in items)
+                    and not any(item.get("boundary") for item in items)
+                )
+                if items and not discards_unmarked:
                     # Reserve room for the exact-byte HTTP outbox even when
                     # pending content has filled its budget. Otherwise creating
                     # the batch needed to drain the spool could itself fail.
@@ -749,6 +952,18 @@ def scan(
                         configured,
                         original_time is not None,
                     )
+                    ordinal = record.get("ordinal")
+                    if client == "codex" and type(ordinal) is int and ordinal >= 0:
+                        # Several visible blocks may share a native record;
+                        # its last retained event is the exact fork endpoint.
+                        row = db.execute(
+                            "SELECT segment,body FROM events WHERE id=?", (identity,)
+                        ).fetchone()
+                        if row and "capture" in json.loads(row["body"]):
+                            db.execute(
+                                "INSERT OR REPLACE INTO anchors VALUES (?,?,?)",
+                                (ordinal, identity, row["segment"]),
+                            )
             state["offset"] = handle.tell()
             # The caller commits this scan and cursor atomically while holding
             # its write lock. A full spool rolls back the entire scan, so the
@@ -929,6 +1144,19 @@ def retire_segment(db, segment_id, expires_at):
                 "UPDATE events SET segment=? WHERE segment=? AND sequence>=?",
                 (replacement, segment_id, fresh["sequence"]),
             )
+            db.execute(
+                "UPDATE anchors SET segment=? WHERE event_id IN (SELECT id FROM events WHERE segment=?)",
+                (replacement, replacement),
+            )
+            tail = state.get("tail")
+            if (
+                tail
+                and db.execute(
+                    "SELECT 1 FROM events WHERE id=? AND segment=?",
+                    (tail["event_id"], replacement),
+                ).fetchone()
+            ):
+                tail["segment"] = replacement
             for name in ("segment", "candidate_segment", "title_segment"):
                 if state.get(name) == segment_id:
                     state[name] = replacement
@@ -946,6 +1174,7 @@ def retire_segment(db, segment_id, expires_at):
         ):
             state.update(candidate_segment=None, candidate_scope=None)
     db.execute("DELETE FROM events WHERE segment=?", (segment_id,))
+    db.execute("DELETE FROM anchors WHERE segment=?", (segment_id,))
     db.execute("DELETE FROM batches WHERE segment=?", (segment_id,))
     db.execute("UPDATE segments SET retired=1,title='' WHERE id=?", (segment_id,))
     if state.get("title_segment") == segment_id:
@@ -1088,6 +1317,9 @@ def run_hook(
                 title_segment=None,
                 calls={},
                 discard_until_prompt=True,
+                tail=None,
+                capture_turn_id=None,
+                pending_turn_id=None,
             )
         path = payload.get("transcript_path")
         if isinstance(path, str):
