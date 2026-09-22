@@ -225,6 +225,8 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
     if client == "codex" and record.get("type") == "turn_context":
         payload = record.get("payload", {})
         if isinstance(payload, dict) and isinstance(payload.get("turn_id"), str):
+            if state.get("turn_id") != payload["turn_id"]:
+                state["nested_calls"] = {}
             state["turn_id"] = payload["turn_id"]
             state["pending_turn_id"] = payload["turn_id"]
         return result
@@ -242,6 +244,8 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
             return []
         if record.get("type") == "event_msg":
             if payload.get("type") == "task_started":
+                if state.get("turn_id") != payload.get("turn_id"):
+                    state["nested_calls"] = {}
                 state["turn_id"] = capture_id(payload.get("turn_id"))
                 state["pending_turn_id"] = state["turn_id"]
             if payload.get("type") == "thread_rolled_back":
@@ -266,6 +270,41 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                 ]
         if record.get("type") == "event_msg" and payload.get("type") == "item_completed":
             item = payload.get("item")
+            if (
+                payload.get("thread_id") == session
+                and payload.get("turn_id") == state.get("turn_id")
+                and isinstance(item, dict)
+                and item.get("type") == "McpToolCall"
+                and item.get("server") == "pensieve"
+                and item.get("tool")
+                in {
+                    "create_page",
+                    "edit_page",
+                    "move_page",
+                    "merge_pages",
+                    "delete_page",
+                    "save_data",
+                }
+                and item.get("status") in {"completed", "failed"}
+                and capture_id(item.get("id"))
+                and any(call.get("aggregate") for call in state.get("calls", {}).values())
+                and item["id"] not in state.get("calls", {})
+            ):
+                # Native nested calls are emitted at completion, not invocation.
+                # Retain identity only: concurrent context switches can make the
+                # result belong elsewhere. The server's receipt matching decides
+                # whether this call belongs to this captured context.
+                seen = state.setdefault("nested_calls", {})
+                if seen.get(item["id"]) == state.get("turn_id"):
+                    return []
+                seen[item["id"]] = state.get("turn_id")
+                return [
+                    {
+                        "kind": "tool_call",
+                        "content": "mcp__pensieve__" + item["tool"],
+                        "tool_call_id": item["id"],
+                    }
+                ]
             if (
                 payload.get("thread_id") == session
                 and payload.get("turn_id") == state.get("turn_id")

@@ -60,7 +60,7 @@ def mcp_server(output: Path) -> None:
                         },
                         "annotations": {"readOnlyHint": True},
                     }
-                    for name in ("context_briefing", "ordinary", "set_context")
+                    for name in ("context_briefing", "ordinary", "set_context", "edit_page")
                 ]
             }
         elif method == "tools/call":
@@ -255,7 +255,7 @@ def run_probe(
                         "call_id": "probe-wrapper",
                         "namespace": "functions",
                         "name": "exec",
-                        "input": "text(await tools.mcp__pensieve__ordinary({})); text(await tools.mcp__pensieve__set_context({}));",
+                        "input": "text(await tools.mcp__pensieve__edit_page({})); text(await tools.mcp__pensieve__set_context({})); text(await tools.mcp__pensieve__edit_page({}));",
                     }
             else:
                 item = {
@@ -552,6 +552,17 @@ def run_probe(
                 }
             )
             if context_switch == "code-mode":
+                writes = [call for call in calls if call["name"] == "edit_page"]
+                for scope, write in zip((source_events, destination_events), writes):
+                    native_id = write["_meta"]["callId"]
+                    capture_checks["native_write_" + native_id] = (
+                        sum(
+                            event.get("capture", {}).get("tool_call_id") == native_id
+                            for event in scope
+                        )
+                        == 1
+                    )
+                capture_checks["two_native_writes"] = len(writes) == 2
                 capture_checks["combined_output_omitted"] = (
                     "SOURCE_CONTEXT_SENTINEL" not in json.dumps(captured)
                 )

@@ -1753,3 +1753,65 @@ def test_baseline_mid_turn_does_not_queue_orphan_outputs(tmp_path, monkeypatch, 
     run()
     assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
     assert pending(state) == 0
+
+
+def test_nested_write_keeps_native_identity_once_without_inputs_or_outputs(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    native = native_selection(call_id="exec-write")
+    native["payload"]["item"].update(tool="edit_page", arguments={"secret": "PRIVATE"})
+    append(
+        path,
+        {"type": "turn_context", "payload": {"turn_id": "turn-one"}},
+        user(),
+        hook_record(turn="turn-one"),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "namespace": "functions",
+                "name": "exec",
+                "call_id": "wrapper",
+            },
+        },
+        native,
+        native,
+    )
+    run()
+    run()
+    captured = [
+        e for e in events(calls) if e.get("capture", {}).get("tool_call_id") == "exec-write"
+    ]
+    assert len(captured) == 1
+    assert captured[0]["content"] == "mcp__pensieve__edit_page"
+    assert "PRIVATE" not in json.dumps(events(calls))
+    assert "Destination company" not in json.dumps(events(calls))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("server", "foreign"), ("thread_id", "other"), ("turn_id", "other"), ("status", "running")],
+)
+def test_nested_write_requires_native_completed_call(tmp_path, monkeypatch, field, value):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    native = native_selection(call_id="exec-write")
+    native["payload"]["item"]["tool"] = "save_data"
+    target = native["payload"] if field in {"thread_id", "turn_id"} else native["payload"]["item"]
+    target[field] = value
+    append(
+        path,
+        {"type": "turn_context", "payload": {"turn_id": "turn-one"}},
+        user(),
+        hook_record(turn="turn-one"),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "namespace": "functions",
+                "name": "exec",
+                "call_id": "wrapper",
+            },
+        },
+        native,
+    )
+    run()
+    assert not any(e.get("capture", {}).get("tool_call_id") == "exec-write" for e in events(calls))

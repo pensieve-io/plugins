@@ -152,3 +152,18 @@ This turn-metadata candidate specifically requires #973's additive database
 column and compatible upload service to be deployed before plugin publication.
 Transcript content still goes to Postgres in this stage; Neo4j storage,
 retrieval, successful-write links and extraction remain separate PRs.
+
+### Nested Codex write calls
+
+The native `item_completed/McpToolCall` record identifies nested Pensieve
+Page writes and `save_data` calls within an active `exec`/`wait` wrapper.
+Capture retains the tool name and native call ID once, without arguments or
+result bodies. It does not interpret a completed call as a successful write:
+Pensieve #977 matches server changeset/job receipts before creating provenance.
+Native records must match this thread and turn and identify the Pensieve server.
+
+Codex emits these records at completion. If concurrent work crosses a context
+switch, the backend's full identity match may leave a call unlinked; no combined
+output or timing heuristic assigns it to another context. Sequential writes on
+either side of a selection have native matching identities. Old captured events
+remain immutable; this adds no backfill and changes no existing retry bytes.

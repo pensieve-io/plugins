@@ -197,3 +197,10 @@ Record results separately for CLI, desktop and workspace imports. A successful
 marketplace import or a displayed icon does not prove hooks executed. Where a
 host does not support hooks, verify MCP and skill use and keep hook support
 marked unavailable. Desktop and live OAuth checks are currently pending.
+
+The nested-call follow-up passed 173 package tests on Python 3.9 and 3.12.
+The installed Codex code-mode probe also passed with one synthetic `edit_page`
+on each side of `set_context`: both captured native IDs matched the IDs observed
+by the local MCP server, exactly once and in the expected context. Arguments and
+combined results remain omitted. This proves native correlation, not publication
+or a live authenticated write to Pensieve.
