@@ -7,9 +7,9 @@ search/read tools. Installing the plugin alone never enables sharing.
 
 ## Connect an installation
 
-Ask the installed plugin to **use Pensieve's connect-conversations skill**.
-The agent starts the bundled helper and shows a Pensieve browser approval link.
-Choose a context, review the sharing checkbox and click **Connect**. The checkbox
+The plugin offers browser approval after its first authenticated native context
+hook. Review the destination and sharing checkbox, then click **Connect**.
+The account and context must match the agent's authenticated attribution. The checkbox
 covers saving conversations and extracting useful company knowledge. A previous
 learning opt-out leaves it unchecked until you make a fresh choice. Extraction
 also requires the separately gated application worker.
@@ -20,19 +20,29 @@ client installation and context. The remote MCP connection is unchanged. The
 helper never reads the harness's OAuth credentials, and neither the upload key
 nor the temporary polling secret reaches the agent or browser approval page.
 
+The helper remembers that approval was offered; dismissal does not reopen the
+browser on every prompt. Clients requests last fifteen minutes and allow an
+explicit retry. Offline first-use attempts retry at most once every five minutes.
+Approval starts only from accepted native hook records, never quoted markers in
+user messages or tool output. It reads a bounded transcript tail for attribution
+before consent, and uploads no transcript content until consent and fresh capture.
+
 Pairing expires after ten minutes. Ordinary hooks finish pending approval
 without a background service. If the one-time exchange succeeds at the server
 but its response is lost, start fresh approval; a consumed key is not returned
 again. `paired` proves local setup, not successful capture.
 
-The version-3 config stores client-scoped profiles under
+The version-3 config stores account/client/context-scoped profiles under
 `~/.config/pensieve/capture.json` (mode `0600`, private directory `0700`). Existing
 version-2 account profiles keep their previous consent until replaced by new
 pairing. Pairing migrates obsolete local credential entries without touching
-transcript spools. The application temporarily retains legacy Personal Settings
-and key revocation while its Conversations management replacement is built.
-Remove a key there to stop that installation's uploads and extraction; MCP tools
-remain connected. The old downloaded-file setup applies only to older plugins.
+transcript spools. Context-scoped profiles coexist, so connecting another
+context cannot replace the first context's key. Older version-3 profiles without
+a context keep their existing scope until explicitly replaced.
+**Clients → Your conversation sharing** shows installations and last uploads.
+Disconnect stops that installation's uploads and extraction; MCP tools remain
+connected. Use **Connect installation** to reconnect, then continue in the agent
+with that context selected. The old downloaded-file setup applies only to older plugins.
 
 Keys cannot read transcripts or call MCP tools. The server checks client,
 context, membership, current consent generation and key status on every batch.

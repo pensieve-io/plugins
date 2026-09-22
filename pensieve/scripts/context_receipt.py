@@ -146,7 +146,7 @@ def compaction_boundary(
     )
 
 
-def latest_receipt(transcript_path: object, session_id: str, client: str) -> tuple[str, str] | None:
+def transcript_tail(transcript_path: object) -> tuple[list[bytes], str | None] | None:
     """Read only a regular transcript file, its header and a bounded tail."""
     if not isinstance(transcript_path, str) or not Path(transcript_path).is_absolute():
         return None
@@ -175,6 +175,14 @@ def latest_receipt(transcript_path: object, session_id: str, client: str) -> tup
         lines = lines[1:]
     # An asynchronously written final line is not a committed record yet.
     lines = lines[:-1]
+    return lines, codex_session_id
+
+
+def latest_receipt(transcript_path: object, session_id: str, client: str) -> tuple[str, str] | None:
+    tail = transcript_tail(transcript_path)
+    if tail is None:
+        return None
+    lines, codex_session_id = tail
     operation = "ack"
     for line in reversed(lines):
         record = json_object(line)

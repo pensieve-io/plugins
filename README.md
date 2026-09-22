@@ -163,11 +163,11 @@ context choice is remembered for new conversations; each existing conversation
 keeps its own selection.
 
 The context hooks send delivery receipts for the briefing the client received.
-Optional [work conversation capture](docs/conversation-capture.md) is off by
-default. Enable **Save agent transcripts** in personal **Settings → Agent transcripts**,
-once for all your agents. Download device setup and import it with the bundled `scripts/capture_setup.py`.
-New visible work belongs to the selected context for future team handoffs. This
-pilot adds no transcript browser, agent retrieval or automatic extraction.
+Optional [work conversation capture](docs/conversation-capture.md) requires browser
+approval for each installation and context. The installed plugin offers approval
+on first use; **Clients → Your conversation sharing** can restart it. No setup
+skill, credential download or terminal command is needed. New visible work
+belongs to the selected context for team handoffs. Previous chats are not imported.
 
 ## Other ways to use the skills
 
@@ -208,4 +208,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release ord
 
 ### Connect conversations
 
-Ask your agent to use Pensieve’s `connect-conversations` skill. It opens browser approval for this installation and context, then installs upload access privately. No credential download or terminal command is needed. Normal hooks finish pending setup and retry authorised uploads. Historical import is a separate follow-up; connecting starts from a fresh baseline.
+The plugin offers browser approval after its first authenticated native context
+hook. Approve saving and company sharing for that installation and context; the
+helper installs its upload key privately. Declining keeps MCP tools available
+and does not trigger repeated prompts. Reconnect from **Clients → Your
+conversation sharing** and continue in the agent with the same context selected.
+Normal hooks complete pending setup and retry authorised uploads. V1 saves new
+conversations only; the 90-day transcript lifetime is not a backfill window.

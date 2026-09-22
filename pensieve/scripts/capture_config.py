@@ -102,7 +102,7 @@ def valid_uuid(value: object) -> bool:
 
 
 def validate_profile(profile: object) -> dict:
-    if not isinstance(profile, dict) or set(profile) != {
+    if not isinstance(profile, dict) or set(profile) - {"context_id"} != {
         "user_id",
         "client",
         "upload_key",
@@ -111,6 +111,9 @@ def validate_profile(profile: object) -> dict:
         "host_version",
     }:
         raise ValueError("invalid capture profile")
+    context = profile.get("context_id")
+    if context is not None and (type(context) is not int or context <= 0):
+        raise ValueError("invalid capture context")
     key = profile["upload_key"]
     if (
         not valid_uuid(profile["user_id"])
@@ -148,7 +151,7 @@ def _validate_config(value: dict) -> dict:
         if isinstance(profile, dict) and profile.get("installation_id") is None:
             raise ReconnectRequired()
         validate_profile(profile)
-        identity = (profile["user_id"], profile["client"])
+        identity = (profile["user_id"], profile["client"], profile.get("context_id"))
         if identity in seen:
             raise ValueError("duplicate capture profile")
         seen.add(identity)
@@ -183,6 +186,14 @@ def config_lock(path: Path):
     return private_lock(path.with_name(path.name + ".lock"))
 
 
+def profile_identity(owner: str, context: int | None) -> str:
+    return owner if context is None else f"{owner}:{context}"
+
+
+def key_for(configured: dict, owner: str, context: int | None) -> str | None:
+    return configured.get(profile_identity(owner, context)) or configured.get(owner)
+
+
 def profiles(path: Path, client: str = "codex") -> dict[str, str]:
     # Preserve capture-off as a read-only fast path, without making directories.
     if not path.exists() and not path.is_symlink():
@@ -190,7 +201,7 @@ def profiles(path: Path, client: str = "codex") -> dict[str, str]:
     with config_lock(path):
         value = load_config(path, client)
     return {
-        item["user_id"]: item["upload_key"]
+        profile_identity(item["user_id"], item.get("context_id")): item["upload_key"]
         for item in value["profiles"]
         if value["version"] == 2 or item["client"] == client
     }
@@ -216,8 +227,13 @@ def install_profile(path: Path, profile: dict) -> None:
                 ],
             }
         )
-        identity = (profile["user_id"], profile["client"])
+        identity = (profile["user_id"], profile["client"], profile.get("context_id"))
         value["profiles"] = [
-            item for item in value["profiles"] if (item["user_id"], item["client"]) != identity
+            item
+            for item in value["profiles"]
+            if not (
+                (item["user_id"], item["client"]) == identity[:2]
+                and item.get("context_id") in {None, profile.get("context_id")}
+            )
         ] + [profile]
         save_private_json(path, value)

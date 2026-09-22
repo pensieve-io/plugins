@@ -145,6 +145,9 @@ def start(
     host_version: str = "",
     base: str = API_BASE,
     restart: bool = False,
+    expected_user_id: str | None = None,
+    expected_context_id: int | None = None,
+    timeout: float = 5,
 ) -> dict:
     if runtime not in RUNTIMES or len(host_version) > 100:
         raise ValueError("Unsupported runtime")
@@ -152,12 +155,25 @@ def start(
         raise ValueError("Runtime does not match client")
     if runtime.startswith("claude") and client != "claude":
         raise ValueError("Runtime does not match client")
+    if (expected_user_id is None) != (expected_context_id is None):
+        raise ValueError("Pairing identity must include account and context")
+    if expected_user_id is not None and (
+        not valid_uuid(expected_user_id)
+        or type(expected_context_id) is not int
+        or expected_context_id <= 0
+    ):
+        raise ValueError("Invalid pairing identity")
     path = pairing_path(config, client)
     with private_lock(path.with_suffix(".lock")):
         if path.exists() or path.is_symlink():
             old = validate_pending(json.loads(private_file(path, MAX_CONFIG_BYTES)), client)
             if not restart and timestamp(old["expires_at"]) > time.time():
-                return public_status(old)
+                if (
+                    old.get("expected_user_id") == expected_user_id
+                    and old.get("expected_context_id") == expected_context_id
+                ):
+                    return public_status(old)
+                return {"status": "another_connection_pending"}
             path.unlink()
         code, response = request(
             base,
@@ -168,8 +184,10 @@ def start(
                 "label": "Codex" if client == "codex" else "Claude Code",
                 "plugin_version": PLUGIN_VERSION,
                 "host_version": host_version,
+                "expected_user_id": expected_user_id,
+                "expected_context_id": expected_context_id,
             },
-            5,
+            timeout,
         )
         if code != 201 or not isinstance(response, dict):
             return {
@@ -188,6 +206,8 @@ def start(
                 "runtime": runtime,
                 "host_version": host_version,
                 "next_poll_at": 0,
+                "expected_user_id": expected_user_id,
+                "expected_context_id": expected_context_id,
             },
             client,
         )
@@ -240,6 +260,11 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             raise ValueError("Invalid approval")
         if not valid_uuid(response.get("installation_id")):
             raise ValueError("Invalid approval")
+        if pending.get("expected_user_id") is not None and (
+            response.get("user_id") != pending["expected_user_id"]
+            or response.get("context_id") != pending["expected_context_id"]
+        ):
+            raise ValueError("Approval does not match the initiating connection")
         install_profile(
             config,
             {
@@ -247,6 +272,7 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
                 "client": client,
                 "upload_key": response.get("upload_key"),
                 "installation_id": response["installation_id"],
+                "context_id": response["context_id"],
                 "runtime": pending["runtime"],
                 "host_version": pending["host_version"],
             },

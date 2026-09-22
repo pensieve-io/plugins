@@ -124,7 +124,7 @@ def test_pairing_returns_only_public_link_then_installs_private_client_credentia
     result = pairing.poll(config, "codex")
     assert result["status"] == "paired"
     assert KEY not in json.dumps(result)
-    assert credentials.profiles(config, "codex") == {OWNER: KEY}
+    assert credentials.profiles(config, "codex") == {f"{OWNER}:497": KEY}
     assert credentials.profiles(config, "claude") == {}
     assert not path.exists()
     assert pairing.poll(config, "codex")["status"] == "no_pending_pairing"
@@ -182,11 +182,11 @@ def test_new_accounts_and_clients_do_not_overwrite_or_broaden_each_other(tmp_pat
     approve(config, service)
     service.update(owner=OTHER, context=508)
     assert approve(config, service)["context_id"] == 508
-    assert credentials.profiles(config, "codex") == {OWNER: KEY, OTHER: KEY}
+    assert credentials.profiles(config, "codex") == {f"{OWNER}:497": KEY, f"{OTHER}:508": KEY}
     assert credentials.profiles(config, "claude") == {}
     approve(config, service, "claude")
-    assert credentials.profiles(config, "claude") == {OTHER: KEY}
-    assert credentials.profiles(config, "codex") == {OWNER: KEY, OTHER: KEY}
+    assert credentials.profiles(config, "claude") == {f"{OTHER}:508": KEY}
+    assert credentials.profiles(config, "codex") == {f"{OWNER}:497": KEY, f"{OTHER}:508": KEY}
 
 
 @pytest.mark.parametrize("version", [3])
@@ -260,7 +260,7 @@ def test_browser_approved_reconnect_replaces_obsolete_keys_and_preserves_paired_
     ready(config, "codex")
     assert pairing.poll(config, "codex")["status"] == "paired"
     value = credentials.load_config(config, "codex")
-    assert credentials.profiles(config, "codex") == {OWNER: KEY}
+    assert credentials.profiles(config, "codex") == {f"{OWNER}:497": KEY}
     assert [p for p in value["profiles"] if p["client"] == "claude"] == preserved
     assert all(credentials.valid_uuid(p["installation_id"]) for p in value["profiles"])
     assert b"obsolete-synthetic-key" not in config.read_bytes()
@@ -349,7 +349,7 @@ def test_hook_finishes_pairing_without_reading_or_backfilling_old_work(
         )
         == {}
     )
-    assert credentials.profiles(config, "codex") == {OWNER: KEY}
+    assert credentials.profiles(config, "codex") == {f"{OWNER}:497": KEY}
 
 
 def test_concurrent_hook_cannot_claim_a_pairing_while_setup_holds_it(tmp_path, service):
@@ -373,3 +373,69 @@ def test_legacy_profile_remains_readable_without_broadening_new_pairing(tmp_path
     assert credentials.profiles(config, "codex") == {OWNER: KEY}
     assert credentials.profiles(config, "claude") == {OWNER: KEY}
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("wrong", ["owner", "context"])
+def test_bound_pairing_never_installs_another_browser_identity(tmp_path, service, wrong):
+    config = new_config(tmp_path)
+    pairing.start(
+        config, "codex", base=service["base"], expected_user_id=OWNER, expected_context_id=497
+    )
+    service.update(mode="approved", **{wrong: OTHER if wrong == "owner" else 508})
+    with pytest.raises(ValueError, match="does not match"):
+        pairing.poll(config, "codex")
+    assert credentials.profiles(config, "codex") == {}
+
+
+def test_native_hook_starts_private_pairing_and_approval_never_backfills(
+    tmp_path, service, monkeypatch
+):
+    import capture_onboarding as onboarding
+    from test_conversation_capture import append, hook_record, user
+
+    config = new_config(tmp_path)
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("")
+    append(
+        transcript,
+        {"type": "session_meta", "payload": {"id": SESSION}},
+        user("Old private work"),
+        hook_record(generation=None),
+    )
+    monkeypatch.setattr(onboarding.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        onboarding,
+        "start",
+        lambda *args, **kwargs: pairing.start(*args, base=service["base"], **kwargs),
+    )
+    opened = []
+    monkeypatch.setattr(onboarding, "open_approval", opened.append)
+    monkeypatch.setattr(
+        capture, "upload", lambda *args: pytest.fail("onboarding imported old history")
+    )
+    payload = {"session_id": SESSION, "hook_event_name": "Stop", "transcript_path": str(transcript)}
+    capture.run_hook(payload, "codex", config, tmp_path / "spool")
+    assert len(opened) == 1
+    body = service["requests"][0][1]
+    assert body["expected_user_id"] == OWNER and body["expected_context_id"] == 497
+    assert not config.exists()
+    service["mode"] = "approved"
+    capture.run_hook(payload, "codex", config, tmp_path / "spool")
+    assert credentials.key_for(credentials.profiles(config, "codex"), OWNER, 497) == KEY
+    assert len(opened) == 1
+
+
+def test_automatic_second_context_waits_for_pending_approval(tmp_path, service):
+    config = new_config(tmp_path)
+    first = pairing.start(
+        config, "codex", base=service["base"], expected_user_id=OWNER, expected_context_id=497
+    )
+    second = pairing.start(
+        config, "codex", base=service["base"], expected_user_id=OWNER, expected_context_id=508
+    )
+    assert second["status"] == "another_connection_pending"
+    assert len(service["requests"]) == 1
+    service["mode"] = "approved"
+    result = pairing.poll(config, "codex")
+    assert result["context_id"] == 497
+    assert first["verification_url"]

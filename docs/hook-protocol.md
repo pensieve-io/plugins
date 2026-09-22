@@ -59,7 +59,7 @@ Capture requests identify themselves as `Pensieve-Plugin-Capture/1.0`, following
 the receipt helper's explicit identification so the production edge admits them.
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-The connect-conversations skill uses browser approval and a private one-time
+The first native context hook offers browser approval and a private one-time
 exchange to install a client/context-scoped upload key. Ordinary hooks complete
 pending pairing. No OAuth credential is read or passed through model output.
 Every upload checks membership, the enabled consent generation and the key's
@@ -106,3 +106,16 @@ fresh post-expiry user-turn suffix can roll into a new segment. A scoped
 `reason: capture_disabled` response discards the rejected segment's queued work
 without rollover, including old-generation retries after re-enable. See
 [capture setup and boundaries](conversation-capture.md).
+
+
+## Connection requests
+
+Clients can request a fresh browser approval through the authenticated application
+API. A separate `pensieve-capture-setup` comment precedes the unchanged version-2
+capture marker. It contains a request ID, user/client/context/conversation and
+expiry; it contains no credential and grants no sharing rights. The local helper
+accepts it only in native hook context alongside matching attribution, offers
+each request once, and binds browser approval to that account and context.
+The ordinary native capture marker remains last for older helpers. Both marker
+types are removed from visible captured text. Browser pairing still requires a
+private poll secret and explicit authenticated consent. No setup skill remains.

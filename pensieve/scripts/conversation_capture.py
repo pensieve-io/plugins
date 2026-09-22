@@ -26,7 +26,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_config import profiles
+from capture_config import key_for, profiles
 from context_receipt import accepted_contexts, conversation_id
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
@@ -41,7 +41,9 @@ MAX_BATCH_BYTES = 262144
 MAX_BATCH_EVENTS = 100
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
 CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
-INTERNAL_MARKER = re.compile(r"<!-- pensieve-(?:capture-context|delivery)\b.*?-->", re.DOTALL)
+INTERNAL_MARKER = re.compile(
+    r"<!-- pensieve-(?:capture-context|capture-setup|delivery)\b.*?-->", re.DOTALL
+)
 SECRET = re.compile(
     r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})|"
@@ -604,7 +606,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             # A destination reached by a tool has no destination user title yet.
             state.update(title="", title_segment=None)
         state["scope"] = [owner, context, generation]
-        if context is None or generation is None or owner not in configured:
+        if context is None or generation is None or key_for(configured, owner, context) is None:
             state["segment"] = None
             state["tail"] = None
             state["fork_parent"] = None
@@ -1221,7 +1223,7 @@ def flush(db, configured, client, session, endpoint, deadline):
         ).fetchall()
         for segment in segments:
             scope = (segment["owner"], segment["context"])
-            key = configured.get(segment["owner"])
+            key = key_for(configured, segment["owner"], segment["context"])
             remaining = deadline - time.monotonic()
             if key is None or scope in denied or remaining < 0.05:
                 continue
@@ -1279,7 +1281,7 @@ def capture_session(
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
         disabled = any(
-            scope is not None and scope[0] not in configured
+            scope is not None and key_for(configured, scope[0], scope[1]) is None
             for scope in (state.get("scope"), state.get("candidate_scope"))
         )
         if disabled:
@@ -1430,8 +1432,15 @@ def run_hook(
     except (OSError, ValueError, KeyError, TypeError):
         pass
     configured = profiles(config, client)
+    if event != "SessionEnd":
+        from capture_onboarding import offer_connection
+
+        try:
+            offer_connection(payload, client, session, config, configured)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # Setup must never interrupt a conversation or an existing upload.
     if not configured:
-        # Capture-off must be remembered without reading transcript text, or a
+        # Capture-off must be remembered without scanning for capture events, or a
         # later re-enable would scan and upload the disabled interval. Never
         # create state for a session that has never enabled capture.
         existing = state_root / f"{client}-{session}.sqlite3"
