@@ -59,10 +59,12 @@ Capture requests identify themselves as `Pensieve-Plugin-Capture/1.0`, following
 the receipt helper's explicit identification so the production edge admits them.
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-Personal Settings → Agent transcripts owns per-user consent across all clients and device
-keys. The setup command only imports a downloaded upload-only credential into
-private storage. It never reads OAuth credentials. Every upload checks current
-membership and the user's current enabled consent generation.
+The connect-conversations skill uses browser approval and a private one-time
+exchange to install a client/context-scoped upload key. Ordinary hooks complete
+pending pairing. No OAuth credential is read or passed through model output.
+Every upload checks membership, the enabled consent generation and the key's
+scope/revocation. Legacy account profiles retain their previous policy until
+replaced; see the capture guide for migration and reconnect boundaries.
 
 At every `UserPromptSubmit`, including an unchanged briefing, the service emits
 one terminal, non-secret marker in accepted hook context:

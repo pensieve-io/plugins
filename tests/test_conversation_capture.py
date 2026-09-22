@@ -1306,7 +1306,10 @@ def test_selection_destination_never_inherits_previous_owner_title(tmp_path, mon
     assert "Owner A confidential prompt" not in json.dumps(destination)
 
 
-def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_path, monkeypatch):
+@pytest.mark.parametrize("first_hook", ["SessionStart", "UserPromptSubmit"])
+def test_startup_missing_transcript_captures_first_turn_without_backfill(
+    tmp_path, monkeypatch, first_hook
+):
     path = tmp_path / "new-transcript.jsonl"
     cfg = config(tmp_path)
     state = tmp_path / "spool"
@@ -1316,7 +1319,7 @@ def test_startup_missing_transcript_captures_first_turn_without_backfill(tmp_pat
     )
     payload = {
         "session_id": SESSION,
-        "hook_event_name": "SessionStart",
+        "hook_event_name": first_hook,
         "transcript_path": str(path),
     }
     capture.run_hook(payload, "claude", cfg, state)

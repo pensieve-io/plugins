@@ -369,11 +369,15 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
             capture_config.write_text(
                 json.dumps(
                     {
-                        "version": 2,
+                        "version": 3,
                         "profiles": [
                             {
                                 "user_id": CAPTURE_OWNER,
                                 "upload_key": CAPTURE_KEY,
+                                "client": "claude",
+                                "installation_id": "11111111-1111-4111-8111-111111111111",
+                                "runtime": "unknown",
+                                "host_version": "",
                             }
                         ],
                     }

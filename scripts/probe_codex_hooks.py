@@ -138,7 +138,7 @@ def run_probe(
     capture_state: Path | None = None,
     context_switch: str | None = None,
 ) -> dict[str, Any]:
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
     workspace = output / "workspace"
     workspace.mkdir()
     plugin = output / "plugin"
@@ -155,8 +155,17 @@ def run_probe(
         capture_config.write_text(
             json.dumps(
                 {
-                    "version": 2,
-                    "profiles": [{"user_id": CAPTURE_OWNER, "upload_key": CAPTURE_KEY}],
+                    "version": 3,
+                    "profiles": [
+                        {
+                            "user_id": CAPTURE_OWNER,
+                            "upload_key": CAPTURE_KEY,
+                            "client": "codex",
+                            "installation_id": "11111111-1111-4111-8111-111111111111",
+                            "runtime": "unknown",
+                            "host_version": "",
+                        }
+                    ],
                 }
             )
         )

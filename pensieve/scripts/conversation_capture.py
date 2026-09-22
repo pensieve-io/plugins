@@ -26,6 +26,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from capture_config import profiles
 from context_receipt import accepted_contexts, conversation_id
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
@@ -44,7 +45,7 @@ INTERNAL_MARKER = re.compile(r"<!-- pensieve-(?:capture-context|delivery)\b.*?--
 SECRET = re.compile(
     r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})|"
-    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|upload[_-]?key)"
+    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|upload[_-]?key|poll[_-]?secret)"
     r"[\"']?\s*[=:]\s*[\"']?[^\s\"',}]+)"
 )
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
@@ -73,34 +74,6 @@ def private_file(path: Path, limit: int) -> bytes:
         if len(data) > limit:
             raise ValueError("capture config exceeds its size limit")
         return data
-
-
-def profiles(path: Path) -> dict[str, str]:
-    try:
-        value = json.loads(private_file(path, MAX_CONFIG_BYTES))
-    except FileNotFoundError:
-        return {}
-    if not isinstance(value, dict) or set(value) != {"version", "profiles"}:
-        raise ValueError("capture config must contain version and profiles")
-    if value["version"] != 2 or not isinstance(value["profiles"], list):
-        raise ValueError("unsupported capture config")
-    result = {}
-    for profile in value["profiles"]:
-        if not isinstance(profile, dict) or set(profile) != {"user_id", "upload_key"}:
-            raise ValueError("invalid capture profile")
-        owner = conversation_id(profile["user_id"])
-        key = profile["upload_key"]
-        if (
-            owner is None
-            or not isinstance(key, str)
-            or not 16 <= len(key) <= 4096
-            or any(character.isspace() for character in key)
-        ):
-            raise ValueError("invalid capture profile")
-        if owner in result:
-            raise ValueError("duplicate capture profile")
-        result[owner] = key
-    return result
 
 
 def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None:
@@ -854,7 +827,8 @@ def scan(
         )
     except FileNotFoundError:
         if allow_new_file and state["offset"] is None:
-            # Claude creates a new transcript after SessionStart. Its absence
+            # Claude can create a fork without SessionStart and only writes its
+            # transcript after UserPromptSubmit. Absence at either boundary
             # proves there is no older content to import at this path. Remember
             # that empty baseline so the first Stop captures the first turn.
             state.update(offset=0, path=str(path), awaiting_source_creation=True)
@@ -1447,7 +1421,15 @@ def run_hook(
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return {}
-    configured = profiles(config)
+    event = payload["hook_event_name"]
+    deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
+    from capture_pairing import poll
+
+    try:
+        poll(config, client, timeout=0.25)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    configured = profiles(config, client)
     if not configured:
         # Capture-off must be remembered without reading transcript text, or a
         # later re-enable would scan and upload the disabled interval. Never
@@ -1464,10 +1446,8 @@ def run_hook(
             finally:
                 db.close()
         return {}
-    event = payload["hook_event_name"]
     # Plugin SessionEnd runs inside Claude's default 1.5s total budget and
     # Codex's 3s cap. Durability comes from earlier checkpoints, not this flush.
-    deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
     ordinary = event != "SessionEnd"
     source_error = capture_session(
         client,
@@ -1477,7 +1457,7 @@ def run_hook(
         state_root,
         endpoint,
         deadline - (0.6 if ordinary else 0),
-        allow_new_file=event == "SessionStart",
+        allow_new_file=event in {"SessionStart", "UserPromptSubmit"},
     )
     if ordinary:
         recover_sessions(client, session, configured, state_root, endpoint, deadline)

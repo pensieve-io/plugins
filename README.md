@@ -205,3 +205,7 @@ application repository. Its backend and docs import a pinned copy of the skills
 from this repository; they do not publish or overwrite the plugin.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release order.
+
+### Connect conversations
+
+Ask your agent to use Pensieve’s `connect-conversations` skill. It opens browser approval for this installation and context, then installs upload access privately. No credential download or terminal command is needed. Normal hooks finish pending setup and retry authorised uploads. Historical import is a separate follow-up; connecting starts from a fresh baseline.

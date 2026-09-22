@@ -1,51 +1,56 @@
 # Optional work conversation capture
 
-Capture saves new visible work in Postgres for future team handoffs. It is
-**off by default**, controlled for each person in Pensieve **Settings →
-Agent transcripts**. One **Save agent transcripts** toggle controls all of your
-supported agents and devices.
-Installing or updating the plugin never opts you in.
+Capture saves new visible work as ordered `TranscriptTurn` nodes in the selected
+context's Neo4j database. Postgres owns consent, upload receipts and temporary
+staging. Saved conversations are visible to context members through the existing
+search/read tools. Installing the plugin alone never enables sharing.
 
-Saved work belongs to the selected context and is intended for its members.
-Only enable this for work you want to share. The pilot has no transcript
-browser, search/read tools, summaries, embeddings or automatic knowledge
-extraction. No selected context means no upload. A → B → A saves separate
-portions without copying the whole session to both companies. Resuming the
-same host conversation appends to its existing logical record.
+## Connect an installation
 
-## Set up a device
+Ask the installed plugin to **use Pensieve's connect-conversations skill**.
+The agent starts the bundled helper and shows a Pensieve browser approval link.
+Choose a context, review the sharing checkbox and click **Connect**. The checkbox
+covers saving conversations and extracting useful company knowledge. A previous
+learning opt-out leaves it unchecked until you make a fresh choice. Extraction
+also requires the separately gated application worker.
 
-1. Sign in to Pensieve with the same account used for this client's MCP login.
-2. [Open personal transcript settings](https://app.pensieve.uk/dashboard/contexts?modal=settings&settings_section=agent-transcripts), enable **Save agent transcripts**, and choose
-   **Set up device**. This downloads a uniquely named JSON file with an upload-only key.
-3. In a terminal, from your installed Pensieve plugin folder, run the command
-   shown in settings, using the actual downloaded file path:
+The helper installs an upload-only credential privately; the user does not run
+commands, download a credential file or paste tokens. Approval applies to this
+client installation and context. The remote MCP connection is unchanged. The
+helper never reads the harness's OAuth credentials, and neither the upload key
+nor the temporary polling secret reaches the agent or browser approval page.
 
-   ```sh
-   python3 scripts/capture_setup.py ~/Downloads/pensieve-capture-DEVICE_ID.json
-   ```
+Pairing expires after ten minutes. Ordinary hooks finish pending approval
+without a background service. If the one-time exchange succeeds at the server
+but its response is lost, start fresh approval; a consumed key is not returned
+again. `paired` proves local setup, not successful capture.
 
-4. Delete the downloaded setup file, then start or resume your work session.
+The version-3 config stores client-scoped profiles under
+`~/.config/pensieve/capture.json` (mode `0600`, private directory `0700`). Existing
+version-2 account profiles keep their previous consent until replaced by new
+pairing. Pairing migrates obsolete local credential entries without touching
+transcript spools. The application temporarily retains legacy Personal Settings
+and key revocation while its Conversations management replacement is built.
+Remove a key there to stop that installation's uploads and extraction; MCP tools
+remain connected. The old downloaded-file setup applies only to older plugins.
 
-An agent can help locate the plugin folder, but do not paste the setup file or
-key into chat. The importer makes no network calls, opens no sign-in flow and
-never reads host credentials. It stores the key in
-`~/.config/pensieve/capture.json` with mode `0600`, under a private `0700`
-directory. It preserves profiles for other accounts; one setup works across supported
-clients on this device.
+Keys cannot read transcripts or call MCP tools. The server checks client,
+context, membership, current consent generation and key status on every batch.
+`PENSIEVE_CAPTURE_CONFIG` and `PENSIEVE_CAPTURE_STATE` can override local paths;
+secrets never belong in hook manifests.
 
-Settings is the only opt-in control. Turning capture off stops new and queued
-uploads for every client on every device. Re-enabling starts a new consent period;
-it never backfills the disabled period or retries an older period's backlog.
-Saved content keeps its original expiry. **Remove device** revokes only that
-upload key, including queued retries; it does not disconnect MCP or delete
-saved history. Device IDs in settings match their downloaded setup filenames.
+### Offline and reconnect behaviour
 
-The version-2 private config holds `user_id` and `upload_key` profiles.
-Keys cannot read transcripts or call MCP tools. The server checks current
-consent, key status and membership for every batch. `PENSIEVE_CAPTURE_CONFIG`
-and `PENSIEVE_CAPTURE_STATE` may override local paths; no preference flag or
-secret belongs in the hook/marketplace definition.
+MCP OAuth expiry alone does not revoke the separate upload key. Already
+attributed durable batches retry on later hooks after a network interruption.
+New turns need their own authenticated context marker; work without one is not
+silently assigned to the last context or backfilled on MCP reconnect. Disconnect
+revokes uploads, including queued retries. Re-pairing establishes a fresh
+baseline and cannot authorize an older key's backlog.
+
+This stage does not import historical conversations. An explicit history-import
+flow is separate work. Transcripts expire after 90 days; selected extracted
+company knowledge may remain unless explicitly withdrawn.
 
 ## What is saved
 
@@ -104,9 +109,11 @@ forks at captured messages inside a turn as well as completed turns.
 Missing source spools, uncaptured/legacy boundaries and boundaries ending on
 unindexed internal records leave ancestry unknown. Claude's tested fork records
 retain message UUIDs but do not identify their source conversation, so its
-fork starts a new capture chain without re-uploading copied history. Rewinds
-reported as an in-place Codex rollback also break lineage. Graph storage and
-resolution of these references are a later application PR.
+fork starts a new capture chain without re-uploading copied history. Claude
+may skip SessionStart for forks: an absent transcript at UserPromptSubmit also
+establishes an empty baseline so the first fork turn is captured. Rewinds
+reported as an in-place Codex rollback also break lineage. The application resolves retained references within the same author, client,
+context and consent generation.
 
 Codex's native `task_complete` and `turn_aborted` records certify completed and
 interrupted turns respectively. Claude completion requires an `end_turn`
