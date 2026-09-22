@@ -1815,3 +1815,128 @@ def test_nested_write_requires_native_completed_call(tmp_path, monkeypatch, fiel
     )
     run()
     assert not any(e.get("capture", {}).get("tool_call_id") == "exec-write" for e in events(calls))
+
+
+def run_other_session(path, cfg, state, client="codex"):
+    other_session = "f23bbd76-d864-4b8f-b252-c2b7c3692492"
+    other = path.with_name("other.jsonl")
+    if not other.exists():
+        other.touch()
+        if client == "codex":
+            append(other, {"type": "session_meta", "payload": {"id": other_session}})
+    capture.run_hook(
+        {
+            "session_id": other_session,
+            "hook_event_name": "SessionStart",
+            "transcript_path": str(other),
+        },
+        client,
+        cfg,
+        state,
+    )
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_new_chat_recovers_closed_chat_offline_outbox(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(client=client), hook_record(client), assistant(client=client))
+    run("SessionEnd")
+    assert pending(state) == 2
+    # Removing the source must not prevent already committed events from retrying.
+    path.unlink()
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+    assert pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_new_chat_recovers_final_record_written_after_last_hook(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run("Stop")
+    run("SessionEnd")
+    append(path, assistant("Late final reply", client))
+    run_other_session(path, cfg, state, client)
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Late final reply"]
+    assert len({event["event_id"] for event in events(calls)}) == 2
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_recovery_never_rescans_a_replaced_source(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client))
+    run()
+    replacement = path.with_suffix(".new")
+    replacement.write_bytes(path.read_bytes())
+    append(replacement, assistant("Untrusted replacement", client))
+    os.replace(replacement, path)
+    run_other_session(path, cfg, state, client)
+    assert [event["content"] for event in events(calls)] == ["Visible question"]
+
+
+def test_recovery_rotates_across_spools_and_excludes_other_apps(tmp_path, monkeypatch):
+    state = tmp_path / "spool"
+    state.mkdir(mode=0o700)
+    sessions = [str(uuid.UUID(int=i + 1)) for i in range(10)]
+    for session in sessions:
+        (state / f"codex-{session}.sqlite3").touch(mode=0o600)
+    (state / f"claude-{SESSION}.sqlite3").touch(mode=0o600)
+    recovered = []
+    monkeypatch.setattr(
+        capture, "capture_session", lambda client, session, *a, **kw: recovered.append(session)
+    )
+    # A corrupt but valid JSON cursor must not stop capture or recovery.
+    cursor = state / "recovery-codex.json"
+    cursor.write_text("[]")
+    cursor.chmod(0o600)
+    capture.recover_sessions(
+        "codex", SESSION, {}, state, capture.UPLOAD_ENDPOINT, time.monotonic() + 1
+    )
+    assert recovered == sessions[:8]
+    capture.recover_sessions(
+        "codex", SESSION, {}, state, capture.UPLOAD_ENDPOINT, time.monotonic() + 1
+    )
+    assert recovered[8:10] == sessions[8:]
+    assert set(recovered) == set(sessions)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_recovery_captures_late_native_completion_once(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    if client == "codex":
+        append(path, codex_lifecycle("task_started"))
+    append(path, user(client=client), hook_record(client))
+    run("SessionEnd")
+    answer = assistant("Late final reply", client)
+    if client == "claude":
+        answer["message"]["stop_reason"] = "end_turn"
+    append(path, answer, codex_lifecycle("task_complete") if client == "codex" else claude_stop())
+    run_other_session(path, cfg, state, client)
+    run_other_session(path, cfg, state, client)
+    saved = events(calls)
+    assert [e["kind"] for e in saved] == ["user", "assistant", "turn_end"]
+    assert len({e["capture"]["turn_id"] for e in saved}) == 1
+    assert saved[-1]["capture"]["parent"]["event_id"] == saved[-2]["event_id"]
+    assert saved[-1]["capture"]["completion"] == "completed"
+
+
+def test_recovery_skips_malformed_spool_without_stranding_healthy_backlog(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run("SessionEnd")
+    malformed = capture.connect_state(state, "codex", str(uuid.UUID(int=1)))
+    malformed.execute("INSERT OR REPLACE INTO state(id,body) VALUES (1,'[]')")
+    malformed.commit()
+    malformed.close()
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((batch, key)) or ACCEPTED
+    )
+    run_other_session(path, cfg, state)
+    assert [e["content"] for e in events(calls)] == ["Visible question", "Visible answer"]
+    assert json.loads((state / "recovery-codex.json").read_text())["after"] == SESSION

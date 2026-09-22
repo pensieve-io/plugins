@@ -114,7 +114,7 @@ assistant message followed by a successful native Stop summary with no
 continuation reason. A Stop invocation, tool result or process exit alone never
 certifies completion. Claude interruption and unrecognised failure signals
 remain incomplete. Native terminal records can be written **after** Stop;
-their marker uploads at the next prompt/SessionEnd checkpoint, while visible
+their marker uploads at a later checkpoint (including bounded recovery from another chat), while visible
 content still uploads at Stop. There is no polling process to eliminate that
 delay.
 
@@ -123,8 +123,7 @@ SessionEnd attempts a short best-effort flush. Immutable events and exact-byte
 receipts tolerate retries, resume and out-of-order delivery. There are no
 message edit revisions or active/inactive updates. The private SQLite spool is
 bounded at 16 MiB per conversation, retaining valid unacknowledged work when
-full. Pending work retries at later hooks; there is no background daemon.
-Final work can be lost if the machine or local transcript disappears.
+full. Ordinary hooks reserve 0.6 seconds of their existing 2.5-second budget to retry up to eight other same-client spools, using a private round-robin cursor. Recovery uses only stored paths and native session identities; it never discovers host history. Missing or replaced transcript files cannot prevent already durable batches from uploading, while unseen content still requires the original file. Busy or damaged spools are skipped. SessionEnd keeps its 0.9-second budget and performs no cross-session recovery. There is no background daemon; recovery needs another hook on the same device.
 Each upload may use the remaining hook budget, so ordinary hosted receipt
 latency does not pin the queue to an already accepted batch. The host deadlines
 remain unchanged; SessionEnd still uses its shorter best-effort budget.

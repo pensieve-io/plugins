@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import ipaddress
 import json
@@ -546,7 +547,10 @@ def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
 
 def load_state(db: sqlite3.Connection) -> dict:
     row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
-    return json.loads(row[0]) if row else {"offset": None, "sequence": 0, "calls": {}}
+    state = json.loads(row[0]) if row else {"offset": None, "sequence": 0, "calls": {}}
+    if not isinstance(state, dict):
+        raise ValueError("Capture state must be an object")
+    return state
 
 
 def save_state(db: sqlite3.Connection, state: dict) -> None:
@@ -1282,39 +1286,19 @@ def flush(db, configured, client, session, endpoint, deadline):
             break
 
 
-def run_hook(
-    payload: dict,
-    client: str,
-    config: Path = CONFIG_PATH,
-    state_root: Path = STATE_PATH,
-    endpoint: str = UPLOAD_ENDPOINT,
-) -> dict:
-    if client not in {"codex", "claude"} or payload.get("hook_event_name") not in HOST_EVENTS:
-        return {}
-    session = conversation_id(payload.get("session_id"))
-    if session is None:
-        return {}
-    configured = profiles(config)
-    if not configured:
-        # Capture-off must be remembered without reading transcript text, or a
-        # later re-enable would scan and upload the disabled interval. Never
-        # create state for a session that has never enabled capture.
-        existing = state_root / f"{client}-{session}.sqlite3"
-        if existing.exists():
-            db = connect_state(state_root, client, session)
-            try:
-                db.execute("BEGIN IMMEDIATE")
-                state = load_state(db)
-                state["capture_paused"] = True
-                save_state(db, state)
-                db.commit()
-            finally:
-                db.close()
-        return {}
-    event = payload["hook_event_name"]
-    # Plugin SessionEnd runs inside Claude's default 1.5s total budget and
-    # Codex's 3s cap. Durability comes from earlier checkpoints, not this flush.
-    deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
+def capture_session(
+    client,
+    session,
+    path,
+    configured,
+    state_root,
+    endpoint,
+    deadline,
+    *,
+    allow_new_file=False,
+    recover=False,
+):
+    """Resume one known spool, preserving its original ownership and identities."""
     db = connect_state(state_root, client, session)
     source_error = None
     try:
@@ -1360,7 +1344,8 @@ def run_hook(
                 capture_turn_id=None,
                 pending_turn_id=None,
             )
-        path = payload.get("transcript_path")
+        if recover:
+            path = state.get("path")
         if isinstance(path, str):
             try:
                 scan(
@@ -1371,7 +1356,7 @@ def run_hook(
                     session,
                     configured,
                     deadline,
-                    allow_new_file=event == "SessionStart",
+                    allow_new_file=allow_new_file,
                 )
             except (OSError, ValueError, sqlite3.DatabaseError) as exc:
                 # Loss of the source must not strand already-durable uploads.
@@ -1386,6 +1371,116 @@ def run_hook(
         flush(db, configured, client, session, endpoint, deadline)
     finally:
         db.close()
+    return source_error
+
+
+def recover_sessions(client, current, configured, state_root, endpoint, deadline):
+    """Retry at most eight existing same-client spools within the hook's budget."""
+    cursor_path = state_root / f"recovery-{client}.json"
+    try:
+        fd = os.open(
+            cursor_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            0o600,
+        )
+        with os.fdopen(fd, "r+") as handle:
+            info = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.getuid()
+            ):
+                raise ValueError("Recovery cursor must be a private owned file")
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                value = json.loads(handle.read(4096))
+                cursor = value.get("after", "") if isinstance(value, dict) else ""
+            except ValueError:
+                cursor = ""
+            if not isinstance(cursor, str):
+                cursor = ""
+            candidates = []
+            with os.scandir(state_root) as entries:
+                for entry in entries:
+                    if time.monotonic() >= deadline - 0.05:
+                        return
+                    prefix = client + "-"
+                    if not entry.name.startswith(prefix) or not entry.name.endswith(".sqlite3"):
+                        continue
+                    session = entry.name[len(prefix) : -8]
+                    if session != current and conversation_id(session) is not None:
+                        candidates.append(session)
+            candidates.sort(key=lambda session: (session <= cursor, session))
+            for session in candidates[:8]:
+                if time.monotonic() >= deadline - 0.05:
+                    break
+                try:
+                    capture_session(
+                        client,
+                        session,
+                        None,
+                        configured,
+                        state_root,
+                        endpoint,
+                        deadline,
+                        recover=True,
+                    )
+                except (OSError, ValueError, sqlite3.DatabaseError):
+                    pass  # Busy or damaged spools must not strand other conversations.
+                handle.seek(0)
+                json.dump({"after": session}, handle)
+                handle.truncate()
+                handle.flush()
+    except (OSError, ValueError, sqlite3.DatabaseError):
+        pass  # Recovery is opportunistic; ordinary hooks retain the durable backlog.
+
+
+def run_hook(
+    payload: dict,
+    client: str,
+    config: Path = CONFIG_PATH,
+    state_root: Path = STATE_PATH,
+    endpoint: str = UPLOAD_ENDPOINT,
+) -> dict:
+    if client not in {"codex", "claude"} or payload.get("hook_event_name") not in HOST_EVENTS:
+        return {}
+    session = conversation_id(payload.get("session_id"))
+    if session is None:
+        return {}
+    configured = profiles(config)
+    if not configured:
+        # Capture-off must be remembered without reading transcript text, or a
+        # later re-enable would scan and upload the disabled interval. Never
+        # create state for a session that has never enabled capture.
+        existing = state_root / f"{client}-{session}.sqlite3"
+        if existing.exists():
+            db = connect_state(state_root, client, session)
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                state = load_state(db)
+                state["capture_paused"] = True
+                save_state(db, state)
+                db.commit()
+            finally:
+                db.close()
+        return {}
+    event = payload["hook_event_name"]
+    # Plugin SessionEnd runs inside Claude's default 1.5s total budget and
+    # Codex's 3s cap. Durability comes from earlier checkpoints, not this flush.
+    deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
+    ordinary = event != "SessionEnd"
+    source_error = capture_session(
+        client,
+        session,
+        payload.get("transcript_path"),
+        configured,
+        state_root,
+        endpoint,
+        deadline - (0.6 if ordinary else 0),
+        allow_new_file=event == "SessionStart",
+    )
+    if ordinary:
+        recover_sessions(client, session, configured, state_root, endpoint, deadline)
     if source_error is not None:
         raise source_error
     return {}
