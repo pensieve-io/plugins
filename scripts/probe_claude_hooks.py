@@ -67,7 +67,7 @@ class ModelStub(BaseHTTPRequestHandler):
                     "batch_sha256": hashlib.sha256(raw).hexdigest(),
                     "conversation_id": "c73e0b53-8178-4a3c-8d40-a07414144741",
                     "segment_id": body["segment_id"],
-                    "expires_at": "2026-12-31T00:00:00+00:00",
+                    "expires_at": None,
                     "accepted_events": len(body["events"]),
                 }
             )

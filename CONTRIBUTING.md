@@ -74,6 +74,10 @@ Merging application code does not deploy these changes. Release the compatible
 app/API/MCP and its additive schema before distributing the plugin update, then
 record authenticated fresh-install and existing-install acceptance. Local package
 and synthetic client tests do not prove hosted compatibility.
+For the retention transition, hold upload ingress and drain old retention workers,
+update the backend and capturing helpers, then resume ingress. Preserve consent
+and queued work: switching consent off and on rotates its generation and discards
+that backlog. The application release ledger records the coordinated steps.
 
 The first hooks release requires the server-side work from Pensieve PR #881.
 Keep the hooks PR in draft until these checks are complete:

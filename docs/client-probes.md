@@ -141,6 +141,17 @@ interruption assertions pass. Other variants retain the exact-byte 503 retry.
 Use a new source session captured by this candidate for `--fork`, sharing its
 `--capture-state`; an older plugin's spool has no ordinal index.
 
+### Final transcript contract verification — 23 September 2026
+
+The final candidate passed 256 package tests and Ruff checks. Installed Codex CLI
+0.156.1 passed all ten capture checks on a fresh persisted synthetic conversation;
+Claude Code 2.1.280 passed all twelve grounding checks and twenty-one capture checks,
+including resume, compaction, fork handling and interruption. Both local upload
+fixtures returned `expires_at: null`. All thirteen Claude batches and three Codex
+upload attempts also validated against the merged application's `UploadBatch` model.
+These probes use local synthetic services and credentials. They do not validate
+hosted approval, a production installation/update, desktop or cloud capture.
+
 ### Delivery acknowledgement boundary
 
 Accepted context is a top-level JSONL `response_item` whose payload is a
