@@ -23,7 +23,7 @@ OTHER_KEY = "synthetic-upload-key-owner-two"
 NOW = "2026-09-15T10:00:00+00:00"
 GENERATION = "217e0b53-8178-4a3c-8d40-a07414144741"
 EXPIRY = "2026-12-14T10:00:00+00:00"
-ACCEPTED = {"status": "accepted", "expires_at": EXPIRY}
+ACCEPTED = {"status": "accepted", "expires_at": None}
 EXPIRED = {"status": "expired", "expires_at": EXPIRY}
 
 
@@ -447,7 +447,7 @@ def test_codex_fork_uses_exact_captured_endpoint_only(tmp_path, monkeypatch, sco
     )
     fork_run("Stop")
     first = events(calls)[-2]
-    if scope == "same" and endpoint in {4, 6}:
+    if scope in {"same", "expired"} and endpoint in {4, 6}:
         parent = source_events[1 if endpoint == 4 else 2]
         assert first["capture"]["parent"] == {
             "host_conversation_id": SESSION,
@@ -459,13 +459,11 @@ def test_codex_fork_uses_exact_captured_endpoint_only(tmp_path, monkeypatch, sco
     append(path, user("Original continues"), hook_record(), assistant("Original answer"))
     run()
     resumed = events(calls)[-2]["capture"]
-    if scope == "expired":
-        assert "parent" not in resumed
-    else:
-        assert resumed["parent"]["host_conversation_id"] == SESSION
+    assert resumed["parent"]["host_conversation_id"] == SESSION
 
 
-def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch):
+@pytest.mark.parametrize("receipt_expiry", [None, EXPIRY])
+def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch, receipt_expiry):
     real_upload = capture.upload
     path, cfg, state, _, _ = setup(tmp_path, monkeypatch)
     monkeypatch.setattr(capture, "upload", real_upload)
@@ -494,7 +492,7 @@ def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch
                     "conversation_id": SESSION,
                     "segment_id": batch["segment_id"],
                     "accepted_events": len(batch["events"]),
-                    "expires_at": EXPIRY,
+                    "expires_at": receipt_expiry,
                 }
             ).encode()
             self.send_response(200)
@@ -1534,11 +1532,15 @@ def at(record, timestamp):
     return {**record, "timestamp": timestamp}
 
 
-def test_known_expiry_rotates_at_the_next_fresh_user_turn(tmp_path, monkeypatch):
+def test_legacy_deadline_does_not_rotate_the_next_fresh_user_turn(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     append(path, user("Original prompt"), hook_record(), assistant())
     run()
     original = json.loads(calls[0][0]["body"])["segment_id"]
+    db = capture.connect_state(state, "codex", SESSION)
+    with db:
+        db.execute("UPDATE segments SET expires_at=?", (EXPIRY,))
+    db.close()
     append(
         path,
         at(user("New prompt after expiry"), "2026-12-15T10:00:00+00:00"),
@@ -1553,7 +1555,7 @@ def test_known_expiry_rotates_at_the_next_fresh_user_turn(tmp_path, monkeypatch)
             e["content"] == "New prompt after expiry" for e in json.loads(batch["body"])["events"]
         )
     ]
-    assert fresh and all(batch["segment_id"] != original for batch in fresh)
+    assert fresh and all(batch["segment_id"] == original for batch in fresh)
     assert all("parent_conversation_id" not in json.loads(batch["body"]) for batch, key in calls)
 
 
@@ -1658,7 +1660,10 @@ def test_reenable_with_new_key_excludes_disabled_interval_without_an_intermediat
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
-def test_server_opt_out_and_fresh_generation_never_backfill_old_work(tmp_path, monkeypatch, client):
+@pytest.mark.parametrize("reason", ["capture_disabled", "deleted"])
+def test_server_opt_out_and_fresh_generation_never_backfill_old_work(
+    tmp_path, monkeypatch, client, reason
+):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
     monkeypatch.setattr(capture, "upload", lambda *args: False)
     append(
@@ -1678,7 +1683,7 @@ def test_server_opt_out_and_fresh_generation_never_backfill_old_work(tmp_path, m
 
     def send(batch, key, *args):
         if json.loads(batch["body"])["capture_generation"] != fresh:
-            return {"status": "capture_disabled"}
+            return {"status": reason}
         calls.append((dict(batch), key))
         return ACCEPTED
 
@@ -1940,3 +1945,60 @@ def test_recovery_skips_malformed_spool_without_stranding_healthy_backlog(tmp_pa
     run_other_session(path, cfg, state)
     assert [e["content"] for e in events(calls)] == ["Visible question", "Visible answer"]
     assert json.loads((state / "recovery-codex.json").read_text())["after"] == SESSION
+
+
+@pytest.mark.parametrize(
+    "expiry,valid", [(None, True), (EXPIRY, True), ("invalid", False), ("missing", False)]
+)
+def test_upload_requires_explicit_indefinite_or_valid_legacy_expiry(monkeypatch, expiry, valid):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    segment = str(uuid.uuid4())
+    batch = {
+        "id": str(uuid.uuid4()),
+        "sha": "a" * 64,
+        "segment": segment,
+        "event_ids": '["one"]',
+        "body": b"{}",
+    }
+    receipt = {
+        "batch_id": batch["id"],
+        "batch_sha256": batch["sha"],
+        "segment_id": segment,
+        "accepted_events": 1,
+        "conversation_id": SESSION,
+    }
+    if expiry != "missing":
+        receipt["expires_at"] = expiry
+    response = SimpleNamespace(status=200, read=lambda _: json.dumps(receipt).encode())
+    monkeypatch.setattr(
+        capture,
+        "build_opener",
+        lambda *args: SimpleNamespace(open=lambda *args, **kwargs: nullcontext(response)),
+    )
+    result = capture.upload(batch, KEY, "http://127.0.0.1:1234/hooks/conversations", 1)
+    assert (isinstance(result, dict) and result["status"] == "accepted") is valid
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_deleted_http_receipt_must_name_the_uploaded_segment(monkeypatch, matching):
+    from io import BytesIO
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+
+    segment = str(uuid.uuid4())
+    body = json.dumps(
+        {"reason": "deleted", "segment_id": segment if matching else str(uuid.uuid4())}
+    ).encode()
+
+    def fail(*args, **kwargs):
+        raise HTTPError(
+            "http://127.0.0.1:1234/hooks/conversations", 410, "deleted", {}, BytesIO(body)
+        )
+
+    monkeypatch.setattr(capture, "build_opener", lambda *args: SimpleNamespace(open=fail))
+    result = capture.upload(
+        {"segment": segment, "body": b"{}"}, KEY, "http://127.0.0.1:1234/hooks/conversations", 1
+    )
+    assert result == ({"status": "deleted"} if matching else False)

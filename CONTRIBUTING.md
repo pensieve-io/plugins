@@ -38,7 +38,7 @@ CI runs the package, receipt and capture tests on Python 3.9 and 3.12. The tests
 manifest paths, the MCP connection, the skill roster and the receipt helper's
 conversation identity, accepted-context and privacy boundaries. Capture tests
 also cover account/company isolation, disabled intervals, private storage,
-stable retry receipts, full-spool recovery and expiry tombstones. Keep the README
+stable retry receipts, full-spool recovery, indefinite retention and deletion tombstones. Keep the README
 roster current when adding or removing a skill.
 
 Use native host metadata. Codex's `interface` supplies artwork, descriptions,
@@ -63,6 +63,14 @@ calls. See [client-probes.md](docs/client-probes.md) and the
 behaviour separately from live OAuth and desktop checks.
 
 ## Release order
+
+Indefinite transcript retention in Pensieve #978 changes successful receipts to
+`expires_at: null`. This candidate accepts both old finite and new null receipts;
+older helpers reject null receipts and prune fork ancestry by age. Coordinate the
+backend and installed-helper transition with upload ingress held until all
+capturing helpers are compatible. Preserve consent and queued work: toggling
+consent off and back on rotates its generation and discards that backlog. Keep this PR in draft until backend deployment
+and live acceptance are recorded. No automatic plugin publication is authorised.
 
 Turn-aware capture additionally requires
 [Pensieve #973](https://github.com/pensieve-io/pensieve/pull/973), including its

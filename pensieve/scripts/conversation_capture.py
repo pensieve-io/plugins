@@ -644,20 +644,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                     (state.get("turn_group"),),
                 )
             return
-        prior = db.execute(
-            "SELECT expires_at FROM segments WHERE id=?", (previous_segment,)
-        ).fetchone()
-        expiry = aware_time(prior[0]) if prior else None
-        turn_time = aware_time(state.get("turn_occurred_at"))
-        if (
-            marker["kind"] == "prompt"
-            and previous_segment
-            and expiry
-            and turn_time
-            and turn_time >= expiry
-        ):
-            segment = renewal_segment(previous_segment, state["turn_group"])
-        elif previous == [owner, context, generation] and previous_segment:
+        if previous == [owner, context, generation] and previous_segment:
             # A fresh marker restores the candidate; the prior scope alone
             # never authorizes a new user turn. Resume keeps one segment.
             segment = previous_segment
@@ -692,12 +679,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                 event = json.loads(row["body"])
                 if "capture" in event:
                     fork = state.pop("fork_parent", None)
-                    if (
-                        fork
-                        and fork["scope"] == state["scope"]
-                        and (expiry := aware_time(fork["expires_at"]))
-                        and expiry > datetime.now(timezone.utc)
-                    ):
+                    if fork and fork["scope"] == state["scope"]:
                         event["capture"]["parent"] = fork["reference"]
                     link_event(state, event, segment, session)
                     db.execute(
@@ -789,7 +771,7 @@ def link_event(state, event, segment, session):
 def fork_parent(db, metadata, session):
     """Resolve an exact Codex boundary from this device's captured metadata.
 
-    Missing/expired/legacy endpoints stay unknown. Never open the source
+    Missing/deleted/legacy endpoints stay unknown. Never open the source
     transcript, search other sessions, or substitute the source's latest head.
     """
     source = conversation_id(metadata.get("forked_from_id"))
@@ -809,7 +791,7 @@ def fork_parent(db, metadata, session):
         source_db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)
         try:
             row = source_db.execute(
-                "SELECT a.event_id,s.owner,s.context,s.generation,s.expires_at "
+                "SELECT a.event_id,s.owner,s.context,s.generation "
                 "FROM anchors a JOIN segments s ON s.id=a.segment "
                 "WHERE a.ordinal=? AND s.retired=0",
                 (end - 1,),
@@ -820,7 +802,6 @@ def fork_parent(db, metadata, session):
             return {
                 "reference": {"host_conversation_id": source, "event_id": row[0]},
                 "scope": list(row[1:4]),
-                "expires_at": row[4],
             }
     except (OSError, sqlite3.DatabaseError):
         pass
@@ -842,10 +823,7 @@ def scan(
     db.execute(
         "DELETE FROM anchors WHERE segment IS NULL AND event_id NOT IN (SELECT id FROM events)"
     )
-    db.execute(
-        "DELETE FROM anchors WHERE segment IN (SELECT id FROM segments WHERE retired=1 "
-        "OR julianday(expires_at)<=julianday('now'))"
-    )
+    db.execute("DELETE FROM anchors WHERE segment IN (SELECT id FROM segments WHERE retired=1)")
     if not path.is_absolute():
         raise ValueError("host transcript path must be absolute")
     try:
@@ -1120,9 +1098,9 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
             if (
                 isinstance(result, dict)
                 and result.get("segment_id") == batch["segment"]
-                and result.get("reason") == "capture_disabled"
+                and result.get("reason") in {"capture_disabled", "deleted"}
             ):
-                return {"status": "capture_disabled"}
+                return {"status": result["reason"]}
             if (
                 isinstance(result, dict)
                 and result.get("segment_id") == batch["segment"]
@@ -1143,7 +1121,8 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
         and result.get("segment_id") == batch["segment"]
         and result.get("accepted_events") == len(json.loads(batch["event_ids"]))
         and conversation_id(result.get("conversation_id")) is not None
-        and aware_time(result.get("expires_at")) is not None
+        and "expires_at" in result
+        and (result["expires_at"] is None or aware_time(result["expires_at"]) is not None)
     )
     return {"status": "accepted", "expires_at": result["expires_at"]} if accepted else False
 
@@ -1255,7 +1234,7 @@ def flush(db, configured, client, session, endpoint, deadline):
             if batch is None:
                 continue
             outcome = upload(batch, key, endpoint, remaining)
-            if isinstance(outcome, dict) and outcome["status"] == "capture_disabled":
+            if isinstance(outcome, dict) and outcome["status"] in {"capture_disabled", "deleted"}:
                 retire_segment(db, segment["id"], None)
                 progressed = True
                 continue

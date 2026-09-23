@@ -37,7 +37,7 @@ clients on this device.
 Settings is the only opt-in control. Turning capture off stops new and queued
 uploads for every client on every device. Re-enabling starts a new consent period;
 it never backfills the disabled period or retries an older period's backlog.
-Saved content keeps its original expiry. **Remove device** revokes only that
+Saved content remains until explicitly deleted. **Remove device** revokes only that
 upload key, including queued retries; it does not disconnect MCP or delete
 saved history. Device IDs in settings match their downloaded setup filenames.
 
@@ -95,9 +95,9 @@ or server-authenticated evidence of a successful tool write.
 Codex forks can link to the exact `forked_from_ordinal_exclusive` boundary when
 that native record has a captured endpoint in this device's source spool.
 A content-free ordinal index survives acknowledgement, stays within the
-existing 16 MiB spool bound and is pruned on later hooks after expiry/retirement.
+existing 16 MiB spool bound and is pruned on later hooks after explicit retirement.
 The new prompt must confirm the same account, context and consent generation;
-the source must have a known, unexpired retention deadline. The adapter neither
+the source segment must not have been explicitly retired. The adapter neither
 reads the source transcript nor substitutes its latest head. This supports
 forks at captured messages inside a turn as well as completed turns.
 
@@ -128,13 +128,14 @@ Each upload may use the remaining hook budget, so ordinary hosted receipt
 latency does not pin the queue to an already accepted batch. The host deadlines
 remain unchanged; SessionEnd still uses its shorter best-effort budget.
 
-Each portion expires **90 days after its first accepted upload**; resume does
-not extend it. The server erases bodies, titles and receipts, retaining only
-content-free tombstones against retry resurrection. A fresh post-expiry user
-turn can begin a new portion of the same conversation. If expiry is discovered
-while work is queued, only a host-timestamped post-expiry turn can roll over.
-Account/context deletion removes its stored content. The pilot has no individual
-transcript delete action.
+Saved transcripts remain indefinitely until explicitly deleted. Successful
+receipts carry `expires_at: null`; this helper accepts that value, clears cached
+legacy deadlines and preserves resume/fork anchors regardless of age. Disconnecting
+stops uploads without deleting saved history. A scoped `410 deleted` erases the
+named local backlog and anchors without moving deleted content to a new segment.
+The helper still understands finite receipts and explicit `410 expired` responses
+from older servers during the coordinated rollout; local time alone never retires
+saved history or its ancestry.
 
 ## Supported clients and verification
 

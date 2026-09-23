@@ -94,13 +94,20 @@ presence updates or message revisions.
 Limits are 100 events, 32,000 characters per event and 262,144 bytes for the exact
 UTF-8 JSON request. The helper sends only nonempty batches. A successful HTTP
 200 receipt must match `batch_id`, `batch_sha256` of the exact raw request,
-`segment_id`, and `accepted_events`, and include a valid `conversation_id` and fixed `expires_at`.
+`segment_id`, and `accepted_events`, and include a valid `conversation_id` and `expires_at` (explicit null for indefinite retention; finite dates remain accepted from older servers).
 Retries preserve the original batch bytes. A failed or mismatched receipt does
 not remove pending events. HTTP 401/403 retains the denied scope's backlog and
 allows other configured scopes to proceed; HTTP 410 securely removes the
-expired segment's old content and retains a local tombstone. A scoped expiry
+deleted segment's old content and retains a local tombstone. A scoped expiry
 response carries `reason: expired`, `segment_id` and `expires_at`; only a proven
 fresh post-expiry user-turn suffix can roll into a new segment. A scoped
 `reason: capture_disabled` response discards the rejected segment's queued work
 without rollover, including old-generation retries after re-enable. See
 [capture setup and boundaries](conversation-capture.md).
+
+Indefinite transcript retention (Pensieve #978) requires this compatible helper.
+`410 deleted` with the matching segment ID discards that segment's backlog and
+anchors without rollover. Only an explicit old-server `410 expired` may preserve a
+proven fresh suffix. Cached dates do not rotate segments, hide forks or prune anchors.
+Missing or malformed receipt fields still fail acknowledgement; explicit null is
+accepted only alongside all matching batch identity/hash/count fields.
