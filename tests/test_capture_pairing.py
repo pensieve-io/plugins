@@ -200,7 +200,7 @@ def test_obsolete_config_requires_reconnect_without_rewriting_or_reading_transcr
     before = config.read_bytes()
     for client in ("claude", "codex"):
         with pytest.raises(
-            credentials.ReconnectRequired, match="Reconnect through your profile menu"
+            credentials.ReconnectRequired, match="Reconnect through Data → Connectors"
         ):
             credentials.profiles(config, client)
     monkeypatch.setattr(capture, "scan", lambda *a, **kw: pytest.fail("old setup read history"))

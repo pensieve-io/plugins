@@ -1,7 +1,8 @@
 """Offer browser consent once, using only authenticated native hook attribution.
 
 No transcript is uploaded here. A remembered decline suppresses onboarding on every
-installation. Changing the context/harness setting can offer connection again.
+installation unless the user explicitly requests connection from its connector
+dialog. This only reopens approval; it never enables sharing by itself.
 """
 
 from __future__ import annotations
@@ -104,7 +105,7 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
     if offer is None:
         return
     marker, request_id = offer
-    if marker["consent"] == "declined":
+    if marker["consent"] == "declined" and request_id is None:
         return
     owner, context = marker["user_id"], marker["context_id"]
     if key_for(configured, owner, context) is not None and request_id is None:

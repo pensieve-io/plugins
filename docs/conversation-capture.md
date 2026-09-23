@@ -21,9 +21,12 @@ type and context. The remote MCP connection is unchanged. The helper never reads
 the harness's OAuth credentials, and neither upload key nor polling secret reaches
 the agent or browser approval page.
 
-The helper remembers displayed offers. A decline suppresses them across devices;
+The helper remembers displayed offers. A decline suppresses automatic offers across devices;
 a dismissed offer does not reopen on every prompt. Changing sharing off and back
 on in Data → Connectors starts a fresh generation and permits a new offer.
+With no connected key, the dialog's connection icon explicitly requests another
+approval offer, including after a decline. This request is valid for 15 minutes
+and never enables capture without browser approval.
 Offline first-use attempts retry at most once every five minutes.
 Approval starts only from accepted native hook records, never quoted markers in
 user messages or tool output. It reads a bounded transcript tail for attribution
@@ -43,8 +46,10 @@ context cannot replace the first context's key. Older version-3 profiles without
 a context keep their existing scope until explicitly replaced.
 **Data → Connectors** shows one shared card per harness. It is Connected when
 any member is sharing, otherwise Available. Configure or Add yours changes only
-your preference in this context. With no uploader, the modal links to plugin setup;
-after enabling sharing, continue in your agent to finish connecting. Turning off
+your preference in this context; the people count expands to list contributors.
+With no connected uploader, the switch and Save are disabled. The modal links to
+plugin setup and its connection icon requests browser approval from the next hook.
+Continue in your agent with the same context selected to finish connecting. Turning off
 stops your uploads and extraction across installations; MCP access and other
 members' sharing are unchanged. Existing private credentials can be reused.
 
@@ -192,7 +197,8 @@ remain immutable; this adds no backfill and changes no existing retry bytes.
 
 Consent belongs to a user, context and harness type. The server emits an
 attribution-matched `pensieve-capture-consent` marker with approved/declined/unknown
-status. Declined suppresses offers on every installation. Unknown offers the
+status. Declined suppresses automatic offers on every installation; an explicit,
+unexpired connection request can reopen approval without granting consent. Unknown offers the
 browser choice once; re-enabling from Data → Connectors starts a fresh
 consent generation and permits recovery. Same-machine apps of one harness reuse
 `~/.config/pensieve/capture.json`. A new computer requires Connect using remembered

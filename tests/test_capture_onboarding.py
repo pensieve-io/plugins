@@ -170,7 +170,7 @@ def test_compaction_requires_a_new_native_marker_before_onboarding(tmp_path, mon
 
 def test_remembered_decline_never_opens_browser_even_on_new_installation(tmp_path, monkeypatch):
     config, start, opened = setup(tmp_path, monkeypatch)
-    path = transcript(tmp_path, consent="declined", intent=intent())
+    path = transcript(tmp_path, consent="declined")
     onboarding.offer_connection({"transcript_path": str(path)}, "codex", SESSION, config, {})
     start.assert_not_called()
     opened.assert_not_called()
@@ -185,3 +185,23 @@ def test_new_consent_generation_recovers_a_dismissed_offer(tmp_path, monkeypatch
     onboarding.offer_connection(payload, "codex", SESSION, config, {})
     onboarding.offer_connection(payload, "codex", SESSION, config, {})
     assert start.call_count == opened.call_count == 2
+
+
+def test_explicit_connector_request_can_reconsider_decline_without_enabling_capture(
+    tmp_path, monkeypatch
+):
+    config, start, opened = setup(tmp_path, monkeypatch)
+    payload = {"transcript_path": str(transcript(tmp_path, consent="declined"))}
+    onboarding.offer_connection(payload, "codex", SESSION, config, {})
+    start.assert_not_called()
+    request = intent()
+    transcript(tmp_path, consent="declined", intent=request)
+    for _ in range(2):
+        onboarding.offer_connection(payload, "codex", SESSION, config, {})
+    assert start.call_count == opened.call_count == 1
+    assert start.call_args.kwargs["restart"] is True
+    assert not config.exists()
+    request["expires_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    transcript(tmp_path, consent="declined", intent=request)
+    onboarding.offer_connection(payload, "codex", SESSION, config, {})
+    assert start.call_count == 1
