@@ -8,21 +8,23 @@ search/read tools. Installing the plugin alone never enables sharing.
 ## Connect an installation
 
 The plugin offers browser approval after its first authenticated native context
-hook. Review the destination and sharing checkbox, then click **Connect**.
-The account and context must match the agent's authenticated attribution. The checkbox
-covers saving conversations and extracting useful company knowledge. A previous
-learning opt-out leaves it unchecked until you make a fresh choice. Extraction
+hook when the user's harness/context choice is unknown. Approve enables saving
+and useful-knowledge extraction; Deny remembers the decline. There is no separate
+checkbox. A new device with remembered approval shows Connect to authorise its
+private uploader. Compatible apps on one computer can share an existing credential.
+The account and context must match authenticated native attribution. Extraction
 also requires the separately gated application worker.
 
 The helper installs an upload-only credential privately; the user does not run
-commands, download a credential file or paste tokens. Approval applies to this
-client installation and context. The remote MCP connection is unchanged. The
-helper never reads the harness's OAuth credentials, and neither the upload key
-nor the temporary polling secret reaches the agent or browser approval page.
+commands, download files or paste tokens. Consent applies to that user's harness
+type and context. The remote MCP connection is unchanged. The helper never reads
+the harness's OAuth credentials, and neither upload key nor polling secret reaches
+the agent or browser approval page.
 
-The helper remembers that approval was offered; dismissal does not reopen the
-browser on every prompt. Settings requests last fifteen minutes and allow an
-explicit retry. Offline first-use attempts retry at most once every five minutes.
+The helper remembers displayed offers. A decline suppresses them across devices;
+a dismissed offer does not reopen on every prompt. Changing sharing off and back
+on in the context's profile menu starts a fresh generation and permits a new offer.
+Offline first-use attempts retry at most once every five minutes.
 Approval starts only from accepted native hook records, never quoted markers in
 user messages or tool output. It reads a bounded transcript tail for attribution
 before consent, and uploads no transcript content until consent and fresh capture.
@@ -39,7 +41,7 @@ pairing. Pairing migrates obsolete local credential entries without touching
 transcript spools. Context-scoped profiles coexist, so connecting another
 context cannot replace the first context's key. Older version-3 profiles without
 a context keep their existing scope until explicitly replaced.
-**Settings → Transcript sharing** shows installations and last uploads.
+**the context’s profile menu → Transcript sharing** shows installations and last uploads.
 Disconnect stops that installation's uploads and extraction; MCP tools remain
 connected. Use **Connect installation** to reconnect, then continue in the agent
 with that context selected. The old downloaded-file setup applies only to older plugins.
@@ -183,3 +185,14 @@ switch, the backend's full identity match may leave a call unlinked; no combined
 output or timing heuristic assigns it to another context. Sequential writes on
 either side of a selection have native matching identities. Old captured events
 remain immutable; this adds no backfill and changes no existing retry bytes.
+
+### Remembered harness preferences
+
+Consent belongs to a user, context and harness type. The server emits an
+attribution-matched `pensieve-capture-consent` marker with approved/declined/unknown
+status. Declined suppresses offers on every installation. Unknown offers the
+browser choice once; re-enabling from the context's profile menu starts a fresh
+consent generation and permits recovery. Same-machine apps of one harness reuse
+`~/.config/pensieve/capture.json`. A new computer requires Connect using remembered
+consent; the public pairing URL cannot safely issue credentials merely by being
+visited. Cloud runtimes are not supported by this macOS-only onboarding helper.

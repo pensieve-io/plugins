@@ -20,7 +20,7 @@ class ReconnectRequired(ValueError):
     """An obsolete local setup must be replaced by browser-approved pairing."""
 
     def __init__(self):
-        super().__init__("Reconnect through Settings → Transcript sharing to save work with this app.")
+        super().__init__("Reconnect through your profile menu → Transcript sharing to save work with this app.")
 
 
 def encoded(value: object) -> bytes:

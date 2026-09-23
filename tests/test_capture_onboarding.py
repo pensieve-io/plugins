@@ -11,20 +11,31 @@ import pytest
 from test_conversation_capture import OWNER, SESSION, append, hook_record, marker
 
 
-def transcript(tmp_path, client="codex", intent=None):
+def transcript(tmp_path, client="codex", intent=None, consent="unknown", generation=None):
     path = tmp_path / "transcript.jsonl"
     path.write_text("")
     if client == "codex":
         append(path, {"type": "session_meta", "payload": {"id": SESSION}})
-    record = hook_record(client=client, generation=None)
+    record = hook_record(client=client, generation=generation)
+    status = {
+        "user_id": OWNER,
+        "client": client,
+        "context_id": 497,
+        "conversation_id": SESSION,
+        "status": consent,
+    }
+    text = (
+        "<!-- pensieve-capture-consent "
+        + json.dumps(status)
+        + " -->\n"
+        + marker(client=client, generation=generation)
+    )
     if intent:
-        text = (
-            "<!-- pensieve-capture-setup " + json.dumps(intent) + " -->\n" + marker(client=client)
-        )
-        if client == "codex":
-            record["payload"]["content"][0]["text"] = text
-        else:
-            record["attachment"]["content"] = [text]
+        text = "<!-- pensieve-capture-setup " + json.dumps(intent) + " -->\n" + text
+    if client == "codex":
+        record["payload"]["content"][0]["text"] = text
+    else:
+        record["attachment"]["content"] = [text]
     append(path, record)
     return path
 
@@ -155,3 +166,22 @@ def test_compaction_requires_a_new_native_marker_before_onboarding(tmp_path, mon
     append(path, {"type": "compacted"})
     onboarding.offer_connection({"transcript_path": str(path)}, "codex", SESSION, config, {})
     start.assert_not_called()
+
+
+def test_remembered_decline_never_opens_browser_even_on_new_installation(tmp_path, monkeypatch):
+    config, start, opened = setup(tmp_path, monkeypatch)
+    path = transcript(tmp_path, consent="declined", intent=intent())
+    onboarding.offer_connection({"transcript_path": str(path)}, "codex", SESSION, config, {})
+    start.assert_not_called()
+    opened.assert_not_called()
+
+
+def test_new_consent_generation_recovers_a_dismissed_offer(tmp_path, monkeypatch):
+    config, start, opened = setup(tmp_path, monkeypatch)
+    path = transcript(tmp_path)
+    payload = {"transcript_path": str(path)}
+    onboarding.offer_connection(payload, "codex", SESSION, config, {})
+    transcript(tmp_path, consent="approved", generation=str(uuid4()))
+    onboarding.offer_connection(payload, "codex", SESSION, config, {})
+    onboarding.offer_connection(payload, "codex", SESSION, config, {})
+    assert start.call_count == opened.call_count == 2

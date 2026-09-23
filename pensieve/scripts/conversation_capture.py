@@ -42,7 +42,7 @@ MAX_BATCH_EVENTS = 100
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
 CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
 INTERNAL_MARKER = re.compile(
-    r"<!-- pensieve-(?:capture-context|capture-setup|delivery)\b.*?-->", re.DOTALL
+    r"<!-- pensieve-(?:capture-context|capture-consent|capture-setup|delivery)\b.*?-->", re.DOTALL
 )
 SECRET = re.compile(
     r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"

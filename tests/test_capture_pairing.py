@@ -199,7 +199,9 @@ def test_obsolete_config_requires_reconnect_without_rewriting_or_reading_transcr
     credentials.save_private_json(config, {"version": version, "profiles": [obsolete]})
     before = config.read_bytes()
     for client in ("claude", "codex"):
-        with pytest.raises(credentials.ReconnectRequired, match="Reconnect through Clients"):
+        with pytest.raises(
+            credentials.ReconnectRequired, match="Reconnect through your profile menu"
+        ):
             credentials.profiles(config, client)
     monkeypatch.setattr(capture, "scan", lambda *a, **kw: pytest.fail("old setup read history"))
     monkeypatch.setattr(capture, "upload", lambda *a, **kw: pytest.fail("old setup uploaded"))
@@ -358,6 +360,21 @@ def test_native_hook_starts_private_pairing_and_approval_never_backfills(
         user("Old private work"),
         hook_record(generation=None),
     )
+    record = hook_record(generation=None)
+    record["payload"]["content"][0]["text"] += (
+        "\n<!-- pensieve-capture-consent "
+        + json.dumps(
+            {
+                "user_id": OWNER,
+                "client": "codex",
+                "context_id": 497,
+                "conversation_id": SESSION,
+                "status": "unknown",
+            }
+        )
+        + " -->"
+    )
+    append(transcript, record)
     monkeypatch.setattr(onboarding.sys, "platform", "darwin")
     monkeypatch.setattr(
         onboarding,
