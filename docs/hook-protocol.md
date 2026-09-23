@@ -59,10 +59,12 @@ Capture requests identify themselves as `Pensieve-Plugin-Capture/1.0`, following
 the receipt helper's explicit identification so the production edge admits them.
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-Personal Settings → Agent transcripts owns per-user consent across all clients and device
-keys. The setup command only imports a downloaded upload-only credential into
-private storage. It never reads OAuth credentials. Every upload checks current
-membership and the user's current enabled consent generation.
+The first native context hook offers browser approval and a private one-time
+exchange to install a client/context-scoped upload key. Ordinary hooks complete
+pending pairing. No OAuth credential is read or passed through model output.
+Every upload checks membership, the enabled consent generation and the key's
+scope/revocation. Legacy account profiles retain their previous policy until
+replaced; see the capture guide for migration and reconnect boundaries.
 
 At every `UserPromptSubmit`, including an unchanged briefing, the service emits
 one terminal, non-secret marker in accepted hook context:
@@ -94,13 +96,31 @@ presence updates or message revisions.
 Limits are 100 events, 32,000 characters per event and 262,144 bytes for the exact
 UTF-8 JSON request. The helper sends only nonempty batches. A successful HTTP
 200 receipt must match `batch_id`, `batch_sha256` of the exact raw request,
-`segment_id`, and `accepted_events`, and include a valid `conversation_id` and fixed `expires_at`.
+`segment_id`, and `accepted_events`, and include a valid `conversation_id`.
+`expires_at` must be present: `null` means indefinite storage; a valid legacy
+aware timestamp is also accepted but never drives local expiry or rollover.
 Retries preserve the original batch bytes. A failed or mismatched receipt does
 not remove pending events. HTTP 401/403 retains the denied scope's backlog and
-allows other configured scopes to proceed; HTTP 410 securely removes the
-expired segment's old content and retains a local tombstone. A scoped expiry
-response carries `reason: expired`, `segment_id` and `expires_at`; only a proven
-fresh post-expiry user-turn suffix can roll into a new segment. A scoped
-`reason: capture_disabled` response discards the rejected segment's queued work
-without rollover, including old-generation retries after re-enable. See
+allows other configured scopes to proceed. HTTP 410 with a matching `segment_id`
+and `reason: deleted` or `reason: capture_disabled` erases that segment's queued
+content and keeps a local tombstone, including old-generation retries after
+re-enable. Nothing from that segment is replayed under a new identity, including
+later queued turns or a provisional prompt. Only a newly observed, attributed
+user turn can start a new segment. Unknown or mismatched 410 responses cannot
+erase the queue. See
 [capture setup and boundaries](conversation-capture.md).
+
+
+## Hook registration and sharing
+
+The first accepted native context hook offers browser setup for unknown consent.
+An explicit signed-in Approve or Deny registers the helper and sets sharing on
+or off respectively. The helper privately exchanges its one-time poll secret
+for the linked profile; a `registered` response is valid even while sharing is off.
+Only unanswered browser offers expire; after the server confirms expiry, a later
+conversation may offer setup again. A decline never triggers that retry, and an
+unclaimed registration is preserved while offline. Native consent markers and server upload
+admission independently require an enabled, current generation. The settings toggle
+changes the same preference without another approval screen. The obsolete
+connection-intent API and `pensieve-capture-setup` marker are no longer produced or
+used; older marker text is still stripped from visible captured messages.

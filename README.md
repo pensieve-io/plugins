@@ -163,11 +163,11 @@ context choice is remembered for new conversations; each existing conversation
 keeps its own selection.
 
 The context hooks send delivery receipts for the briefing the client received.
-Optional [work conversation capture](docs/conversation-capture.md) is off by
-default. Enable **Save agent transcripts** in personal **Settings → Agent transcripts**,
-once for all your agents. Download device setup and import it with the bundled `scripts/capture_setup.py`.
-New visible work belongs to the selected context for future team handoffs. This
-pilot adds no transcript browser, agent retrieval or automatic extraction.
+Optional [work conversation capture](docs/conversation-capture.md) requires browser
+approval per user, context and harness type. A new device separately confirms
+its private connection. The installed plugin offers approval on first use; **Data → Connectors in the context** manages sharing after either choice. No setup
+skill, credential download or terminal command is needed. New visible work
+belongs to the selected context for team handoffs. Previous chats are not imported.
 
 ## Other ways to use the skills
 
@@ -205,3 +205,14 @@ application repository. Its backend and docs import a pinned copy of the skills
 from this repository; they do not publish or overwrite the plugin.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release order.
+
+### Connect conversations
+
+The plugin offers browser approval after its first authenticated native context
+hook. Approve saving for your harness type in that context; the helper installs
+its device upload key privately. Compatible apps of the same harness share your
+preference, while another context or harness has its own choice. Declining keeps MCP tools available
+and does not trigger repeated prompts. After either choice, change sharing directly in **Data → Connectors in the context**. Declining keeps the hook linked with saving off; no reconnect action is needed.
+Normal hooks complete pending setup and retry authorised uploads. V1 saves new
+work from setup onwards, with no history import. Saved transcripts remain until
+explicitly deleted.
