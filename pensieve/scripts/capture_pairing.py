@@ -144,7 +144,6 @@ def start(
     runtime: str = "unknown",
     host_version: str = "",
     base: str = API_BASE,
-    restart: bool = False,
     expected_user_id: str | None = None,
     expected_context_id: int | None = None,
     timeout: float = 5,
@@ -167,14 +166,15 @@ def start(
     with private_lock(path.with_suffix(".lock")):
         if path.exists() or path.is_symlink():
             old = validate_pending(json.loads(private_file(path, MAX_CONFIG_BYTES)), client)
-            if not restart and timestamp(old["expires_at"]) > time.time():
-                if (
-                    old.get("expected_user_id") == expected_user_id
-                    and old.get("expected_context_id") == expected_context_id
-                ):
-                    return public_status(old)
-                return {"status": "another_connection_pending"}
-            path.unlink()
+            # Browser expiry is not claim expiry: approval/decline may already
+            # have registered a credential while exchange was offline. Only a
+            # terminal server response in poll() can discard this private claim.
+            if (
+                old.get("expected_user_id") == expected_user_id
+                and old.get("expected_context_id") == expected_context_id
+            ):
+                return public_status(old)
+            return {"status": "another_connection_pending"}
         code, response = request(
             base,
             "/pairings/start",

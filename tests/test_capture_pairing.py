@@ -415,3 +415,51 @@ def test_automatic_second_context_waits_for_pending_approval(tmp_path, service):
     result = pairing.poll(config, "codex")
     assert result["context_id"] == 497
     assert first["verification_url"]
+
+
+@pytest.mark.parametrize("browser_expired", [False, True])
+@pytest.mark.parametrize("outcome", ["approved", "registered"])
+@pytest.mark.parametrize("next_scope", [(OWNER, 497), (OWNER, 508), (OTHER, 497)])
+def test_start_preserves_unclaimed_credentials_across_scope_and_browser_expiry(
+    tmp_path, service, browser_expired, outcome, next_scope
+):
+    config = new_config(tmp_path)
+    first = pairing.start(
+        config, "codex", base=service["base"], expected_user_id=OWNER, expected_context_id=497
+    )
+    path = pairing.pairing_path(config, "codex")
+    if browser_expired:
+        pending = json.loads(path.read_text())
+        pending["expires_at"] = "2000-01-01T00:00:00+00:00"
+        credentials.save_private_json(path, pending)
+    service["mode"] = "offline"
+    assert pairing.poll(config, "codex")["status"] == "offline"
+    before = path.read_bytes()
+    result = pairing.start(
+        config,
+        "codex",
+        base=service["base"],
+        expected_user_id=next_scope[0],
+        expected_context_id=next_scope[1],
+    )
+    assert path.read_bytes() == before
+    assert len([r for r in service["requests"] if r[0].endswith("/start")]) == 1
+    if next_scope == (OWNER, 497):
+        assert result["verification_url"] == first["verification_url"]
+    else:
+        assert result["status"] == "another_connection_pending"
+    service["mode"] = outcome
+    ready(config)
+    assert pairing.poll(config, "codex")["status"] == "paired"
+    assert credentials.profiles(config, "codex") == {f"{OWNER}:497": KEY}
+    assert not path.exists()
+    assert (
+        pairing.start(
+            config,
+            "codex",
+            base=service["base"],
+            expected_user_id=next_scope[0],
+            expected_context_id=next_scope[1],
+        )["status"]
+        == "awaiting_approval"
+    )

@@ -164,8 +164,8 @@ keeps its own selection.
 
 The context hooks send delivery receipts for the briefing the client received.
 Optional [work conversation capture](docs/conversation-capture.md) requires browser
-approval for each installation and context. The installed plugin offers approval
-on first use; **Data → Connectors in the context** manages sharing after either choice. No setup
+approval per user, context and harness type. A new device separately confirms
+its private connection. The installed plugin offers approval on first use; **Data → Connectors in the context** manages sharing after either choice. No setup
 skill, credential download or terminal command is needed. New visible work
 belongs to the selected context for team handoffs. Previous chats are not imported.
 
@@ -209,8 +209,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release ord
 ### Connect conversations
 
 The plugin offers browser approval after its first authenticated native context
-hook. Approve saving and company sharing for that installation and context; the
-helper installs its upload key privately. Declining keeps MCP tools available
+hook. Approve saving for your harness type in that context; the helper installs
+its device upload key privately. Compatible apps of the same harness share your
+preference, while another context or harness has its own choice. Declining keeps MCP tools available
 and does not trigger repeated prompts. After either choice, change sharing directly in **Data → Connectors in the context**. Declining keeps the hook linked with saving off; no reconnect action is needed.
 Normal hooks complete pending setup and retry authorised uploads. V1 saves new
-conversations only; the 90-day transcript lifetime is not a backfill window.
+work from setup onwards, with no history import. Saved transcripts remain until
+explicitly deleted.

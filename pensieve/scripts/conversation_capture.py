@@ -152,6 +152,27 @@ def visible_text(content: object) -> str:
     return "\n".join(parts)
 
 
+def tool_call(name: str, call_id: object, source: dict, input_field: str) -> dict:
+    """Keep input in the bounded/redacted body, and only its name in metadata.
+
+    A missing input remains a legacy name-only call; an explicitly empty input
+    is still captured. Never derive inputs from results or completion-only events.
+    """
+    event = {"kind": "tool_call", "content": name[:255], "tool_call_id": call_id}
+    if input_field in source and capture_id(name[:255]):
+        value = source[input_field]
+        if input_field == "arguments" and isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                pass
+        event["content"] = (
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+        )
+        event["tool_name"] = name[:255]
+    return event
+
+
 def aware_time(value: object) -> datetime | None:
     if isinstance(value, str):
         try:
@@ -346,11 +367,13 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                 }
             if internal:
                 return []
-            # Tool arguments can contain shell/environment secrets. The first
-            # version retains the tool's name and results, not arbitrary input.
             name = payload.get("name")
             return (
-                [{"kind": "tool_call", "content": str(name)[:255], "tool_call_id": call}]
+                [
+                    tool_call(
+                        name, call, payload, "arguments" if kind == "function_call" else "input"
+                    )
+                ]
                 if isinstance(name, str)
                 else []
             )
@@ -418,9 +441,7 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
                         "internal": internal,
                     }
                     if not internal:
-                        result.append(
-                            {"kind": "tool_call", "content": name[:255], "tool_call_id": call}
-                        )
+                        result.append(tool_call(name, call, item, "input"))
         return result
     if kind != "user" or payload.get("role") != "user":
         return []
@@ -532,10 +553,6 @@ def save_state(db: sqlite3.Connection, state: dict) -> None:
     db.execute("INSERT OR REPLACE INTO state(id,body) VALUES (1,?)", (encoded(state).decode(),))
 
 
-def renewal_segment(segment: str, user_event: str) -> str:
-    return str(uuid.uuid5(uuid.UUID(segment), "renewal:" + user_event))
-
-
 def apply_item(db, state, item, identity, occurred_at, client, session, configured, host_timestamp):
     if item.get("new_turn"):
         if state.get("awaiting_marker"):
@@ -593,7 +610,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         if (
             marker["kind"] == "selection"
             and previous is not None
-            and previous[0] == owner
+            and previous[:2] == [owner, context]
             and previous[2] != generation
         ):
             # A changed opt-in period cannot authorise the rest of an old turn.
@@ -619,20 +636,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                     (state.get("turn_group"),),
                 )
             return
-        prior = db.execute(
-            "SELECT expires_at FROM segments WHERE id=?", (previous_segment,)
-        ).fetchone()
-        expiry = aware_time(prior[0]) if prior else None
-        turn_time = aware_time(state.get("turn_occurred_at"))
-        if (
-            marker["kind"] == "prompt"
-            and previous_segment
-            and expiry
-            and turn_time
-            and turn_time >= expiry
-        ):
-            segment = renewal_segment(previous_segment, state["turn_group"])
-        elif previous == [owner, context, generation] and previous_segment:
+        if previous == [owner, context, generation] and previous_segment:
             # A fresh marker restores the candidate; the prior scope alone
             # never authorizes a new user turn. Resume keeps one segment.
             segment = previous_segment
@@ -667,12 +671,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                 event = json.loads(row["body"])
                 if "capture" in event:
                     fork = state.pop("fork_parent", None)
-                    if (
-                        fork
-                        and fork["scope"] == state["scope"]
-                        and (expiry := aware_time(fork["expires_at"]))
-                        and expiry > datetime.now(timezone.utc)
-                    ):
+                    if fork and fork["scope"] == state["scope"]:
                         event["capture"]["parent"] = fork["reference"]
                     link_event(state, event, segment, session)
                     db.execute(
@@ -712,7 +711,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
     if item["kind"] == "turn_end":
         if not state.get("capture_turn_id") or state.get("turn_closed"):
             return
-    elif not text:
+    elif not text and not item.get("tool_name"):
         return
     state["sequence"] += 1
     event = {
@@ -727,6 +726,8 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         event["capture"] = {"turn_id": state["capture_turn_id"]}
         if call_id := capture_id(item.get("tool_call_id")):
             event["capture"]["tool_call_id"] = call_id
+        if name := item.get("tool_name"):
+            event["capture"]["tool_name"] = name
         if item["kind"] == "turn_end":
             event["capture"]["completion"] = item["completion"]
             state["turn_closed"] = True
@@ -764,7 +765,7 @@ def link_event(state, event, segment, session):
 def fork_parent(db, metadata, session):
     """Resolve an exact Codex boundary from this device's captured metadata.
 
-    Missing/expired/legacy endpoints stay unknown. Never open the source
+    Missing/deleted/legacy endpoints stay unknown. Never open the source
     transcript, search other sessions, or substitute the source's latest head.
     """
     source = conversation_id(metadata.get("forked_from_id"))
@@ -784,7 +785,7 @@ def fork_parent(db, metadata, session):
         source_db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)
         try:
             row = source_db.execute(
-                "SELECT a.event_id,s.owner,s.context,s.generation,s.expires_at "
+                "SELECT a.event_id,s.owner,s.context,s.generation "
                 "FROM anchors a JOIN segments s ON s.id=a.segment "
                 "WHERE a.ordinal=? AND s.retired=0",
                 (end - 1,),
@@ -795,7 +796,6 @@ def fork_parent(db, metadata, session):
             return {
                 "reference": {"host_conversation_id": source, "event_id": row[0]},
                 "scope": list(row[1:4]),
-                "expires_at": row[4],
             }
     except (OSError, sqlite3.DatabaseError):
         pass
@@ -813,14 +813,11 @@ def scan(
     *,
     allow_new_file: bool = False,
 ) -> None:
-    # Anchors contain identities only and share the spool's size/retention bounds.
+    # Anchors contain identities only and share the spool's size bounds.
     db.execute(
         "DELETE FROM anchors WHERE segment IS NULL AND event_id NOT IN (SELECT id FROM events)"
     )
-    db.execute(
-        "DELETE FROM anchors WHERE segment IN (SELECT id FROM segments WHERE retired=1 "
-        "OR julianday(expires_at)<=julianday('now'))"
-    )
+    db.execute("DELETE FROM anchors WHERE segment IN (SELECT id FROM segments WHERE retired=1)")
     if not path.is_absolute():
         raise ValueError("host transcript path must be absolute")
     try:
@@ -1096,16 +1093,9 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
             if (
                 isinstance(result, dict)
                 and result.get("segment_id") == batch["segment"]
-                and result.get("reason") == "capture_disabled"
+                and result.get("reason") in {"capture_disabled", "deleted"}
             ):
-                return {"status": "capture_disabled"}
-            if (
-                isinstance(result, dict)
-                and result.get("segment_id") == batch["segment"]
-                and result.get("reason") == "expired"
-                and aware_time(result.get("expires_at")) is not None
-            ):
-                return {"status": result["reason"], "expires_at": result["expires_at"]}
+                return {"status": result["reason"]}
             return False
         if exc.code in {401, 403}:
             return "forbidden"
@@ -1119,79 +1109,16 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
         and result.get("segment_id") == batch["segment"]
         and result.get("accepted_events") == len(json.loads(batch["event_ids"]))
         and conversation_id(result.get("conversation_id")) is not None
-        and aware_time(result.get("expires_at")) is not None
+        and "expires_at" in result
+        and (result["expires_at"] is None or aware_time(result["expires_at"]) is not None)
     )
     return {"status": "accepted", "expires_at": result["expires_at"]} if accepted else False
 
 
-def retire_segment(db, segment_id, expires_at):
-    """Erase old content; an expiry can preserve a proven fresh user-turn suffix."""
+def retire_segment(db, segment_id):
+    """Erase a terminal segment without replaying any of its queued content."""
     db.execute("BEGIN IMMEDIATE")
     state = load_state(db)
-    expiry = aware_time(expires_at)
-    if expiry:
-        rows = db.execute(
-            "SELECT id,sequence,body,host_timestamp FROM events WHERE segment=? ORDER BY sequence",
-            (segment_id,),
-        ).fetchall()
-        fresh = next(
-            (
-                row
-                for row in rows
-                if row["host_timestamp"]
-                and (event := json.loads(row["body"]))["kind"] == "user"
-                and (occurred := aware_time(event["occurred_at"])) is not None
-                and occurred >= expiry
-            ),
-            None,
-        )
-        if fresh:
-            old = db.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
-            replacement = renewal_segment(segment_id, fresh["id"])
-            title = json.loads(fresh["body"])["content"][:200]
-            db.execute(
-                "INSERT OR IGNORE INTO segments(id,owner,context,generation,title) VALUES (?,?,?,?,?)",
-                (
-                    replacement,
-                    old["owner"],
-                    old["context"],
-                    old["generation"],
-                    title,
-                ),
-            )
-            db.execute(
-                "UPDATE events SET segment=? WHERE segment=? AND sequence>=?",
-                (replacement, segment_id, fresh["sequence"]),
-            )
-            db.execute(
-                "UPDATE anchors SET segment=? WHERE event_id IN (SELECT id FROM events WHERE segment=?)",
-                (replacement, replacement),
-            )
-            tail = state.get("tail")
-            if (
-                tail
-                and db.execute(
-                    "SELECT 1 FROM events WHERE id=? AND segment=?",
-                    (tail["event_id"], replacement),
-                ).fetchone()
-            ):
-                tail["segment"] = replacement
-            for name in ("segment", "candidate_segment", "title_segment"):
-                if state.get(name) == segment_id:
-                    state[name] = replacement
-            if state.get("title_segment") == replacement:
-                state["title"] = title
-        # A prompt checkpoint may precede its concurrent hook receipt. Preserve
-        # that fresh provisional turn so its own receipt can still authorize it.
-        turn_time = aware_time(state.get("turn_occurred_at"))
-        if (
-            state.get("candidate_segment") == segment_id
-            and state.get("awaiting_marker")
-            and not state.get("ambiguous")
-            and turn_time
-            and turn_time >= expiry
-        ):
-            state.update(candidate_segment=None, candidate_scope=None)
     db.execute("DELETE FROM events WHERE segment=?", (segment_id,))
     db.execute("DELETE FROM anchors WHERE segment=?", (segment_id,))
     db.execute("DELETE FROM batches WHERE segment=?", (segment_id,))
@@ -1199,7 +1126,13 @@ def retire_segment(db, segment_id, expires_at):
     if state.get("title_segment") == segment_id:
         state.update(title="", title_segment=None)
     if state.get("segment") == segment_id or state.get("candidate_segment") == segment_id:
+        db.execute(
+            "DELETE FROM events WHERE segment IS NULL AND turn_group=?",
+            (state.get("turn_group"),),
+        )
         state.update(
+            tail=None,
+            fork_parent=None,
             segment=None,
             scope=None,
             candidate_segment=None,
@@ -1231,16 +1164,8 @@ def flush(db, configured, client, session, endpoint, deadline):
             if batch is None:
                 continue
             outcome = upload(batch, key, endpoint, remaining)
-            if isinstance(outcome, dict) and outcome["status"] == "capture_disabled":
-                retire_segment(db, segment["id"], None)
-                progressed = True
-                continue
-            if isinstance(outcome, dict) and outcome["status"] == "expired":
-                retire_segment(
-                    db,
-                    segment["id"],
-                    outcome["expires_at"],
-                )
+            if isinstance(outcome, dict) and outcome["status"] in {"capture_disabled", "deleted"}:
+                retire_segment(db, segment["id"])
                 progressed = True
                 continue
             if outcome == "forbidden":

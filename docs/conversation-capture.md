@@ -2,8 +2,9 @@
 
 Capture saves new visible work as ordered `TranscriptTurn` nodes in the selected
 context's Neo4j database. Postgres owns consent, upload receipts and temporary
-staging. Saved conversations are visible to context members through the existing
-search/read tools. Installing the plugin alone never enables sharing.
+staging. Saved conversations are visible to context members through Sources and the
+Context viewer. Existing agent search/read tools support them; agent searches
+include transcripts only when explicitly requested. Installing the plugin alone never enables sharing.
 
 ## Connect an installation
 
@@ -24,7 +25,9 @@ the agent or browser approval page.
 The helper remembers displayed offers. A decline suppresses prompts across devices;
 a dismissed offer does not reopen on every prompt. After the server confirms that
 an unanswered offer expired, a later conversation can offer it again. An existing
-private claim survives new conversations and consent changes while polling retries.
+private claim survives new conversations, context switches and consent changes
+while polling retries. Another context waits for that claim to finish; its
+approval cannot replace the pending secret.
 Either explicit signed-in browser
 choice links the helper: Approve enables sharing, while Deny keeps sharing off.
 The helper privately exchanges its one-time secret and stores a scoped credential
@@ -44,8 +47,8 @@ The version-3 config stores account/client/context-scoped profiles under
 version-2 account profiles keep their previous consent until replaced by new
 pairing. Pairing migrates obsolete local credential entries without touching
 transcript spools. Context-scoped profiles coexist, so connecting another
-context cannot replace the first context's key. Older version-3 profiles without
-a context keep their existing scope until explicitly replaced.
+context cannot replace the first context's key. Older paired version-3 profiles without a context keep their existing scope
+until replaced; unpaired version-3 entries require pairing before capture can run.
 **Data → Connectors** shows a shared card per harness. It is Connected when any
 current member has linked a hook, even if everyone has sharing off. The people count
 expands current contributors. Your + becomes a cog when sharing is on. Both open the
@@ -71,13 +74,16 @@ revokes uploads, including queued retries. Re-pairing establishes a fresh
 baseline and cannot authorize an older key's backlog.
 
 This stage does not import historical conversations. An explicit history-import
-flow is separate work. Transcripts expire after 90 days; selected extracted
-company knowledge may remain unless explicitly withdrawn.
+flow is separate work. Transcripts remain until explicitly deleted. Turning
+sharing off can retain or delete your existing raw transcripts in that context;
+extracted company knowledge remains.
 
 ## What is saved
 
 - Visible user and assistant messages.
-- Tool names and visible text results; arbitrary tool arguments are excluded.
+- Tool names, inputs and visible text results. Codex function arguments and
+  custom-tool input, and Claude `tool_use.input`, pass through the same redaction
+  and truncation as message bodies. Missing input is not inferred from results.
 - Artifact references and attachment omission notices, without opening files.
 
 Reasoning, system/developer instructions, hook payloads and compaction internals
@@ -109,11 +115,18 @@ events, and separate empty `turn_end` events when completion is known.
 Codex supplies its native turn ID; Claude uses the initiating user message UUID.
 Older records without a usable native ID use the stable prompt event ID.
 Existing event IDs remain file-position based, so repeated identical text
-remains distinct. Tool arguments remain excluded.
+remains distinct. Input-bearing calls add `capture.tool_name` and put their input
+in the event's bounded `content`; older name-only calls keep their original shape.
+Empty input is distinct from missing input. Inputs never enter the identity
+metadata, and queued retry bytes and already acknowledged events remain unchanged.
+Release the backend accepting this additive name field before these hooks.
 
 Predecessors describe retained visible events, not every internal host record.
 They survive upload acknowledgement and resume. Account, context, consent,
-retention and unknown attribution boundaries break the chain. A plugin upgrade
+deletion and unknown attribution boundaries break the chain. A consent generation
+change within the same context waits for a fresh prompt. Switching contexts may
+change generation too; the selection result and subsequent work belong to the
+new context when its own current generation permits capture. A plugin upgrade
 preserves existing spool rows and exact queued batch bytes; it never enriches
 already captured events or reconstructs older turns. Metadata starts with the
 next observed prompt. These references are client reports, not authorization
@@ -122,9 +135,9 @@ or server-authenticated evidence of a successful tool write.
 Codex forks can link to the exact `forked_from_ordinal_exclusive` boundary when
 that native record has a captured endpoint in this device's source spool.
 A content-free ordinal index survives acknowledgement, stays within the
-existing 16 MiB spool bound and is pruned on later hooks after expiry/retirement.
-The new prompt must confirm the same account, context and consent generation;
-the source must have a known, unexpired retention deadline. The adapter neither
+existing 16 MiB spool bound and is removed when a segment is retired.
+The new prompt must confirm the same account, context and consent generation.
+Stored legacy expiry dates do not rotate segments or invalidate fork anchors. The adapter neither
 reads the source transcript nor substitutes its latest head. This supports
 forks at captured messages inside a turn as well as completed turns.
 
@@ -159,7 +172,7 @@ remain unchanged; SessionEnd still uses its shorter best-effort budget.
 
 Saved transcripts remain **until explicitly deleted**; they do not expire after
 90 days. Deletion erases raw content and keeps content-free tombstones against retry
-resurrection. Members can remove their own transcripts through the reader or the
+resurrection. Members can remove their own transcripts through Sources or the
 connector's stop-sharing-and-delete choice. Extracted company knowledge remains.
 Account/context deletion also removes its stored content.
 
@@ -170,14 +183,17 @@ Cowork, ordinary chat tabs, Windows and ephemeral sessions without a local
 transcript require separate verification. MCP connectivity does not prove capture.
 
 Package tests cover credential import, private storage, client/consent boundaries,
-retry, expiry and no-backfill behavior. Synthetic installed-client probes are
-in [client-probes.md](client-probes.md). Live authenticated personal-settings
-setup, fresh installation, updates and resumed sessions remain release checks.
+retry, deletion, indefinite retention and no-backfill behavior. Synthetic installed-client probes are
+in [client-probes.md](client-probes.md). Live browser approval, Connector settings, fresh installation, updates and
+resumed sessions remain release checks.
 Deploy the companion app/API/MCP/scheduler before publishing the plugin feature.
-This turn-metadata candidate specifically requires #973's additive database
-column and compatible upload service to be deployed before plugin publication.
-Transcript content still goes to Postgres in this stage; Neo4j storage,
-retrieval, successful-write links and extraction remain separate PRs.
+The compatible application must include the complete transcript stack through
+[Pensieve #986](https://github.com/pensieve-io/Pensieve/pull/986), including
+`capture.tool_name`, nullable receipt expiry, deletion tombstones, remembered
+harness consent and private pairing. See [release order](../CONTRIBUTING.md#release-order).
+Neo4j turn storage, retrieval, verified write links, extraction and conversation
+naming are application responsibilities; the plugin supplies native identities
+and new visible events.
 
 ### Nested Codex write calls
 

@@ -200,7 +200,10 @@ def test_unanswered_offer_retries_only_in_a_later_conversation_after_server_expi
     assert start.call_count == opened.call_count == 2
 
 
-def test_consent_change_cannot_replace_an_old_unclaimed_registration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pending_context", [497, 508])
+def test_consent_change_cannot_replace_an_old_unclaimed_registration(
+    tmp_path, monkeypatch, pending_context
+):
     config, start, opened = setup(tmp_path, monkeypatch)
     path = transcript(tmp_path)
     payload = {"transcript_path": str(path)}
@@ -209,7 +212,7 @@ def test_consent_change_cannot_replace_an_old_unclaimed_registration(tmp_path, m
         onboarding.pairing_path(config, "codex"),
         {
             "expected_user_id": OWNER,
-            "expected_context_id": 497,
+            "expected_context_id": pending_context,
             "expires_at": "2000-01-01T00:00:00Z",
         },
     )

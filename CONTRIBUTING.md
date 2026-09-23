@@ -12,7 +12,7 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/scripts/conversation_capture.py`: opt-in visible-conversation capture,
   private retry state and separately authorized uploads. See
   [conversation-capture.md](docs/conversation-capture.md).
-- `pensieve/scripts/capture_onboarding.py`: automatic first-use approval and explicit retries from the context’s profile menu → Transcript sharing.
+- `pensieve/scripts/capture_onboarding.py`: automatic first-use approval with preferences managed in Data → Connectors.
 - `pensieve/scripts/capture_pairing.py`: private credential exchange completed by normal hooks; no manual setup command or setup skill is shipped.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
@@ -39,7 +39,7 @@ CI runs the package, receipt and capture tests on Python 3.9 and 3.12. The tests
 manifest paths, the MCP connection, the skill roster and the receipt helper's
 conversation identity, accepted-context and privacy boundaries. Capture tests
 also cover account/company isolation, disabled intervals, private storage,
-stable retry receipts, full-spool recovery and expiry tombstones. Keep the README
+stable retry receipts, full-spool recovery, indefinite receipts and deletion tombstones. Keep the README
 roster current when adding or removing a skill.
 
 Use native host metadata. Codex's `interface` supplies artwork, descriptions,
@@ -65,18 +65,15 @@ behaviour separately from live OAuth and desktop checks.
 
 ## Release order
 
-Turn-aware capture additionally requires
-[Pensieve #973](https://github.com/pensieve-io/pensieve/pull/973), including its
-nullable capture column and upload-contract deployment. Older services reject
-the new event fields. Keep this adapter candidate in draft until that deployment
-and live acceptance are recorded. Local/synthetic tests do not publish it.
-
-Conversation capture requires standalone Pensieve PR #886, including the upload
-route, consent generations, personal settings and account-scoped device keys.
-It has no transcript retrieval or task-ledger dependency.
-Keep the capture PR in draft until that compatible service is deployed and
-live client acceptance is recorded. Installing this candidate remains capture-off
-without both server-side opt-in and a private account credential.
+The transcript stack requires the complete application contract through
+[Pensieve #986](https://github.com/pensieve-io/Pensieve/pull/986): turn metadata
+(including `capture.tool_name`), nullable receipt expiry, deletion tombstones,
+user/context/harness consent, and browser pairing with private credential exchange.
+Older services reject new event fields and do not provide the pairing flow.
+Merging application code does not deploy these changes. Release the compatible
+app/API/MCP and its additive schema before distributing the plugin update, then
+record authenticated fresh-install and existing-install acceptance. Local package
+and synthetic client tests do not prove hosted compatibility.
 
 The first hooks release requires the server-side work from Pensieve PR #881.
 Keep the hooks PR in draft until these checks are complete:
@@ -108,8 +105,13 @@ Local/synthetic package tests need no application release. Live tests against
 `mcp.pensieve.uk` require the compatible backend to be released first. A staging
 test can run earlier with a disposable package: change `.mcp.json` and the
 helper's `DELIVERY_ENDPOINT` constant to the staging MCP and receipt URLs.
-For capture, also change `UPLOAD_ENDPOINT` in the disposable helper and use a
-staging-issued upload-only key kept in its private test config.
+For capture, also change `conversation_capture.UPLOAD_ENDPOINT` and
+`capture_pairing.API_BASE` in that disposable copy. Change the fixed approval
+host checked by `capture_pairing.validate_pending` from `app.pensieve.uk` to the
+staging app host so staging-issued browser links can be accepted. Use the staging
+pairing flow to install its upload-only key in an isolated private test config.
+Do not point any part of this disposable setup at production; check all five
+locations before running the hooks.
 Passing a staging URL to `--endpoint` alone is rejected; that override accepts
 only the fixed service URL or HTTP loopback. Production endpoints in the
 shipped package stay fixed.

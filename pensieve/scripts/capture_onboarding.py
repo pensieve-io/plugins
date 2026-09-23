@@ -107,16 +107,9 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
         # Poll runs before onboarding. Until the server discards this offer, it
         # may be an accepted registration awaiting exchange after an offline
         # interval. Its browser deadline cannot justify replacing the claim.
-        if pairing_path(config, client).exists():
-            try:
-                pending = json.loads(private_file(pairing_path(config, client), MAX_CONFIG_BYTES))
-                if (
-                    pending.get("expected_user_id") == owner
-                    and pending.get("expected_context_id") == context
-                ):
-                    return
-            except (ValueError, KeyError, TypeError):
-                pass
+        pending = pairing_path(config, client)
+        if pending.exists() or pending.is_symlink():
+            return
         if previous.get("offered") and not changed and previous.get("session") == session:
             return
         if not changed and previous.get("retry_at", 0) > time.time():
@@ -136,7 +129,6 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
             client,
             expected_user_id=owner,
             expected_context_id=context,
-            restart=changed,
             timeout=0.5,
         )
         if result["status"] == "awaiting_approval":
