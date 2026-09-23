@@ -14,6 +14,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 
+import capture_adapters
+import capture_state
 import conversation_capture as capture
 import pytest
 
@@ -321,7 +323,7 @@ def test_tool_inputs_are_captured_redacted_bounded_and_retry_stable(
     assert "Find onboarding evidence 👋" in saved["content"]
     assert "synthetic-password" not in saved["content"] and KEY not in saved["content"]
     assert "[REDACTED_SECRET]" in saved["content"]
-    assert len(saved["content"]) <= capture.MAX_EVENT_CHARS
+    assert len(saved["content"]) <= capture_state.MAX_EVENT_CHARS
     assert saved["truncated"] is large
     assert "query" not in saved["capture"]
     before = json.dumps(events(calls), sort_keys=True)
@@ -333,10 +335,10 @@ def test_tool_inputs_are_captured_redacted_bounded_and_retry_stable(
     "value", ["", {}, [], 0, False, None, "*** Begin Patch\nhello\n*** End Patch"]
 )
 def test_tool_input_preserves_empty_scalar_and_freeform_values(value):
-    call = capture.tool_call("apply_patch", "c", {"input": value}, "input")
+    call = capture_adapters.tool_call("apply_patch", "c", {"input": value}, "input")
     assert call["tool_name"] == "apply_patch"
     assert call["content"] == (value if isinstance(value, str) else json.dumps(value, indent=2))
-    assert "tool_name" not in capture.tool_call("read", "c", {}, "input")
+    assert "tool_name" not in capture_adapters.tool_call("read", "c", {}, "input")
 
 
 @pytest.mark.parametrize(
@@ -546,6 +548,22 @@ def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def do_GET(self):
+            raw = json.dumps(
+                {
+                    "protocol_version": 1,
+                    "service": "upload",
+                    "clients": ["codex", "claude"],
+                    "max_batch_bytes": 262144,
+                    "max_events": 100,
+                    "max_content_chars": 32000,
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
 
         def do_POST(self):
             # The production edge rejects urllib's generic default agent.
@@ -1028,7 +1046,7 @@ def test_batch_size_event_limit_and_explicit_content_truncation(tmp_path, monkey
     )
     truncated = [event for event in events(calls) if event["truncated"]]
     assert len(truncated) == 7
-    assert all(len(event["content"]) == capture.MAX_EVENT_CHARS for event in truncated)
+    assert all(len(event["content"]) == capture_state.MAX_EVENT_CHARS for event in truncated)
     assert len(events(calls)) == 113
 
 
@@ -1788,7 +1806,7 @@ def test_new_opt_in_generation_during_selection_waits_for_fresh_prompt(tmp_path,
     capture.apply_item(
         db,
         state_value,
-        {"boundary": boundary},
+        {"kind": "attribution", "marker": boundary},
         "selection",
         NOW,
         "codex",
@@ -1816,7 +1834,7 @@ def test_new_opt_in_generation_during_selection_waits_for_fresh_prompt(tmp_path,
     ],
 )
 def test_quoted_credential_fields_are_redacted(content, secret):
-    cleaned, _ = capture.clean_content(content, [])
+    cleaned, _ = capture_state.clean_content(content, [])
     assert secret not in cleaned
     assert "[REDACTED_SECRET]" in cleaned
 
@@ -2025,6 +2043,9 @@ def test_recovery_skips_malformed_spool_without_stranding_healthy_backlog(tmp_pa
 
 @pytest.fixture
 def upload_transport(monkeypatch):
+    # These cases exercise receipt validation; protocol negotiation is covered
+    # separately against a real HTTP fixture.
+    monkeypatch.setattr(capture, "check", lambda *args: "compatible")
     response = {"status": 200, "overrides": {}, "omit": [], "requests": []}
 
     class Opener:
@@ -2231,6 +2252,84 @@ def test_missing_claude_baseline_remembers_credential_scopes(tmp_path, monkeypat
     assert [e["content"] for e in events(calls)] == ["After pairing", "New answer"]
 
 
+def test_new_claude_file_after_old_revocation_captures_first_authorised_turn(tmp_path, monkeypatch):
+    path = tmp_path / "new-transcript.jsonl"
+    state = tmp_path / "spool"
+    keys = {f"{OWNER}:497": KEY}
+    calls = []
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+    for configured in (keys, {}, keys):
+        capture.observe_credentials(state, "claude", configured)
+
+    def run():
+        capture.capture_session(
+            "claude",
+            SESSION,
+            str(path),
+            keys,
+            state,
+            capture.UPLOAD_ENDPOINT,
+            time.monotonic() + 2,
+            allow_new_file=True,
+        )
+
+    run()
+    append(path, user(client="claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    assert [e["content"] for e in events(calls)] == ["Visible question", "Visible answer"]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("preserved", [False, True])
+def test_dormant_scope_after_partial_removal_respects_effective_credentials(
+    tmp_path, monkeypatch, client, legacy, preserved
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    keys = {OWNER: OTHER_KEY, f"{OWNER}:497": KEY}
+    monkeypatch.setattr(capture, "profiles", lambda *args: dict(keys))
+    run()
+    append(path, user("Authorised prompt", client), hook_record(client))
+    run()
+    if legacy:
+        (state / f"credentials-{client}.json").unlink()
+        db = capture.connect_state(state, client, SESSION)
+        with db:
+            saved = capture.load_state(db)
+            saved.pop("observed_revocations")
+            capture.save_state(db, saved)
+        db.close()
+    original = dict(keys)
+    keys.pop(OWNER)
+    if not preserved:
+        keys.pop(f"{OWNER}:497")
+    keys[f"{OWNER}:12"] = OTHER_KEY
+
+    # A pathless SessionEnd records credentials but performs no recovery scan.
+    def observe_other():
+        capture.run_hook(
+            {"session_id": "f23bbd76-d864-4b8f-b252-c2b7c3692492", "hook_event_name": "SessionEnd"},
+            client,
+            cfg,
+            state,
+        )
+
+    observe_other()
+    append(path, assistant("Interval answer", client))
+    keys.clear()
+    keys.update(original)
+    observe_other()
+    run()
+    assert ("Interval answer" in [e["content"] for e in events(calls)]) is preserved
+    append(
+        path, user("Fresh prompt", client), hook_record(client), assistant("Fresh answer", client)
+    )
+    run()
+    assert events(calls)[-1]["content"] == "Fresh answer"
+
+
 @pytest.mark.parametrize("legacy_state", [False, True])
 def test_pathless_hook_observes_removal_before_same_key_is_restored(
     tmp_path, monkeypatch, legacy_state
@@ -2260,3 +2359,89 @@ def test_pathless_hook_observes_removal_before_same_key_is_restored(
     append(path, user("Fresh prompt"), hook_record(), assistant("Fresh answer"))
     run()
     assert [e["content"] for e in events(calls)][-2:] == ["Fresh prompt", "Fresh answer"]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_opt_out_survives_failed_source_read_and_same_key_restoration(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user(client=client), hook_record(client), assistant(client=client))
+    run()
+    old_config = cfg.read_bytes()
+    cfg.write_text(
+        json.dumps({"version": 2, "profiles": [{"user_id": OTHER_OWNER, "upload_key": OTHER_KEY}]})
+    )
+    missing = path.with_suffix(".missing")
+    path.rename(missing)
+    with pytest.raises(OSError):
+        run()
+    missing.rename(path)
+    cfg.write_bytes(old_config)
+    append(path, assistant("Disabled interval must stay private", client))
+    run()
+    assert "Disabled interval" not in str(events(calls))
+    append(
+        path, user("Fresh prompt", client), hook_record(client), assistant("Fresh answer", client)
+    )
+    run()
+    assert events(calls)[-1]["content"] == "Fresh answer"
+
+
+def test_legacy_state_upgrade_preserves_frozen_outbox(tmp_path, monkeypatch):
+    path, _, state, _, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run()
+    db = capture.connect_state(state, "codex", SESSION)
+    try:
+        before = [tuple(row) for row in db.execute("SELECT * FROM batches")]
+        saved = capture.load_state(db)
+        saved.pop("phase")
+        saved.update(saved.pop("adapter"))
+        saved.update(awaiting_marker=False, ambiguous=False, discard_until_prompt=False)
+        capture.save_state(db, saved)
+        db.commit()
+    finally:
+        db.close()
+    run()
+    db = capture.connect_state(state, "codex", SESSION)
+    try:
+        restored = capture.load_state(db)
+        assert restored["phase"] == "capturing" and "adapter" in restored
+        assert (
+            not {"awaiting_marker", "ambiguous", "discard_until_prompt", "turn_id", "calls"}
+            & restored.keys()
+        )
+        assert [tuple(row) for row in db.execute("SELECT * FROM batches")] == before
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize("all_off", [True, False])
+def test_other_session_remembers_disabled_scope_before_recovering_late_events(
+    tmp_path, monkeypatch, client, all_off
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user("Authorised prompt", client), hook_record(client))
+    run()
+    original = cfg.read_bytes()
+    cfg.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "profiles": [] if all_off else [{"user_id": OTHER_OWNER, "upload_key": OTHER_KEY}],
+            }
+        )
+    )
+    run_other_session(path, cfg, state, client)
+    append(path, assistant("Disabled interval answer", client))
+    cfg.write_bytes(original)
+    run_other_session(path, cfg, state, client)
+    assert "Disabled interval answer" not in str(events(calls))
+    append(
+        path, user("Fresh prompt", client), hook_record(client), assistant("Fresh answer", client)
+    )
+    run()
+    assert events(calls)[-1]["content"] == "Fresh answer"

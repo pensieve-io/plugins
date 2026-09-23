@@ -51,6 +51,18 @@ class ModelStub(BaseHTTPRequestHandler):
     def log_message(self, *_args: Any) -> None:
         pass
 
+    def do_GET(self) -> None:
+        self.reply_json(
+            {
+                "protocol_version": 1,
+                "service": "upload",
+                "clients": ["codex", "claude"],
+                "max_batch_bytes": 262144,
+                "max_events": 100,
+                "max_content_chars": 32000,
+            }
+        )
+
     def do_POST(self) -> None:
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         body = json.loads(raw)

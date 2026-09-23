@@ -14,7 +14,6 @@ import hashlib
 import ipaddress
 import json
 import os
-import re
 import sqlite3
 import stat
 import sys
@@ -26,8 +25,18 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_config import encoded, key_for, private_directory, profiles
-from context_receipt import accepted_contexts, conversation_id
+from capture_adapters import aware_time, normalise
+from capture_config import (
+    credential_revocations,
+    encoded,
+    key_for,
+    observe_credentials,
+    private_directory,
+    profiles,
+)
+from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
+from capture_state import apply_item, block, migrate_state, scope_revoked
+from context_receipt import conversation_id
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
 CONFIG_PATH = Path.home() / ".config/pensieve/capture.json"
@@ -35,441 +44,8 @@ STATE_PATH = Path.home() / ".local/state/pensieve/capture"
 MAX_INPUT_BYTES = 65536
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_SCAN_BYTES = 4 * 1024 * 1024
-MAX_EVENT_CHARS = 32000
-MAX_BATCH_BYTES = 262144
-MAX_BATCH_EVENTS = 100
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
-CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
-INTERNAL_MARKER = re.compile(
-    r"<!-- pensieve-(?:capture-context|capture-consent|capture-setup|delivery)\b.*?-->", re.DOTALL
-)
-SECRET = re.compile(
-    r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"
-    r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})|"
-    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|upload[_-]?key|poll[_-]?secret)"
-    r"[\"']?\s*[=:]\s*[\"']?[^\s\"',}]+)"
-)
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
-SET_CONTEXT_NAMES = {
-    "mcp__pensieve__set_context",
-    "mcp__plugin_pensieve_pensieve__set_context",
-    "mcp__plugin:pensieve:pensieve__set_context",
-}
-
-
-def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None:
-    matches = CONTEXT_MARKER.findall(text)
-    if len(matches) != 1:
-        return None
-    try:
-        marker = json.loads(matches[0])
-    except ValueError:
-        return None
-    if not isinstance(marker, dict) or set(marker) != {
-        "v",
-        "capture_generation",
-        "kind",
-        "user_id",
-        "client",
-        "conversation_id",
-        "context_id",
-        "turn_id",
-    }:
-        return None
-    context, turn = marker["context_id"], marker["turn_id"]
-    if (
-        marker["v"] != 2
-        or (
-            marker["capture_generation"] is not None
-            and conversation_id(marker["capture_generation"]) is None
-        )
-        or marker["kind"] != kind
-        or marker["client"] != client
-        or conversation_id(marker["conversation_id"]) != session
-        or conversation_id(marker["user_id"]) is None
-        or (context is not None and (type(context) is not int or context <= 0))
-        or (turn is not None and (not isinstance(turn, str) or not 0 < len(turn) <= 255))
-    ):
-        return None
-    return marker
-
-
-def clean_content(text: str, keys: list[str]) -> tuple[str, bool]:
-    text = INTERNAL_MARKER.sub("", text)
-    for key in keys:
-        text = text.replace(key, "[REDACTED_SECRET]")
-    text = SECRET.sub("[REDACTED_SECRET]", text)
-    # Do not upload inline binary attachments or PEM private keys.
-    text = re.sub(r"data:[^\s]+;base64,[A-Za-z0-9+/=]+", "[Inline attachment omitted]", text)
-    text = re.sub(
-        r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
-        "[REDACTED_SECRET]",
-        text,
-        flags=re.DOTALL,
-    )
-    if len(text) > MAX_EVENT_CHARS:
-        suffix = "\n[Content truncated by Pensieve capture]"
-        return text[: MAX_EVENT_CHARS - len(suffix)] + suffix, True
-    return text, False
-
-
-def visible_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") in {"text", "input_text", "output_text"} and isinstance(
-            item.get("text"), str
-        ):
-            parts.append(item["text"])
-        elif item.get("type") in {"image", "input_image", "image_url", "document", "audio"}:
-            parts.append("[Attachment omitted; original remains in the host conversation]")
-    return "\n".join(parts)
-
-
-def tool_call(name: str, call_id: object, source: dict, input_field: str) -> dict:
-    """Keep input in the bounded/redacted body, and only its name in metadata.
-
-    A missing input remains a legacy name-only call; an explicitly empty input
-    is still captured. Never derive inputs from results or completion-only events.
-    """
-    event = {"kind": "tool_call", "content": name[:255], "tool_call_id": call_id}
-    if input_field in source and capture_id(name[:255]):
-        value = source[input_field]
-        if input_field == "arguments" and isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except ValueError:
-                pass
-        event["content"] = (
-            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
-        )
-        event["tool_name"] = name[:255]
-    return event
-
-
-def aware_time(value: object) -> datetime | None:
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            if parsed.tzinfo is not None:
-                return parsed
-        except ValueError:
-            pass
-    return None
-
-
-def is_code_mode_tool(name: object, namespace: object) -> bool:
-    return isinstance(name, str) and name in {"exec", "wait"} and namespace in {None, "functions"}
-
-
-def is_set_context(name: object, namespace: object = None) -> bool:
-    return isinstance(name, str) and (
-        name in SET_CONTEXT_NAMES or (name == "set_context" and namespace == "mcp__pensieve")
-    )
-
-
-def is_hook_tool(name: object, namespace: object = None) -> bool:
-    return isinstance(name, str) and (
-        name in {name.replace("set_context", "context_briefing") for name in SET_CONTEXT_NAMES}
-        or (name == "context_briefing" and namespace == "mcp__pensieve")
-    )
-
-
-def capture_id(value: object) -> str | None:
-    if isinstance(value, str) and 0 < len(value) <= 255 and not re.search(r"[\s\x00]", value):
-        return value
-    return None
-
-
-def normalise(record: dict, client: str, session: str, state: dict) -> list[dict]:
-    """Return only allowed visible events and provenance-checked boundaries.
-
-    Source IDs are created by the caller from committed file position, so two
-    identical visible messages remain distinct. We never recurse through JSON
-    looking for text; reasoning and embedded instruction records stay local.
-    """
-    result = []
-    if client == "claude" and (
-        record.get("sessionId") != session or record.get("isSidechain") is not False
-    ):
-        return result
-    if client == "codex" and record.get("type") == "turn_context":
-        payload = record.get("payload", {})
-        if isinstance(payload, dict) and isinstance(payload.get("turn_id"), str):
-            if state.get("turn_id") != payload["turn_id"]:
-                state["nested_calls"] = {}
-            state["turn_id"] = payload["turn_id"]
-            state["pending_turn_id"] = payload["turn_id"]
-        return result
-    # Context receipts require accepted hook provenance, never text quoted by
-    # a user, assistant, tool, hook error, or nested compaction history.
-    for text in accepted_contexts(record, session, session, client):
-        marker = parse_marker(text, client, session, "prompt")
-        if marker:
-            result.append({"boundary": marker})
-    if result:
-        return result
-    payload = record.get("payload") if client == "codex" else record.get("message")
-    if client == "codex":
-        if not isinstance(payload, dict):
-            return []
-        if record.get("type") == "event_msg":
-            if payload.get("type") == "task_started":
-                if state.get("turn_id") != payload.get("turn_id"):
-                    state["nested_calls"] = {}
-                state["turn_id"] = capture_id(payload.get("turn_id"))
-                state["pending_turn_id"] = state["turn_id"]
-            if payload.get("type") == "thread_rolled_back":
-                # The discarded suffix remains captured, but is no longer the
-                # ancestor of new work. Do not link to its former head.
-                return [{"unknown_boundary": True}]
-            completion = {"task_complete": "completed", "turn_aborted": "interrupted"}.get(
-                payload.get("type")
-            )
-            if completion and payload.get("turn_id") == state.get("capture_turn_id"):
-                return [{"kind": "turn_end", "content": "", "completion": completion}]
-        if record.get("type") == "event_msg" and payload.get("type") == "user_message":
-            text = payload.get("message")
-            if isinstance(text, str):
-                return [
-                    {
-                        "kind": "user",
-                        "content": text,
-                        "new_turn": True,
-                        "native_turn_id": state.get("pending_turn_id"),
-                    }
-                ]
-        if record.get("type") == "event_msg" and payload.get("type") == "item_completed":
-            item = payload.get("item")
-            if (
-                payload.get("thread_id") == session
-                and payload.get("turn_id") == state.get("turn_id")
-                and isinstance(item, dict)
-                and item.get("type") == "McpToolCall"
-                and item.get("server") == "pensieve"
-                and item.get("tool")
-                in {
-                    "create_page",
-                    "edit_page",
-                    "move_page",
-                    "merge_pages",
-                    "delete_page",
-                    "save_data",
-                }
-                and item.get("status") in {"completed", "failed"}
-                and capture_id(item.get("id"))
-                and any(call.get("aggregate") for call in state.get("calls", {}).values())
-                and item["id"] not in state.get("calls", {})
-            ):
-                # Native nested calls are emitted at completion, not invocation.
-                # Retain identity only: concurrent context switches can make the
-                # result belong elsewhere. The server's receipt matching decides
-                # whether this call belongs to this captured context.
-                seen = state.setdefault("nested_calls", {})
-                if seen.get(item["id"]) == state.get("turn_id"):
-                    return []
-                seen[item["id"]] = state.get("turn_id")
-                return [
-                    {
-                        "kind": "tool_call",
-                        "content": "mcp__pensieve__" + item["tool"],
-                        "tool_call_id": item["id"],
-                    }
-                ]
-            if (
-                payload.get("thread_id") == session
-                and payload.get("turn_id") == state.get("turn_id")
-                and isinstance(item, dict)
-                and item.get("type") == "McpToolCall"
-                and item.get("server") == "pensieve"
-                and item.get("tool") == "set_context"
-                and item.get("status") == "completed"
-                and not state.get("calls", {}).get(item.get("id"), {}).get("selection")
-            ):
-                # Nested code-mode calls have native MCP provenance even though
-                # the model-visible call is only exec/wait. Never infer a
-                # selection from JavaScript source or its combined output.
-                output = item.get("result")
-                if not isinstance(output, dict) or output.get("isError"):
-                    return []
-                text = visible_text(output.get("content"))
-                marker = parse_marker(text, client, session, "selection")
-                if marker:
-                    return [
-                        {"boundary": marker},
-                        {"kind": "tool_result", "content": text, "tool_call_id": item.get("id")},
-                    ]
-                return [{"unknown_boundary": True}]
-            if (
-                payload.get("thread_id") == session
-                and isinstance(item, dict)
-                and item.get("type") == "UserMessage"
-                and isinstance(payload.get("turn_id"), str)
-            ):
-                state["turn_id"] = payload["turn_id"]
-                text = visible_text(item.get("content"))
-                return (
-                    [
-                        {
-                            "kind": "user",
-                            "content": text,
-                            "new_turn": True,
-                            "native_turn_id": payload["turn_id"],
-                        }
-                    ]
-                    if text
-                    else []
-                )
-        if record.get("type") != "response_item":
-            return []
-        kind = payload.get("type")
-        if kind == "message" and payload.get("role") == "assistant":
-            if payload.get("channel") not in {None, "commentary", "final"} or payload.get(
-                "phase"
-            ) not in {None, "commentary", "final_answer", "final"}:
-                return []
-            text = visible_text(payload.get("content"))
-            return [{"kind": "assistant", "content": text}] if text else []
-        if kind in {"function_call", "custom_tool_call"}:
-            call = payload.get("call_id")
-            internal = is_hook_tool(payload.get("name"), payload.get("namespace"))
-            if isinstance(call, str):
-                state.setdefault("calls", {})[call] = {
-                    "selection": is_set_context(payload.get("name"), payload.get("namespace")),
-                    "internal": internal,
-                    "aggregate": is_code_mode_tool(payload.get("name"), payload.get("namespace")),
-                }
-            if internal:
-                return []
-            name = payload.get("name")
-            return (
-                [
-                    tool_call(
-                        name, call, payload, "arguments" if kind == "function_call" else "input"
-                    )
-                ]
-                if isinstance(name, str)
-                else []
-            )
-        if kind in {"function_call_output", "custom_tool_call_output"}:
-            output = payload.get("output")
-            text = visible_text(output)
-            call = state.setdefault("calls", {}).pop(payload.get("call_id"), {})
-            if call.get("internal"):
-                return []
-            if call.get("aggregate"):
-                # One exec/wait result can combine calls made before and after
-                # a selection, including concurrent or yielded work. Its text
-                # has no single proven company; retain only an omission notice.
-                return [
-                    {
-                        "kind": "tool_result",
-                        "tool_call_id": payload.get("call_id"),
-                        "content": "[Combined code-mode tool output omitted; original remains in the host conversation]",
-                    }
-                ]
-            if call.get("selection"):
-                marker = parse_marker(text, client, session, "selection")
-                if marker:
-                    result.append({"boundary": marker})
-                else:
-                    # A selection result with no valid receipt could change
-                    # account/context; stop attributing later text to the old one.
-                    result.append({"unknown_boundary": True})
-            if text:
-                result.append(
-                    {"kind": "tool_result", "content": text, "tool_call_id": payload.get("call_id")}
-                )
-            return result
-        return []
-    if (
-        record.get("type") == "system"
-        and record.get("subtype") == "stop_hook_summary"
-        and record.get("stopReason") == ""
-        and record.get("preventedContinuation") is False
-        and record.get("hookErrors") == []
-        and state.get("claude_end_turn")
-    ):
-        return [{"kind": "turn_end", "content": "", "completion": "completed"}]
-    if (
-        record.get("isMeta") is True
-        or record.get("isCompactSummary") is True
-        or record.get("isVisibleInTranscriptOnly") is True
-        or not isinstance(payload, dict)
-    ):
-        return []
-    kind = record.get("type")
-    content = payload.get("content")
-    if kind == "assistant" and payload.get("role") == "assistant":
-        state["claude_end_turn"] = payload.get("stop_reason") == "end_turn"
-        text = visible_text(content)
-        if text:
-            result.append({"kind": "assistant", "content": text})
-        for item in content if isinstance(content, list) else []:
-            if isinstance(item, dict) and item.get("type") == "tool_use":
-                call, name = item.get("id"), item.get("name")
-                if isinstance(call, str) and isinstance(name, str):
-                    internal = is_hook_tool(name)
-                    state.setdefault("calls", {})[call] = {
-                        "selection": is_set_context(name),
-                        "internal": internal,
-                    }
-                    if not internal:
-                        result.append(tool_call(name, call, item, "input"))
-        return result
-    if kind != "user" or payload.get("role") != "user":
-        return []
-    blocks = content if isinstance(content, list) else []
-    tool_results = [
-        item for item in blocks if isinstance(item, dict) and item.get("type") == "tool_result"
-    ]
-    if not tool_results:
-        text = visible_text(content)
-        if (
-            "permissionMode" not in record
-            and "promptSource" not in record
-            and text.startswith(
-                ("<command-name>", "<local-command-stdout>", "<local-command-stderr>")
-            )
-        ):
-            # Claude's local /compact and /clear records are synthetic user
-            # messages without prompt provenance, not fresh model turns.
-            return []
-        return (
-            [
-                {
-                    "kind": "user",
-                    "content": text,
-                    "new_turn": True,
-                    "native_turn_id": record.get("uuid"),
-                }
-            ]
-            if text
-            else []
-        )
-    for item in tool_results:
-        text = visible_text(item.get("content"))
-        call = state.setdefault("calls", {}).pop(item.get("tool_use_id"), {})
-        if call.get("internal"):
-            continue
-        if call.get("selection"):
-            marker = (
-                None if item.get("is_error") else parse_marker(text, client, session, "selection")
-            )
-            if marker:
-                result.append({"boundary": marker})
-            elif not item.get("is_error"):
-                result.append({"unknown_boundary": True})
-        if text:
-            result.append(
-                {"kind": "tool_result", "content": text, "tool_call_id": item.get("tool_use_id")}
-            )
-    return result
 
 
 def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
@@ -505,6 +81,9 @@ def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
             sha TEXT NOT NULL, event_ids TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS anchors (
             ordinal INTEGER PRIMARY KEY, event_id TEXT NOT NULL, segment TEXT);
+        CREATE TABLE IF NOT EXISTS delivery (
+            segment TEXT PRIMARY KEY, status TEXT NOT NULL,
+            last_attempt_at TEXT NOT NULL, last_saved_at TEXT);
     """)
     return db
 
@@ -514,259 +93,12 @@ def load_state(db: sqlite3.Connection) -> dict:
     state = json.loads(row[0]) if row else {"offset": None, "sequence": 0, "calls": {}}
     if not isinstance(state, dict):
         raise ValueError("Capture state must be an object")
+    migrate_state(db, state)
     return state
 
 
 def save_state(db: sqlite3.Connection, state: dict) -> None:
     db.execute("INSERT OR REPLACE INTO state(id,body) VALUES (1,?)", (encoded(state).decode(),))
-
-
-def scope_authorised(state, configured, owner, context, offset):
-    key = key_for(configured, owner, context)
-    if key is None:
-        return False
-    fingerprint = hashlib.sha256(key.encode()).hexdigest()
-    return all(
-        offset >= cutover["offset"] or key_for(cutover["profiles"], owner, context) == fingerprint
-        for cutover in state.get("profile_cutovers", [])
-    )
-
-
-def apply_item(
-    db,
-    state,
-    item,
-    identity,
-    occurred_at,
-    client,
-    session,
-    configured,
-    host_timestamp,
-    source_offset=0,
-):
-    if item.get("new_turn"):
-        if state.get("awaiting_marker"):
-            state["tail"] = None
-            state["fork_parent"] = None
-        state.pop("pending_turn_id", None)
-        # A later turn can never authorise an earlier unmarked one.
-        db.execute("DELETE FROM events WHERE segment IS NULL")
-        state.update(
-            candidate_segment=state.get("segment"),
-            candidate_scope=state.get("scope"),
-            segment=None,
-            scope=None,
-            turn_group=identity,
-            turn_source_offset=source_offset,
-            awaiting_marker=True,
-            ambiguous=False,
-            discard_until_prompt=False,
-            turn_occurred_at=occurred_at if host_timestamp else None,
-            capture_turn_id=capture_id(item.get("native_turn_id")) or identity,
-            turn_closed=False,
-            claude_end_turn=False,
-        )
-    if item.get("unknown_boundary"):
-        db.execute("DELETE FROM events WHERE segment IS NULL")
-        state.update(
-            segment=None,
-            scope=None,
-            ambiguous=True,
-            awaiting_marker=False,
-            tail=None,
-            fork_parent=None,
-        )
-        return
-    marker = item.get("boundary")
-    if marker:
-        if marker["kind"] == "prompt":
-            if not state.get("awaiting_marker") or state.get("ambiguous"):
-                # Never apply a late/unpaired hook marker to another user turn.
-                return
-            if marker["turn_id"] is not None and marker["turn_id"] != state.get("turn_id"):
-                state.update(segment=None, scope=None, ambiguous=True, tail=None)
-                return
-            state["awaiting_marker"] = False
-        elif (
-            state.get("ambiguous")
-            or state.get("awaiting_marker")
-            or state.get("discard_until_prompt")
-        ):
-            return
-        owner, context = marker["user_id"], marker["context_id"]
-        generation = marker["capture_generation"]
-        previous = (
-            state.get("candidate_scope") if marker["kind"] == "prompt" else state.get("scope")
-        )
-        previous_segment = (
-            state.get("candidate_segment") if marker["kind"] == "prompt" else state.get("segment")
-        )
-        state.update(candidate_segment=None, candidate_scope=None)
-        if (
-            marker["kind"] == "selection"
-            and previous is not None
-            and previous[:2] == [owner, context]
-            and previous[2] != generation
-        ):
-            # A changed opt-in period cannot authorise the rest of an old turn.
-            # Wait for the next user prompt and its matching receipt.
-            state.update(segment=None, scope=None, discard_until_prompt=True, tail=None)
-            db.execute("DELETE FROM events WHERE segment IS NULL")
-            return
-        if marker["kind"] == "selection" and previous != [owner, context, generation]:
-            # The preceding prompt belongs to the previous company/account.
-            # A destination reached by a tool has no destination user title yet.
-            state.update(title="", title_segment=None)
-        state["scope"] = [owner, context, generation]
-        authorised_offset = (
-            state.get("turn_source_offset", source_offset)
-            if marker["kind"] == "prompt"
-            else source_offset
-        )
-        if (
-            context is None
-            or generation is None
-            or not scope_authorised(state, configured, owner, context, authorised_offset)
-        ):
-            state["segment"] = None
-            state["tail"] = None
-            state["fork_parent"] = None
-            state.update(title="", title_segment=None)
-            # An explicit disabled scope is not an upload backlog. Only its
-            # current provisional user row is removed, never acknowledged work.
-            if marker["kind"] == "prompt":
-                db.execute(
-                    "DELETE FROM events WHERE segment IS NULL AND turn_group=?",
-                    (state.get("turn_group"),),
-                )
-            return
-        if previous == [owner, context, generation] and previous_segment:
-            # A fresh marker restores the candidate; the prior scope alone
-            # never authorizes a new user turn. Resume keeps one segment.
-            segment = previous_segment
-        else:
-            segment = str(
-                uuid.uuid5(
-                    uuid.UUID(session), f"{client}:{owner}:{context}:{generation}:{identity}"
-                )
-            )
-        retired = db.execute("SELECT retired FROM segments WHERE id=?", (segment,)).fetchone()
-        if retired and retired[0]:
-            state.update(segment=None, scope=None, awaiting_marker=False, ambiguous=True, title="")
-            db.execute(
-                "DELETE FROM events WHERE segment IS NULL AND turn_group=?",
-                (state.get("turn_group"),),
-            )
-            return
-        state["segment"] = segment
-        state["title_segment"] = segment
-        db.execute(
-            "INSERT OR IGNORE INTO segments(id,owner,context,generation,title) VALUES (?,?,?,?,?)",
-            (segment, owner, context, generation, state.get("title", "")),
-        )
-        if marker["kind"] == "prompt":
-            # Only a provisional, never-uploaded prompt can be completed here.
-            # Existing queued events and exact-byte batches are immutable.
-            rows = db.execute(
-                "SELECT id,body FROM events WHERE segment IS NULL AND turn_group=? ORDER BY sequence",
-                (state.get("turn_group"),),
-            ).fetchall()
-            for row in rows:
-                event = json.loads(row["body"])
-                if "capture" in event:
-                    fork = state.pop("fork_parent", None)
-                    if fork and fork["scope"] == state["scope"]:
-                        event["capture"]["parent"] = fork["reference"]
-                    link_event(state, event, segment, session)
-                    db.execute(
-                        "UPDATE events SET body=? WHERE id=?", (encoded(event).decode(), row["id"])
-                    )
-                    db.execute(
-                        "UPDATE anchors SET segment=? WHERE event_id=?", (segment, row["id"])
-                    )
-            db.execute(
-                "UPDATE events SET segment=? WHERE segment IS NULL AND turn_group=?",
-                (segment, state.get("turn_group")),
-            )
-        return
-    if "kind" not in item:
-        return
-    scope = state.get("scope")
-    if scope and not scope_authorised(state, configured, scope[0], scope[1], source_offset):
-        state.update(segment=None, tail=None, fork_parent=None, discard_until_prompt=True)
-    if state.get("discard_until_prompt"):
-        return
-    if state.get("segment") is None and not state.get("awaiting_marker"):
-        # A baseline may begin mid-turn. Only an observed user prompt can
-        # wait provisionally for attribution; orphan outputs are never queued.
-        db.execute("DELETE FROM events WHERE segment IS NULL")
-        return
-    if item["kind"] != "user" and state.get("awaiting_marker"):
-        state["ambiguous"] = True
-    if state.get("ambiguous"):
-        state["tail"] = None
-        state["fork_parent"] = None
-        # Its own prompt receipt can no longer repair this turn. Keep no
-        # unuploadable text that could fill the spool and block future work.
-        db.execute("DELETE FROM events WHERE segment IS NULL")
-        return
-    # Only the current user prompt may wait provisionally for its own receipt.
-    # Known disabled scopes never retain transcript text.
-    if state.get("scope") is not None and state.get("segment") is None:
-        return
-    text, truncated = clean_content(item["content"], list(configured.values()))
-    if item["kind"] == "turn_end":
-        if not state.get("capture_turn_id") or state.get("turn_closed"):
-            return
-    elif not text and not item.get("tool_name"):
-        return
-    state["sequence"] += 1
-    event = {
-        "event_id": identity,
-        "sequence": state["sequence"],
-        "kind": item["kind"],
-        "content": text,
-        "occurred_at": occurred_at,
-        "truncated": truncated or item.get("truncated", False),
-    }
-    if state.get("capture_turn_id"):
-        event["capture"] = {"turn_id": state["capture_turn_id"]}
-        if call_id := capture_id(item.get("tool_call_id")):
-            event["capture"]["tool_call_id"] = call_id
-        if name := item.get("tool_name"):
-            event["capture"]["tool_name"] = name
-        if item["kind"] == "turn_end":
-            event["capture"]["completion"] = item["completion"]
-            state["turn_closed"] = True
-        if state.get("segment"):
-            link_event(state, event, state["segment"], session)
-    db.execute(
-        "INSERT OR IGNORE INTO events(id,sequence,turn_group,segment,body,host_timestamp) VALUES (?,?,?,?,?,?)",
-        (
-            identity,
-            state["sequence"],
-            state.get("turn_group"),
-            state.get("segment"),
-            encoded(event).decode(),
-            int(host_timestamp),
-        ),
-    )
-    if item["kind"] == "user":
-        state["title"] = text[:200]
-        state["title_segment"] = None
-    if state.get("segment"):
-        db.execute(
-            "UPDATE segments SET title=? WHERE id=? AND title=''",
-            (state.get("title", ""), state["segment"]),
-        )
-
-
-def link_event(state, event, segment, session):
-    """Link only to the previous retained event in this authorised portion."""
-    tail = state.get("tail")
-    if tail and tail["segment"] == segment:
-        event["capture"]["parent"] = {"host_conversation_id": session, "event_id": tail["event_id"]}
-    state["tail"] = {"segment": segment, "event_id": event["event_id"]}
 
 
 def fork_parent(db, metadata, session):
@@ -830,6 +162,14 @@ def scan(
     fingerprints = {
         owner: hashlib.sha256(key.encode()).hexdigest() for owner, key in configured.items()
     }
+    previous = state.get("profile_keys")
+    revocations = credential_revocations(
+        Path(db.execute("PRAGMA database_list").fetchone()["file"]).parent,
+        client,
+        legacy_profiles=previous
+        if state["offset"] is not None and "observed_revocations" not in state
+        else False,
+    )
     try:
         fd = os.open(
             path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -841,7 +181,11 @@ def scan(
             # proves there is no older content to import at this path. Remember
             # that empty baseline so the first Stop captures the first turn.
             state.update(
-                offset=0, path=str(path), awaiting_source_creation=True, profile_keys=fingerprints
+                offset=0,
+                path=str(path),
+                awaiting_source_creation=True,
+                profile_keys=fingerprints,
+                observed_revocations=revocations,
             )
             return
         raise
@@ -864,7 +208,29 @@ def scan(
         if state.get("awaiting_source_creation") and state.get("path") == str(path):
             state.pop("awaiting_source_creation")
             state["file_id"] = file_id
-        previous = state.get("profile_keys")
+        changed = [
+            scope
+            for scope, epoch in revocations.items()
+            if state.get("observed_revocations", {}).get(scope) != epoch
+        ]
+        if changed and state["offset"] is not None:
+            cutover = {
+                "offset": details.st_size,
+                "scopes": changed,
+                # Removing an owner-wide fallback does not revoke an explicit
+                # context credential that was unchanged throughout. Its own
+                # removal epoch still wins if it was removed and restored.
+                "preserved_scopes": [
+                    key
+                    for key, digest in (previous or {}).items()
+                    if ":" in key and fingerprints.get(key) == digest
+                ],
+            }
+            state.setdefault("revocation_cutovers", []).append(cutover)
+            scope = state.get("scope") or state.get("candidate_scope")
+            if scope and scope_revoked(cutover, scope[0], scope[1]):
+                block(db, state, "credential_removed")
+        state["observed_revocations"] = revocations
         if state["offset"] is not None and previous is not None and previous != fingerprints:
             # Only changed credentials start a new capture interval. Keep scanning
             # unread work for unaffected scopes, including across bounded scans.
@@ -875,16 +241,11 @@ def scan(
             if scope and key_for(previous, scope[0], scope[1]) != key_for(
                 fingerprints, scope[0], scope[1]
             ):
-                state.update(
-                    segment=None,
-                    candidate_segment=None,
-                    tail=None,
-                    fork_parent=None,
-                    discard_until_prompt=True,
-                )
+                block(db, state, "credential_changed")
         state["profile_keys"] = fingerprints
         if state["offset"] is None:
             state.pop("profile_cutovers", None)
+            state.pop("revocation_cutovers", None)
             # First invocation establishes a baseline; never import older work.
             # SessionStart installs this before the first user prompt on both hosts.
             handle.seek(max(0, details.st_size - MAX_RECORD_BYTES))
@@ -923,25 +284,9 @@ def scan(
                     # The skipped record could contain a prompt or selection.
                     # Keep accepted/pending work, but trust no later attribution
                     # until a fresh user prompt receives its own marker.
-                    db.execute("DELETE FROM events WHERE segment IS NULL")
+                    block(db, state, "oversized_record")
                     state.update(
-                        segment=None,
-                        scope=None,
-                        candidate_segment=None,
-                        candidate_scope=None,
-                        awaiting_marker=False,
-                        ambiguous=True,
-                        title="",
-                        title_segment=None,
-                        calls={},
-                        turn_id=None,
-                        turn_group=None,
-                        turn_occurred_at=None,
-                        discard_until_prompt=True,
-                        tail=None,
-                        capture_turn_id=None,
-                        pending_turn_id=None,
-                        fork_parent=None,
+                        adapter={}, turn_group=None, turn_occurred_at=None, capture_turn_id=None
                     )
                 # Never decode the skipped bytes. Checkpoint partial progress so
                 # even a record larger than one scan cannot wedge future turns.
@@ -958,11 +303,13 @@ def scan(
                 raise ValueError("invalid complete transcript record; capture paused") from None
             if isinstance(record, dict):
                 previous_state = copy.deepcopy(state)
-                items = normalise(record, client, session, state)
+                items = normalise(
+                    record, client, session, state["adapter"], state.get("capture_turn_id")
+                )
                 discards_unmarked = (
-                    state.get("awaiting_marker")
-                    and any(item.get("kind") not in {None, "user"} for item in items)
-                    and not any(item.get("boundary") for item in items)
+                    state.get("phase") == "awaiting_attribution"
+                    and any(item["kind"] not in {"attribution", "user"} for item in items)
+                    and not any(item["kind"] == "attribution" for item in items)
                 )
                 if items and not discards_unmarked:
                     # Reserve room for the exact-byte HTTP outbox even when
@@ -1018,15 +365,16 @@ def scan(
             # its write lock. A full spool rolls back the entire scan, so the
             # next invocation rereads those records without losing them.
 
-        state["profile_cutovers"] = [
-            cutover
-            for cutover in state.get("profile_cutovers", [])
-            if cutover["offset"] > state["offset"]
-            or (
-                state.get("awaiting_marker")
-                and state.get("turn_source_offset", 0) < cutover["offset"]
-            )
-        ]
+        for cutovers in ("profile_cutovers", "revocation_cutovers"):
+            state[cutovers] = [
+                cutover
+                for cutover in state.get(cutovers, [])
+                if cutover["offset"] > state["offset"]
+                or (
+                    state.get("phase") == "awaiting_attribution"
+                    and state.get("turn_source_offset", 0) < cutover["offset"]
+                )
+            ]
 
 
 def next_batch(db, segment, client, session):
@@ -1111,19 +459,25 @@ def checked_endpoint(endpoint: str) -> str:
 
 
 def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool | str:
+    endpoint = checked_endpoint(endpoint)
+    deadline = time.monotonic() + timeout
+    compatibility = check(endpoint, "upload", min(0.25, timeout / 2))
+    if compatibility != "compatible":
+        return {"status": compatibility}
     request = Request(
-        checked_endpoint(endpoint),
+        endpoint,
         data=batch["body"],
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer " + key,
             "User-Agent": "Pensieve-Plugin-Capture/1.0",
+            HEADER: str(VERSION),
         },
         method="POST",
     )
     opener = build_opener(ProxyHandler({}), NoRedirects())
     try:
-        with opener.open(request, timeout=timeout) as response:
+        with opener.open(request, timeout=max(0.05, deadline - time.monotonic())) as response:
             if response.status != 200:
                 return False
             result = json.loads(response.read(4097))
@@ -1142,6 +496,8 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
             return False
         if exc.code in {401, 403}:
             return "forbidden"
+        if exc.code == 426:
+            return {"status": "incompatible"}
         return False
     except (OSError, URLError, ValueError):
         return False
@@ -1169,23 +525,7 @@ def retire_segment(db, segment_id):
     if state.get("title_segment") == segment_id:
         state.update(title="", title_segment=None)
     if state.get("segment") == segment_id or state.get("candidate_segment") == segment_id:
-        db.execute(
-            "DELETE FROM events WHERE segment IS NULL AND turn_group=?",
-            (state.get("turn_group"),),
-        )
-        state.update(
-            tail=None,
-            fork_parent=None,
-            segment=None,
-            scope=None,
-            candidate_segment=None,
-            candidate_scope=None,
-            awaiting_marker=False,
-            ambiguous=True,
-            title="",
-            title_segment=None,
-            discard_until_prompt=True,
-        )
+        block(db, state, "segment_retired")
     save_state(db, state)
     db.commit()
 
@@ -1207,6 +547,19 @@ def flush(db, configured, client, session, endpoint, deadline):
             if batch is None:
                 continue
             outcome = upload(batch, key, endpoint, remaining)
+            status = (
+                outcome.get("status", "unavailable")
+                if isinstance(outcome, dict)
+                else ("forbidden" if outcome == "forbidden" else "unavailable")
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            db.execute(
+                """INSERT INTO delivery VALUES (?,?,?,?) ON CONFLICT(segment) DO UPDATE SET
+                   status=excluded.status,last_attempt_at=excluded.last_attempt_at,
+                   last_saved_at=coalesce(excluded.last_saved_at,delivery.last_saved_at)""",
+                (segment["id"], status, now, now if status == "accepted" else None),
+            )
+            db.commit()
             if isinstance(outcome, dict) and outcome["status"] in {"capture_disabled", "deleted"}:
                 retire_segment(db, segment["id"])
                 progressed = True
@@ -1215,6 +568,11 @@ def flush(db, configured, client, session, endpoint, deadline):
                 denied.add(scope)
                 continue
             if not isinstance(outcome, dict) or outcome["status"] != "accepted":
+                if status == "incompatible":
+                    print(
+                        "Pensieve capture waiting for a compatible service; queued work retained.",
+                        file=sys.stderr,
+                    )
                 return
             db.execute("BEGIN IMMEDIATE")
             db.execute(
@@ -1255,33 +613,11 @@ def capture_session(
         if disabled:
             # Observe removal even when this hook has no transcript path. A later
             # restoration of the same key must not capture the disabled interval.
-            state.update(
-                segment=None,
-                candidate_segment=None,
-                candidate_scope=None,
-                awaiting_marker=False,
-                ambiguous=True,
-                title="",
-                title_segment=None,
-            )
-        if state.pop("capture_paused", False):
-            state.update(
-                offset=None,
-                discarding_record=False,
-                segment=None,
-                scope=None,
-                candidate_segment=None,
-                candidate_scope=None,
-                awaiting_marker=False,
-                ambiguous=True,
-                title="",
-                title_segment=None,
-                calls={},
-                discard_until_prompt=True,
-                tail=None,
-                capture_turn_id=None,
-                pending_turn_id=None,
-            )
+            block(db, state, "credential_removed")
+        paused = state.pop("capture_paused", False)
+        if paused:
+            block(db, state, "capture_paused")
+            state.update(offset=None, discarding_record=False, adapter={}, capture_turn_id=None)
         if recover:
             path = state.get("path")
         if isinstance(path, str):
@@ -1303,6 +639,17 @@ def capture_session(
                 db.rollback()
                 db.execute("BEGIN IMMEDIATE")
                 state = load_state(db)
+                # A failed file read cannot undo a consent boundary observed by
+                # this hook. Otherwise restoring credentials could save work
+                # from the interval in which capture was disabled.
+                if disabled:
+                    block(db, state, "credential_removed")
+                if paused:
+                    block(db, state, "capture_paused")
+                    state.update(
+                        offset=None, discarding_record=False, adapter={}, capture_turn_id=None
+                    )
+                    state.pop("capture_paused", None)
                 source_error = exc
         save_state(db, state)
         db.commit()
@@ -1394,6 +741,7 @@ def run_hook(
     except (OSError, ValueError, KeyError, TypeError):
         pass
     configured = profiles(config, client)
+    observe_credentials(state_root, client, configured)
     if event != "SessionEnd":
         from capture_onboarding import offer_connection
 
@@ -1402,20 +750,8 @@ def run_hook(
         except (OSError, ValueError, KeyError, TypeError):
             pass  # Setup must never interrupt a conversation or an existing upload.
     if not configured:
-        # Capture-off must be remembered without scanning for capture events, or a
-        # later re-enable would scan and upload the disabled interval. Never
-        # create state for a session that has never enabled capture.
-        existing = state_root / f"{client}-{session}.sqlite3"
-        if existing.exists():
-            db = connect_state(state_root, client, session)
-            try:
-                db.execute("BEGIN IMMEDIATE")
-                state = load_state(db)
-                state["capture_paused"] = True
-                save_state(db, state)
-                db.commit()
-            finally:
-                db.close()
+        # The client-wide credential observation fences every spool, including
+        # dormant sessions beyond this hook's bounded recovery page.
         return {}
     # Plugin SessionEnd runs inside Claude's default 1.5s total budget and
     # Codex's 3s cap. Durability comes from earlier checkpoints, not this flush.
@@ -1437,6 +773,38 @@ def run_hook(
     return {}
 
 
+def saving_status(root: Path, client: str, session: str) -> dict:
+    """Inspect a known private spool without creating it or reading event bodies."""
+    path = root / f"{client}-{session}.sqlite3"
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {"status": "not_started", "segments": []}
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_uid != os.getuid()
+    ):
+        raise ValueError("Capture state must be an owned private file")
+    db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)
+    db.row_factory = sqlite3.Row
+    try:
+        # A pre-upgrade spool has no delivery evidence yet; do not invent it.
+        if not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='delivery'"
+        ).fetchone():
+            return {"status": "not_observed", "segments": []}
+        rows = db.execute(
+            """SELECT s.context,d.status,d.last_attempt_at,d.last_saved_at,
+                      (SELECT count(*) FROM events e WHERE e.segment=s.id) AS queued_events
+               FROM segments s LEFT JOIN delivery d ON d.segment=s.id
+               WHERE s.retired=0 ORDER BY s.rowid LIMIT 101"""
+        ).fetchall()
+        return {"segments": [dict(row) for row in rows[:100]], "truncated": len(rows) > 100}
+    finally:
+        db.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client", choices=("claude", "codex"), required=True)
@@ -1451,7 +819,18 @@ def main() -> None:
         default=Path(os.environ.get("PENSIEVE_CAPTURE_STATE", str(STATE_PATH))),
     )
     parser.add_argument("--endpoint", type=checked_endpoint, default=UPLOAD_ENDPOINT)
+    parser.add_argument(
+        "--status",
+        metavar="SESSION_ID",
+        help="Read local saving status for one known conversation; no transcript text or network calls",
+    )
     args = parser.parse_args()
+    if args.status is not None:
+        session = conversation_id(args.status)
+        if session is None:
+            parser.error("--status requires a native conversation UUID")
+        print(json.dumps(saving_status(args.state, args.client, session)))
+        return
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     try:
         payload = json.loads(raw) if len(raw) <= MAX_INPUT_BYTES else None

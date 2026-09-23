@@ -176,7 +176,18 @@ def run_probe(
             pass
 
         def do_GET(self) -> None:
-            payload = json.dumps({"models": []}).encode()
+            payload = json.dumps(
+                {
+                    "protocol_version": 1,
+                    "service": "upload",
+                    "clients": ["codex", "claude"],
+                    "max_batch_bytes": 262144,
+                    "max_events": 100,
+                    "max_content_chars": 32000,
+                }
+                if self.path == "/hooks/conversations/capabilities"
+                else {"models": []}
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
