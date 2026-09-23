@@ -12,7 +12,8 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/scripts/conversation_capture.py`: opt-in visible-conversation capture,
   private retry state and separately authorized uploads. See
   [conversation-capture.md](docs/conversation-capture.md).
-- `pensieve/scripts/capture_setup.py`: private import of the account-scoped setup file from personal settings.
+- `pensieve/scripts/capture_onboarding.py`: automatic first-use approval and explicit retries from Clients.
+- `pensieve/scripts/capture_pairing.py`: private credential exchange completed by normal hooks; no manual setup command or setup skill is shipped.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
 The application repository owns the hosted MCP implementation, authentication,

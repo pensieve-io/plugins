@@ -284,15 +284,3 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             "context_id": response["context_id"],
             "message": "Device paired. Capture and company contribution are controlled in Pensieve.",
         }
-
-
-def wait(config: Path, client: str, seconds: float) -> dict:
-    deadline = time.monotonic() + min(max(seconds, 0), 50)
-    while True:
-        result = poll(config, client, timeout=min(2, max(0.05, deadline - time.monotonic())))
-        if result["status"] not in {"awaiting_approval", "offline"}:
-            return result
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return result
-        time.sleep(min(1, remaining))

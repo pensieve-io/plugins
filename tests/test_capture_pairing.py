@@ -11,7 +11,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import capture_config as credentials
 import capture_pairing as pairing
-import capture_setup as setup
 import conversation_capture as capture
 import pytest
 
@@ -200,7 +199,7 @@ def test_obsolete_config_requires_reconnect_without_rewriting_or_reading_transcr
     credentials.save_private_json(config, {"version": version, "profiles": [obsolete]})
     before = config.read_bytes()
     for client in ("claude", "codex"):
-        with pytest.raises(credentials.ReconnectRequired, match="Reconnect through Conversations"):
+        with pytest.raises(credentials.ReconnectRequired, match="Reconnect through Clients"):
             credentials.profiles(config, client)
     monkeypatch.setattr(capture, "scan", lambda *a, **kw: pytest.fail("old setup read history"))
     monkeypatch.setattr(capture, "upload", lambda *a, **kw: pytest.fail("old setup uploaded"))
@@ -213,26 +212,6 @@ def test_obsolete_config_requires_reconnect_without_rewriting_or_reading_transcr
         )
     assert config.read_bytes() == before
     assert not (tmp_path / "spool").exists()
-
-
-@pytest.mark.parametrize("version", [3])
-@pytest.mark.parametrize("action", ["status"])
-def test_old_setup_has_actionable_secret_free_cli_status(
-    tmp_path, monkeypatch, capsys, version, action
-):
-    config = new_config(tmp_path)
-    obsolete = {"user_id": OWNER, "upload_key": KEY}
-    if version == 3:
-        obsolete.update(client="codex", installation_id=None, runtime="unknown", host_version="")
-    credentials.save_private_json(config, {"version": version, "profiles": [obsolete]})
-    monkeypatch.setattr("sys.argv", ["setup", action, "--client", "codex", "--config", str(config)])
-    setup.main()
-    output = capsys.readouterr().out
-    assert json.loads(output) == {
-        "status": "reconnect_required",
-        "message": "Reconnect through Conversations to save work with this app.",
-    }
-    assert KEY not in output
 
 
 @pytest.mark.parametrize("version", [2, 3])
@@ -294,29 +273,6 @@ def test_insecure_or_symlink_state_refuses_to_read_secrets(tmp_path, service):
 def test_pairing_never_sends_secrets_to_unapproved_endpoint(endpoint):
     with pytest.raises(ValueError):
         pairing.checked_base(endpoint)
-
-
-def test_cli_never_prints_response_credentials(tmp_path, service, monkeypatch, capsys):
-    config = new_config(tmp_path)
-    args = [
-        "setup",
-        "start",
-        "--client",
-        "codex",
-        "--config",
-        str(config),
-        "--endpoint",
-        service["base"],
-    ]
-    monkeypatch.setattr("sys.argv", args)
-    setup.main()
-    assert "verification_url" in capsys.readouterr().out
-    service["mode"] = "approved"
-    monkeypatch.setattr("sys.argv", ["setup", "poll", "--client", "codex", "--config", str(config)])
-    setup.main()
-    output = capsys.readouterr().out
-    assert json.loads(output)["status"] == "paired"
-    assert KEY not in output and POLL_SECRET not in output
 
 
 def test_hook_finishes_pairing_without_reading_or_backfilling_old_work(
