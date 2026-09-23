@@ -21,7 +21,7 @@ helper never reads the harness's OAuth credentials, and neither the upload key
 nor the temporary polling secret reaches the agent or browser approval page.
 
 The helper remembers that approval was offered; dismissal does not reopen the
-browser on every prompt. Clients requests last fifteen minutes and allow an
+browser on every prompt. Settings requests last fifteen minutes and allow an
 explicit retry. Offline first-use attempts retry at most once every five minutes.
 Approval starts only from accepted native hook records, never quoted markers in
 user messages or tool output. It reads a bounded transcript tail for attribution
@@ -39,7 +39,7 @@ pairing. Pairing migrates obsolete local credential entries without touching
 transcript spools. Context-scoped profiles coexist, so connecting another
 context cannot replace the first context's key. Older version-3 profiles without
 a context keep their existing scope until explicitly replaced.
-**Clients → Your conversation sharing** shows installations and last uploads.
+**Settings → Transcript sharing** shows installations and last uploads.
 Disconnect stops that installation's uploads and extraction; MCP tools remain
 connected. Use **Connect installation** to reconnect, then continue in the agent
 with that context selected. The old downloaded-file setup applies only to older plugins.

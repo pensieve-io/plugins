@@ -1,6 +1,6 @@
 """Offer browser consent once, using only authenticated native hook attribution.
 
-No transcript is uploaded here. An explicit request from Clients can offer
+No transcript is uploaded here. An explicit request from Settings → Transcript sharing can offer
 approval again after dismissal, expiry or disconnection.
 """
 

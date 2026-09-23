@@ -110,7 +110,7 @@ without rollover, including old-generation retries after re-enable. See
 
 ## Connection requests
 
-Clients can request a fresh browser approval through the authenticated application
+Settings can request a fresh browser approval through the authenticated application
 API. A separate `pensieve-capture-setup` comment precedes the unchanged version-2
 capture marker. It contains a request ID, user/client/context/conversation and
 expiry; it contains no credential and grants no sharing rights. The local helper
