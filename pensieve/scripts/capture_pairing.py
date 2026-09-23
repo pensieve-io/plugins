@@ -227,9 +227,8 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             pending = validate_pending(json.loads(private_file(path, MAX_CONFIG_BYTES)), client)
         except FileNotFoundError:
             return {"status": "no_pending_pairing"}
-        if timestamp(pending["expires_at"]) <= time.time():
-            path.unlink()
-            return {"status": "expired", "message": "Pairing expired. Start again."}
+        # Only unanswered browser offers expire. A signed-in choice leaves a
+        # private registration claim that can finish on a later hook, even off.
         if pending.get("next_poll_at", 0) > time.time():
             return public_status(pending)
         # Persist the rate limit before a network attempt; concurrent hooks and
@@ -252,7 +251,7 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             return {"status": "offline", "message": "Pairing will retry at the next agent hook."}
         if response.get("status") == "pending":
             return public_status(pending)
-        if response.get("status") != "approved":
+        if response.get("status") not in {"approved", "registered"}:
             return {"status": "offline", "message": "Pairing will retry at the next agent hook."}
         if not isinstance(response.get("context_id"), int) or isinstance(
             response["context_id"], bool

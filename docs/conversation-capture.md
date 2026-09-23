@@ -21,21 +21,23 @@ type and context. The remote MCP connection is unchanged. The helper never reads
 the harness's OAuth credentials, and neither upload key nor polling secret reaches
 the agent or browser approval page.
 
-The helper remembers displayed offers. A decline suppresses automatic offers across devices;
-a dismissed offer does not reopen on every prompt. Changing sharing off and back
-on in Data → Connectors starts a fresh generation and permits a new offer.
-With no connected key, the dialog's connection icon explicitly requests another
-approval offer, including after a decline. This request is valid for 15 minutes
-and never enables capture without browser approval.
-Offline first-use attempts retry at most once every five minutes.
-Approval starts only from accepted native hook records, never quoted markers in
-user messages or tool output. It reads a bounded transcript tail for attribution
-before consent, and uploads no transcript content until consent and fresh capture.
+The helper remembers displayed offers. A decline suppresses prompts across devices;
+a dismissed offer does not reopen on every prompt. After the server confirms that
+an unanswered offer expired, a later conversation can offer it again. An existing
+private claim survives new conversations and consent changes while polling retries.
+Either explicit signed-in browser
+choice links the helper: Approve enables sharing, while Deny keeps sharing off.
+The helper privately exchanges its one-time secret and stores a scoped credential
+even when declined. It captures no messages without a fresh enabled-consent marker,
+and the server independently rejects uploads while sharing is off.
 
-Pairing expires after ten minutes. Ordinary hooks finish pending approval
-without a background service. If the one-time exchange succeeds at the server
-but its response is lost, start fresh approval; a consumed key is not returned
-again. `paired` proves local setup, not successful capture.
+Unanswered browser offers expire after ten minutes. Accepted registrations remain
+claimable after an offline interval, until consumed or invalidated by account
+withdrawal. The helper polls the server before discarding an old offer so an accepted
+Deny is not mistaken for an expired request. A consumed credential is never returned
+a second time. `paired` means the hook is linked, not that transcript saving is on.
+Offline first-use attempts retry at most once every five minutes. Onboarding reads
+only accepted native attribution, never a quoted marker in a user or tool message.
 
 The version-3 config stores account/client/context-scoped profiles under
 `~/.config/pensieve/capture.json` (mode `0600`, private directory `0700`). Existing
@@ -44,14 +46,15 @@ pairing. Pairing migrates obsolete local credential entries without touching
 transcript spools. Context-scoped profiles coexist, so connecting another
 context cannot replace the first context's key. Older version-3 profiles without
 a context keep their existing scope until explicitly replaced.
-**Data → Connectors** shows one shared card per harness. It is Connected when
-any member is sharing, otherwise Available. Configure or Add yours changes only
-your preference in this context; the people count expands to list contributors.
-With no connected uploader, the switch and Save are disabled. The modal links to
-plugin setup and its connection icon requests browser approval from the next hook.
-Continue in your agent with the same context selected to finish connecting. Turning off
-stops your uploads and extraction across installations; MCP access and other
-members' sharing are unchanged. Existing private credentials can be reused.
+**Data → Connectors** shows a shared card per harness. It is Connected when any
+current member has linked a hook, even if everyone has sharing off. The people count
+expands current contributors. Your + becomes a cog when sharing is on. Both open the
+same modal, changing only your user/context/harness preference. Without a registered
+hook, the toggle and Save are disabled with a plugin-setup tooltip and docs link.
+After either initial browser choice, you can change sharing directly with the toggle
+and Save. No separate connection button or repeat approval is needed. Turning off
+stops your uploads and extraction across installations; your hook stays linked,
+MCP access and other members' sharing stay unchanged, and enabling starts fresh.
 
 Keys cannot read transcripts or call MCP tools. The server checks client,
 context, membership, current consent generation and key status on every batch.
@@ -154,13 +157,11 @@ Each upload may use the remaining hook budget, so ordinary hosted receipt
 latency does not pin the queue to an already accepted batch. The host deadlines
 remain unchanged; SessionEnd still uses its shorter best-effort budget.
 
-Each portion expires **90 days after its first accepted upload**; resume does
-not extend it. The server erases bodies, titles and receipts, retaining only
-content-free tombstones against retry resurrection. A fresh post-expiry user
-turn can begin a new portion of the same conversation. If expiry is discovered
-while work is queued, only a host-timestamped post-expiry turn can roll over.
-Account/context deletion removes its stored content. The pilot has no individual
-transcript delete action.
+Saved transcripts remain **until explicitly deleted**; they do not expire after
+90 days. Deletion erases raw content and keeps content-free tombstones against retry
+resurrection. Members can remove their own transcripts through the reader or the
+connector's stop-sharing-and-delete choice. Extracted company knowledge remains.
+Account/context deletion also removes its stored content.
 
 ## Supported clients and verification
 
@@ -195,12 +196,10 @@ remain immutable; this adds no backfill and changes no existing retry bytes.
 
 ### Remembered harness preferences
 
-Consent belongs to a user, context and harness type. The server emits an
-attribution-matched `pensieve-capture-consent` marker with approved/declined/unknown
-status. Declined suppresses automatic offers on every installation; an explicit,
-unexpired connection request can reopen approval without granting consent. Unknown offers the
-browser choice once; re-enabling from Data → Connectors starts a fresh
-consent generation and permits recovery. Same-machine apps of one harness reuse
-`~/.config/pensieve/capture.json`. A new computer requires Connect using remembered
-consent; the public pairing URL cannot safely issue credentials merely by being
-visited. Cloud runtimes are not supported by this macOS-only onboarding helper.
+Consent belongs to a user, context and harness type. The authenticated native marker
+carries approved/declined/unknown status. Unknown offers the first browser screen;
+declined suppresses further offers. Once a private profile exists, changing the
+sharing preference never re-pairs it. Same-machine apps of one harness reuse
+`~/.config/pensieve/capture.json`. A new computer still requires Connect using a
+remembered approval; merely visiting a public pairing URL cannot authorise a helper.
+Cloud runtimes are not supported by this macOS-only onboarding helper.

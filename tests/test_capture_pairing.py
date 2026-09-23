@@ -48,9 +48,9 @@ def service():
             elif self.path.endswith("/exchange"):
                 assert body == {"poll_secret": POLL_SECRET}
                 mode = state["mode"]
-                if mode == "approved":
+                if mode in {"approved", "registered"}:
                     response = {
-                        "status": "approved",
+                        "status": mode,
                         "user_id": state["owner"],
                         "context_id": state["context"],
                         "installation_id": str(uuid.uuid4()),
@@ -165,15 +165,18 @@ def test_rejected_exchange_keeps_existing_credentials_and_requires_new_pairing(
     assert not pairing.pairing_path(config, "codex").exists()
 
 
-def test_expired_local_challenge_never_calls_exchange(tmp_path, service):
+def test_old_browser_offer_can_finish_a_declined_registration(tmp_path, service):
     config = new_config(tmp_path)
     start(config, service)
     path = pairing.pairing_path(config, "codex")
     pending = json.loads(path.read_text())
     pending["expires_at"] = "2000-01-01T00:00:00+00:00"
     credentials.save_private_json(path, pending)
-    assert pairing.poll(config, "codex")["status"] == "expired"
-    assert len(service["requests"]) == 1
+    service["mode"] = "registered"
+    assert pairing.poll(config, "codex")["status"] == "paired"
+    assert len(service["requests"]) == 2
+    assert credentials.profiles(config, "codex")
+    assert POLL_SECRET not in json.dumps(credentials.profiles(config, "codex"))
 
 
 def test_new_accounts_and_clients_do_not_overwrite_or_broaden_each_other(tmp_path, service):

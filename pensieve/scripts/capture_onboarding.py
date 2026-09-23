@@ -1,8 +1,8 @@
 """Offer browser consent once, using only authenticated native hook attribution.
 
 No transcript is uploaded here. A remembered decline suppresses onboarding on every
-installation unless the user explicitly requests connection from its connector
-dialog. This only reopens approval; it never enables sharing by itself.
+installation. A signed-in choice registers the helper even when sharing is off;
+subsequent changes happen directly in the context connector settings.
 """
 
 from __future__ import annotations
@@ -20,18 +20,15 @@ from capture_config import (
     private_file,
     private_lock,
     save_private_json,
-    valid_uuid,
 )
-from capture_pairing import pairing_path, start, timestamp
+from capture_pairing import pairing_path, start
 from context_receipt import accepted_contexts, compaction_boundary, json_object, transcript_tail
 from conversation_capture import parse_marker
 
 CONSENT_MARKER = re.compile(r"<!-- pensieve-capture-consent (\{[^\r\n]*?\}) -->")
 
-SETUP_MARKER = re.compile(r"<!-- pensieve-capture-setup (\{[^\r\n]*?\}) -->")
 
-
-def current_offer(path: object, client: str, session: str) -> tuple[dict, str | None] | None:
+def current_offer(path: object, client: str, session: str) -> dict | None:
     tail = transcript_tail(path)
     if tail is None:
         return None
@@ -66,24 +63,7 @@ def current_offer(path: object, client: str, session: str) -> tuple[dict, str | 
             ):
                 return None
             marker = dict(marker, consent=consent["status"])
-            request_id = None
-            matches = SETUP_MARKER.findall(content)
-            if len(matches) == 1:
-                try:
-                    request = json.loads(matches[0])
-                    if (
-                        isinstance(request, dict)
-                        and all(
-                            request.get(k) == marker[k]
-                            for k in ("user_id", "client", "context_id", "conversation_id")
-                        )
-                        and valid_uuid(request.get("id"))
-                        and timestamp(request.get("expires_at")) > time.time()
-                    ):
-                        request_id = request["id"]
-                except (ValueError, TypeError):
-                    pass
-            return marker, request_id
+            return marker
     return None
 
 
@@ -104,11 +84,11 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
     offer = current_offer(payload.get("transcript_path"), client, session)
     if offer is None:
         return
-    marker, request_id = offer
-    if marker["consent"] == "declined" and request_id is None:
+    marker = offer
+    if marker["consent"] == "declined":
         return
     owner, context = marker["user_id"], marker["context_id"]
-    if key_for(configured, owner, context) is not None and request_id is None:
+    if key_for(configured, owner, context) is not None:
         return
     identity = f"{client}:{owner}:{context}"
     path = config.with_name("capture-onboarding.json")
@@ -124,31 +104,30 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
             raise ValueError("Invalid onboarding state")
         generation = marker["capture_generation"]
         changed = previous.get("generation") != generation
-        # An already-approved pending claim may simply be waiting for its next
-        # poll. Do not replace that credential exchange when the marker changes.
-        if changed and pairing_path(config, client).exists():
+        # Poll runs before onboarding. Until the server discards this offer, it
+        # may be an accepted registration awaiting exchange after an offline
+        # interval. Its browser deadline cannot justify replacing the claim.
+        if pairing_path(config, client).exists():
             try:
                 pending = json.loads(private_file(pairing_path(config, client), MAX_CONFIG_BYTES))
                 if (
                     pending.get("expected_user_id") == owner
                     and pending.get("expected_context_id") == context
-                    and timestamp(pending["expires_at"]) > time.time()
                 ):
                     return
             except (ValueError, KeyError, TypeError):
                 pass
-        if (request_id is None and previous.get("offered") and not changed) or (
-            request_id is not None and previous.get("request_id") == request_id
-        ):
+        if previous.get("offered") and not changed and previous.get("session") == session:
             return
-        if request_id is None and not changed and previous.get("retry_at", 0) > time.time():
+        if not changed and previous.get("retry_at", 0) > time.time():
             return
         # Remember attempts before I/O. Offline first-use attempts may retry
-        # after five minutes; a displayed approval is never reopened unaided.
+        # after five minutes. An unanswered offer can retry in a later
+        # conversation after the server has discarded it, never every prompt.
         state[identity] = {
-            "offered": bool(previous.get("offered")) or request_id is not None,
-            "request_id": request_id,
+            "offered": bool(previous.get("offered")),
             "generation": generation,
+            "session": session,
             "retry_at": time.time() + 300,
         }
         save_private_json(path, state)
@@ -157,7 +136,7 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
             client,
             expected_user_id=owner,
             expected_context_id=context,
-            restart=request_id is not None or changed,
+            restart=changed,
             timeout=0.5,
         )
         if result["status"] == "awaiting_approval":

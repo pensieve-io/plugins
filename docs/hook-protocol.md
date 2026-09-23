@@ -108,15 +108,16 @@ without rollover, including old-generation retries after re-enable. See
 [capture setup and boundaries](conversation-capture.md).
 
 
-## Connection requests
+## Hook registration and sharing
 
-Older application clients can request a fresh browser approval through the
-authenticated connection-intent API. The current UI uses remembered harness/context
-preferences instead. A separate `pensieve-capture-setup` comment precedes the unchanged version-2
-capture marker. It contains a request ID, user/client/context/conversation and
-expiry; it contains no credential and grants no sharing rights. The local helper
-accepts it only in native hook context alongside matching attribution, offers
-each request once, and binds browser approval to that account and context.
-The ordinary native capture marker remains last for older helpers. Both marker
-types are removed from visible captured text. Browser pairing still requires a
-private poll secret and explicit authenticated consent. No setup skill remains.
+The first accepted native context hook offers browser setup for unknown consent.
+An explicit signed-in Approve or Deny registers the helper and sets sharing on
+or off respectively. The helper privately exchanges its one-time poll secret
+for the linked profile; a `registered` response is valid even while sharing is off.
+Only unanswered browser offers expire; after the server confirms expiry, a later
+conversation may offer setup again. A decline never triggers that retry, and an
+unclaimed registration is preserved while offline. Native consent markers and server upload
+admission independently require an enabled, current generation. The settings toggle
+changes the same preference without another approval screen. The obsolete
+connection-intent API and `pensieve-capture-setup` marker are no longer produced or
+used; older marker text is still stripped from visible captured messages.
