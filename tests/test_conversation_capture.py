@@ -2120,3 +2120,143 @@ def test_terminal_http_response_is_scoped_and_allows_only_new_work(
     assert [event["content"] for event in latest["events"]] == ["New prompt", "New response"]
     assert "parent" not in latest["events"][0]["capture"]
     assert pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize("bounded", [False, True])
+def test_pairing_another_context_preserves_authorised_backlog(
+    tmp_path, monkeypatch, client, bounded
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    keys = {f"{OWNER}:497": KEY}
+    monkeypatch.setattr(capture, "profiles", lambda *args: dict(keys))
+    run()
+    append(
+        path,
+        user("Existing context prompt", client),
+        hook_record(client),
+        assistant("Existing answer", client),
+    )
+    append(
+        path,
+        user("Unapproved context prompt", client),
+        hook_record(client, context=12),
+        assistant("Unapproved answer", client),
+    )
+    keys[f"{OWNER}:12"] = OTHER_KEY
+    if bounded:
+        monkeypatch.setattr(capture, "MAX_SCAN_BYTES", 800)
+    for _ in range(12):
+        run()
+    assert [e["content"] for e in events(calls)] == ["Existing context prompt", "Existing answer"]
+    append(
+        path,
+        user("New context prompt", client),
+        hook_record(client, context=12),
+        assistant("New answer", client),
+    )
+    for _ in range(12):
+        run()
+    assert [e["content"] for e in events(calls)] == [
+        "Existing context prompt",
+        "Existing answer",
+        "New context prompt",
+        "New answer",
+    ]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_pairing_does_not_authorise_an_already_read_provisional_prompt(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    keys = {f"{OWNER}:497": KEY}
+    monkeypatch.setattr(capture, "profiles", lambda *args: dict(keys))
+    run()
+    append(path, user("Before pairing", client))
+    run()
+    keys[f"{OWNER}:12"] = OTHER_KEY
+    run()
+    append(path, hook_record(client, context=12), assistant("Old answer", client))
+    run()
+    assert events(calls) == []
+    append(
+        path,
+        user("After pairing", client),
+        hook_record(client, context=12),
+        assistant("New answer", client),
+    )
+    run()
+    assert [e["content"] for e in events(calls)] == ["After pairing", "New answer"]
+
+
+def test_missing_claude_baseline_remembers_credential_scopes(tmp_path, monkeypatch):
+    path = tmp_path / "new-transcript.jsonl"
+    state = tmp_path / "spool"
+    keys = {f"{OWNER}:497": KEY}
+    calls = []
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, key, *args: calls.append((dict(batch), key)) or ACCEPTED
+    )
+
+    def run():
+        capture.capture_session(
+            "claude",
+            SESSION,
+            str(path),
+            keys,
+            state,
+            capture.UPLOAD_ENDPOINT,
+            time.monotonic() + 2,
+            allow_new_file=True,
+        )
+
+    run()
+    append(
+        path,
+        user("Before pairing", "claude"),
+        hook_record("claude", context=12),
+        assistant("Old answer", "claude"),
+    )
+    keys[f"{OWNER}:12"] = OTHER_KEY
+    run()
+    assert events(calls) == []
+    append(
+        path,
+        user("After pairing", "claude"),
+        hook_record("claude", context=12),
+        assistant("New answer", "claude"),
+    )
+    run()
+    assert [e["content"] for e in events(calls)] == ["After pairing", "New answer"]
+
+
+@pytest.mark.parametrize("legacy_state", [False, True])
+def test_pathless_hook_observes_removal_before_same_key_is_restored(
+    tmp_path, monkeypatch, legacy_state
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(path, user("Authorised prompt"), hook_record(), assistant("Authorised answer"))
+    run()
+    if legacy_state:
+        db = capture.connect_state(state, "codex", SESSION)
+        with db:
+            saved = capture.load_state(db)
+            saved.pop("profile_keys")
+            capture.save_state(db, saved)
+        db.close()
+    capture.capture_session(
+        "codex",
+        SESSION,
+        None,
+        {OTHER_OWNER: OTHER_KEY},
+        state,
+        capture.UPLOAD_ENDPOINT,
+        time.monotonic() + 2,
+    )
+    append(path, assistant("Disabled interval answer"))
+    run()
+    assert [e["content"] for e in events(calls)] == ["Authorised prompt", "Authorised answer"]
+    append(path, user("Fresh prompt"), hook_record(), assistant("Fresh answer"))
+    run()
+    assert [e["content"] for e in events(calls)][-2:] == ["Fresh prompt", "Fresh answer"]

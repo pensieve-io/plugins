@@ -26,14 +26,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_config import key_for, profiles
+from capture_config import encoded, key_for, private_directory, profiles
 from context_receipt import accepted_contexts, conversation_id
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
 CONFIG_PATH = Path.home() / ".config/pensieve/capture.json"
 STATE_PATH = Path.home() / ".local/state/pensieve/capture"
 MAX_INPUT_BYTES = 65536
-MAX_CONFIG_BYTES = 65536
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_SCAN_BYTES = 4 * 1024 * 1024
 MAX_EVENT_CHARS = 32000
@@ -56,26 +55,6 @@ SET_CONTEXT_NAMES = {
     "mcp__plugin_pensieve_pensieve__set_context",
     "mcp__plugin:pensieve:pensieve__set_context",
 }
-
-
-def encoded(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
-
-
-def private_file(path: Path, limit: int) -> bytes:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_uid != os.getuid()
-        ):
-            raise ValueError("capture config/state must be an owned regular file with mode 0600")
-        data = handle.read(limit + 1)
-        if len(data) > limit:
-            raise ValueError("capture config exceeds its size limit")
-        return data
 
 
 def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None:
@@ -493,17 +472,6 @@ def normalise(record: dict, client: str, session: str, state: dict) -> list[dict
     return result
 
 
-def private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.lstat()
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-    ):
-        raise ValueError("capture state directory must be owned, private (0700), and not a symlink")
-
-
 def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
     private_directory(root)
     path = root / f"{client}-{session}.sqlite3"
@@ -553,7 +521,29 @@ def save_state(db: sqlite3.Connection, state: dict) -> None:
     db.execute("INSERT OR REPLACE INTO state(id,body) VALUES (1,?)", (encoded(state).decode(),))
 
 
-def apply_item(db, state, item, identity, occurred_at, client, session, configured, host_timestamp):
+def scope_authorised(state, configured, owner, context, offset):
+    key = key_for(configured, owner, context)
+    if key is None:
+        return False
+    fingerprint = hashlib.sha256(key.encode()).hexdigest()
+    return all(
+        offset >= cutover["offset"] or key_for(cutover["profiles"], owner, context) == fingerprint
+        for cutover in state.get("profile_cutovers", [])
+    )
+
+
+def apply_item(
+    db,
+    state,
+    item,
+    identity,
+    occurred_at,
+    client,
+    session,
+    configured,
+    host_timestamp,
+    source_offset=0,
+):
     if item.get("new_turn"):
         if state.get("awaiting_marker"):
             state["tail"] = None
@@ -567,6 +557,7 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             segment=None,
             scope=None,
             turn_group=identity,
+            turn_source_offset=source_offset,
             awaiting_marker=True,
             ambiguous=False,
             discard_until_prompt=False,
@@ -596,7 +587,11 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
                 state.update(segment=None, scope=None, ambiguous=True, tail=None)
                 return
             state["awaiting_marker"] = False
-        elif state.get("ambiguous") or state.get("awaiting_marker"):
+        elif (
+            state.get("ambiguous")
+            or state.get("awaiting_marker")
+            or state.get("discard_until_prompt")
+        ):
             return
         owner, context = marker["user_id"], marker["context_id"]
         generation = marker["capture_generation"]
@@ -623,7 +618,16 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
             # A destination reached by a tool has no destination user title yet.
             state.update(title="", title_segment=None)
         state["scope"] = [owner, context, generation]
-        if context is None or generation is None or key_for(configured, owner, context) is None:
+        authorised_offset = (
+            state.get("turn_source_offset", source_offset)
+            if marker["kind"] == "prompt"
+            else source_offset
+        )
+        if (
+            context is None
+            or generation is None
+            or not scope_authorised(state, configured, owner, context, authorised_offset)
+        ):
             state["segment"] = None
             state["tail"] = None
             state["fork_parent"] = None
@@ -687,6 +691,9 @@ def apply_item(db, state, item, identity, occurred_at, client, session, configur
         return
     if "kind" not in item:
         return
+    scope = state.get("scope")
+    if scope and not scope_authorised(state, configured, scope[0], scope[1], source_offset):
+        state.update(segment=None, tail=None, fork_parent=None, discard_until_prompt=True)
     if state.get("discard_until_prompt"):
         return
     if state.get("segment") is None and not state.get("awaiting_marker"):
@@ -820,6 +827,9 @@ def scan(
     db.execute("DELETE FROM anchors WHERE segment IN (SELECT id FROM segments WHERE retired=1)")
     if not path.is_absolute():
         raise ValueError("host transcript path must be absolute")
+    fingerprints = {
+        owner: hashlib.sha256(key.encode()).hexdigest() for owner, key in configured.items()
+    }
     try:
         fd = os.open(
             path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -830,7 +840,9 @@ def scan(
             # transcript after UserPromptSubmit. Absence at either boundary
             # proves there is no older content to import at this path. Remember
             # that empty baseline so the first Stop captures the first turn.
-            state.update(offset=0, path=str(path), awaiting_source_creation=True)
+            state.update(
+                offset=0, path=str(path), awaiting_source_creation=True, profile_keys=fingerprints
+            )
             return
         raise
     with os.fdopen(fd, "rb") as handle:
@@ -852,7 +864,27 @@ def scan(
         if state.get("awaiting_source_creation") and state.get("path") == str(path):
             state.pop("awaiting_source_creation")
             state["file_id"] = file_id
+        previous = state.get("profile_keys")
+        if state["offset"] is not None and previous is not None and previous != fingerprints:
+            # Only changed credentials start a new capture interval. Keep scanning
+            # unread work for unaffected scopes, including across bounded scans.
+            state.setdefault("profile_cutovers", []).append(
+                {"offset": details.st_size, "profiles": previous}
+            )
+            scope = state.get("scope") or state.get("candidate_scope")
+            if scope and key_for(previous, scope[0], scope[1]) != key_for(
+                fingerprints, scope[0], scope[1]
+            ):
+                state.update(
+                    segment=None,
+                    candidate_segment=None,
+                    tail=None,
+                    fork_parent=None,
+                    discard_until_prompt=True,
+                )
+        state["profile_keys"] = fingerprints
         if state["offset"] is None:
+            state.pop("profile_cutovers", None)
             # First invocation establishes a baseline; never import older work.
             # SessionStart installs this before the first user prompt on both hosts.
             handle.seek(max(0, details.st_size - MAX_RECORD_BYTES))
@@ -967,6 +999,7 @@ def scan(
                         session,
                         configured,
                         original_time is not None,
+                        source_offset=offset,
                     )
                     ordinal = record.get("ordinal")
                     if client == "codex" and type(ordinal) is int and ordinal >= 0:
@@ -984,6 +1017,16 @@ def scan(
             # The caller commits this scan and cursor atomically while holding
             # its write lock. A full spool rolls back the entire scan, so the
             # next invocation rereads those records without losing them.
+
+        state["profile_cutovers"] = [
+            cutover
+            for cutover in state.get("profile_cutovers", [])
+            if cutover["offset"] > state["offset"]
+            or (
+                state.get("awaiting_marker")
+                and state.get("turn_source_offset", 0) < cutover["offset"]
+            )
+        ]
 
 
 def next_batch(db, segment, client, session):
@@ -1210,7 +1253,8 @@ def capture_session(
             for scope in (state.get("scope"), state.get("candidate_scope"))
         )
         if disabled:
-            # Consent is per account; another enabled account grants no upload rights.
+            # Observe removal even when this hook has no transcript path. A later
+            # restoration of the same key must not capture the disabled interval.
             state.update(
                 segment=None,
                 candidate_segment=None,
@@ -1220,13 +1264,6 @@ def capture_session(
                 title="",
                 title_segment=None,
             )
-        fingerprints = {
-            owner: hashlib.sha256(key.encode()).hexdigest() for owner, key in configured.items()
-        }
-        previous_fingerprints = state.get("profile_keys")
-        if previous_fingerprints is not None and previous_fingerprints != fingerprints:
-            state["capture_paused"] = True
-        state["profile_keys"] = fingerprints
         if state.pop("capture_paused", False):
             state.update(
                 offset=None,

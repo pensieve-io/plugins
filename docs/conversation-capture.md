@@ -47,7 +47,11 @@ The version-3 config stores account/client/context-scoped profiles under
 version-2 account profiles keep their previous consent until replaced by new
 pairing. Pairing migrates obsolete local credential entries without touching
 transcript spools. Context-scoped profiles coexist, so connecting another
-context cannot replace the first context's key. Older paired version-3 profiles without a context keep their existing scope
+context cannot replace the first context's key. Credential changes establish a
+byte-position cutover only for affected scopes: unread work for unchanged scopes
+continues to capture, while new or replaced credentials cannot import earlier work.
+These cutovers survive bounded scans, and an empty Claude baseline records the
+credential snapshot even before the host creates its transcript. Older paired version-3 profiles without a context keep their existing scope
 until replaced; unpaired version-3 entries require pairing before capture can run.
 **Data → Connectors** shows a shared card per harness. It is Connected when any
 current member has linked a hook, even if everyone has sharing off. The people count
@@ -70,8 +74,10 @@ MCP OAuth expiry alone does not revoke the separate upload key. Already
 attributed durable batches retry on later hooks after a network interruption.
 New turns need their own authenticated context marker; work without one is not
 silently assigned to the last context or backfilled on MCP reconnect. Disconnect
-revokes uploads, including queued retries. Re-pairing establishes a fresh
-baseline and cannot authorize an older key's backlog.
+revokes uploads, including queued retries. A new credential cannot authorise unread
+work from before its cutover. Already durable batches retain their exact bytes and
+original consent generation; the server accepts retries only while that scope and
+generation remain authorised.
 
 This stage does not import historical conversations. An explicit history-import
 flow is separate work. Transcripts remain until explicitly deleted. Turning
