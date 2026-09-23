@@ -23,7 +23,7 @@ the agent or browser approval page.
 
 The helper remembers displayed offers. A decline suppresses them across devices;
 a dismissed offer does not reopen on every prompt. Changing sharing off and back
-on in the context's profile menu starts a fresh generation and permits a new offer.
+on in Data → Connectors starts a fresh generation and permits a new offer.
 Offline first-use attempts retry at most once every five minutes.
 Approval starts only from accepted native hook records, never quoted markers in
 user messages or tool output. It reads a bounded transcript tail for attribution
@@ -41,10 +41,12 @@ pairing. Pairing migrates obsolete local credential entries without touching
 transcript spools. Context-scoped profiles coexist, so connecting another
 context cannot replace the first context's key. Older version-3 profiles without
 a context keep their existing scope until explicitly replaced.
-**the context’s profile menu → Transcript sharing** shows installations and last uploads.
-Disconnect stops that installation's uploads and extraction; MCP tools remain
-connected. Use **Connect installation** to reconnect, then continue in the agent
-with that context selected. The old downloaded-file setup applies only to older plugins.
+**Data → Connectors** shows one shared card per harness. It is Connected when
+any member is sharing, otherwise Available. Configure or Add yours changes only
+your preference in this context. With no uploader, the modal links to plugin setup;
+after enabling sharing, continue in your agent to finish connecting. Turning off
+stops your uploads and extraction across installations; MCP access and other
+members' sharing are unchanged. Existing private credentials can be reused.
 
 Keys cannot read transcripts or call MCP tools. The server checks client,
 context, membership, current consent generation and key status on every batch.
@@ -191,7 +193,7 @@ remain immutable; this adds no backfill and changes no existing retry bytes.
 Consent belongs to a user, context and harness type. The server emits an
 attribution-matched `pensieve-capture-consent` marker with approved/declined/unknown
 status. Declined suppresses offers on every installation. Unknown offers the
-browser choice once; re-enabling from the context's profile menu starts a fresh
+browser choice once; re-enabling from Data → Connectors starts a fresh
 consent generation and permits recovery. Same-machine apps of one harness reuse
 `~/.config/pensieve/capture.json`. A new computer requires Connect using remembered
 consent; the public pairing URL cannot safely issue credentials merely by being

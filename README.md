@@ -165,7 +165,7 @@ keeps its own selection.
 The context hooks send delivery receipts for the briefing the client received.
 Optional [work conversation capture](docs/conversation-capture.md) requires browser
 approval for each installation and context. The installed plugin offers approval
-on first use; **the context’s profile menu → Transcript sharing** can restart it. No setup
+on first use; **Data → Connectors in the context** can restart it. No setup
 skill, credential download or terminal command is needed. New visible work
 belongs to the selected context for team handoffs. Previous chats are not imported.
 
@@ -211,6 +211,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release ord
 The plugin offers browser approval after its first authenticated native context
 hook. Approve saving and company sharing for that installation and context; the
 helper installs its upload key privately. Declining keeps MCP tools available
-and does not trigger repeated prompts. Reconnect from **the context’s profile menu → Transcript sharing** and continue in the agent with the same context selected.
+and does not trigger repeated prompts. Reconnect from **Data → Connectors in the context** and continue in the agent with the same context selected.
 Normal hooks complete pending setup and retry authorised uploads. V1 saves new
 conversations only; the 90-day transcript lifetime is not a backfill window.
