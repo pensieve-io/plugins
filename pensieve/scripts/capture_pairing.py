@@ -21,6 +21,7 @@ from capture_config import (
     save_private_json,
     valid_uuid,
 )
+from capture_protocol import HEADER, VERSION, check
 
 API_BASE = "https://api.pensieve.uk/users/me/conversation-capture"
 PLUGIN_VERSION = "capture-pairing-1"
@@ -67,18 +68,27 @@ def timestamp(value: object) -> float:
 
 
 def request(base: str, path: str, body: dict | None, timeout: float, key: str | None = None):
-    headers = {"Content-Type": "application/json", "User-Agent": "Pensieve-Plugin-Pairing/1.0"}
+    base = checked_base(base)
+    deadline = time.monotonic() + timeout
+    compatibility = check(base, "pairing", min(0.25, timeout / 2))
+    if compatibility != "compatible":
+        return compatibility, None
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Pensieve-Plugin-Pairing/1.0",
+        HEADER: str(VERSION),
+    }
     if key is not None:
         headers["Authorization"] = "Bearer " + key
     req = Request(
-        checked_base(base) + path,
+        base + path,
         data=encoded(body) if body is not None else None,
         headers=headers,
         method="POST" if body is not None else "GET",
     )
     opener = build_opener(ProxyHandler({}), NoRedirects())
     try:
-        with opener.open(req, timeout=max(0.05, timeout)) as response:
+        with opener.open(req, timeout=max(0.05, deadline - time.monotonic())) as response:
             raw = response.read(MAX_CONFIG_BYTES + 1)
             if len(raw) > MAX_CONFIG_BYTES:
                 return "unavailable", None
@@ -241,11 +251,16 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             {"poll_secret": pending["poll_secret"]},
             timeout,
         )
-        if code in {401, 403, 404, 410}:
+        if code in {401, 403, 410}:
             path.unlink()
             return {
                 "status": "restart_required",
                 "message": "This pairing is unavailable. Start again.",
+            }
+        if code in {"incompatible", 404, 426}:
+            return {
+                "status": "incompatible",
+                "message": "Waiting for a compatible Pensieve service; pairing retained.",
             }
         if code != 200 or not isinstance(response, dict):
             return {"status": "offline", "message": "Pairing will retry at the next agent hook."}

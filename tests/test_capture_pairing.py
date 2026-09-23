@@ -29,6 +29,22 @@ def service():
         def log_message(self, *args):
             pass
 
+        def do_GET(self):
+            raw = json.dumps(
+                {
+                    "protocol_version": 1,
+                    "service": "pairing",
+                    "clients": ["codex", "claude"],
+                    "max_batch_bytes": 262144,
+                    "max_events": 100,
+                    "max_content_chars": 32000,
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["requests"].append((self.path, body, self.headers.get("Authorization")))
@@ -462,4 +478,22 @@ def test_start_preserves_unclaimed_credentials_across_scope_and_browser_expiry(
             expected_context_id=next_scope[1],
         )["status"]
         == "awaiting_approval"
+    )
+
+
+@pytest.mark.parametrize("status", ["incompatible", "unavailable", 404, 426])
+def test_incompatible_service_preserves_private_pending_claim(
+    tmp_path, service, monkeypatch, status
+):
+    config = new_config(tmp_path)
+    pairing.start(config, "codex", "codex_cli", base=service["base"])
+    ready(config)
+    path = pairing.pairing_path(config, "codex")
+    pending = json.loads(path.read_text())
+    monkeypatch.setattr(pairing, "request", lambda *args, **kwargs: (status, None))
+    assert pairing.poll(config, "codex")["status"] in {"incompatible", "offline"}
+    assert path.exists() and json.loads(path.read_text())["poll_secret"] == pending["poll_secret"]
+    assert (
+        pairing.start(config, "codex", "codex_cli", base=service["base"])["verification_url"]
+        == pending["verification_url"]
     )

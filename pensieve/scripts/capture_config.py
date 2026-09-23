@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import stat
@@ -237,3 +238,58 @@ def install_profile(path: Path, profile: dict) -> None:
             )
         ] + [profile]
         save_private_json(path, value)
+
+
+def observe_credentials(root: Path, client: str, configured: dict) -> None:
+    """Remember scope removals across every local session, including dormant ones."""
+    if not configured and not root.exists():
+        return
+    path = root / f"credentials-{client}.json"
+    with private_lock(path.with_suffix(".lock")):
+        try:
+            previous = json.loads(private_file(path, MAX_CONFIG_BYTES))
+        except FileNotFoundError:
+            previous = {"profiles": {}, "revocations": {}}
+        fingerprints = {
+            scope: hashlib.sha256(key.encode()).hexdigest() for scope, key in configured.items()
+        }
+        revoked = dict(previous["revocations"])
+        changed = {
+            scope
+            for scope, digest in previous["profiles"].items()
+            if fingerprints.get(scope) != digest
+        }
+        # An empty first observation also fences spools from older plugin builds.
+        if not configured and not previous["profiles"] and "*" not in revoked:
+            changed.add("*")
+        for scope in changed:
+            revoked[scope] = str(uuid.uuid4())
+        value = {
+            "profiles": fingerprints,
+            "revocations": revoked,
+            # Dormant spools from older builds compare against the first
+            # observation even if a removed key is restored before they run.
+            "initial_profiles": previous.get("initial_profiles", fingerprints),
+        }
+        if value != previous:
+            save_private_json(path, value)
+
+
+def credential_revocations(root: Path, client: str, *, legacy_profiles=False) -> dict:
+    try:
+        observation = json.loads(
+            private_file(root / f"credentials-{client}.json", MAX_CONFIG_BYTES)
+        )
+    except FileNotFoundError:
+        return {}
+    revoked = dict(observation["revocations"])
+    if legacy_profiles is not False:
+        initial = observation.get("initial_profiles", observation["profiles"])
+        changed = (
+            {scope for scope, digest in legacy_profiles.items() if initial.get(scope) != digest}
+            if legacy_profiles is not None
+            else {"*"}
+        )
+        for scope in changed:
+            revoked.setdefault(scope, "legacy-baseline")
+    return revoked

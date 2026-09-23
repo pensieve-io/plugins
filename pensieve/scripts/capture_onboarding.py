@@ -14,6 +14,7 @@ import sys
 import time
 from pathlib import Path
 
+from capture_adapters import parse_marker
 from capture_config import (
     MAX_CONFIG_BYTES,
     key_for,
@@ -23,7 +24,6 @@ from capture_config import (
 )
 from capture_pairing import pairing_path, start
 from context_receipt import accepted_contexts, compaction_boundary, json_object, transcript_tail
-from conversation_capture import parse_marker
 
 CONSENT_MARKER = re.compile(r"<!-- pensieve-capture-consent (\{[^\r\n]*?\}) -->")
 

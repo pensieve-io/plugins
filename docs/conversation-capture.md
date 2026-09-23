@@ -1,8 +1,8 @@
 # Optional work conversation capture
 
-Capture saves new visible work as ordered `TranscriptTurn` nodes in the selected
-context's Neo4j database. Postgres owns consent, upload receipts and temporary
-staging. Saved conversations are visible to context members through Sources and the
+Capture saves new visible work as immutable original events in Postgres.
+Ordered Neo4j `TranscriptTurn` nodes and search passages are rebuildable projections.
+Postgres also owns consent, upload receipts and deletion. Saved conversations are visible to context members through Sources and the
 Context viewer. Existing agent search/read tools support them; agent searches
 include transcripts only when explicitly requested. Installing the plugin alone never enables sharing.
 
@@ -47,7 +47,11 @@ The version-3 config stores account/client/context-scoped profiles under
 version-2 account profiles keep their previous consent until replaced by new
 pairing. Pairing migrates obsolete local credential entries without touching
 transcript spools. Context-scoped profiles coexist, so connecting another
-context cannot replace the first context's key. Older paired version-3 profiles without a context keep their existing scope
+context cannot replace the first context's key. Credential changes establish a
+byte-position cutover only for affected scopes: unread work for unchanged scopes
+continues to capture, while new or replaced credentials cannot import earlier work.
+These cutovers survive bounded scans, and an empty Claude baseline records the
+credential snapshot even before the host creates its transcript. Older paired version-3 profiles without a context keep their existing scope
 until replaced; unpaired version-3 entries require pairing before capture can run.
 **Data → Connectors** shows a shared card per harness. It is Connected when any
 current member has linked a hook, even if everyone has sharing off. The people count
@@ -70,8 +74,10 @@ MCP OAuth expiry alone does not revoke the separate upload key. Already
 attributed durable batches retry on later hooks after a network interruption.
 New turns need their own authenticated context marker; work without one is not
 silently assigned to the last context or backfilled on MCP reconnect. Disconnect
-revokes uploads, including queued retries. Re-pairing establishes a fresh
-baseline and cannot authorize an older key's backlog.
+revokes uploads, including queued retries. A new credential cannot authorise unread
+work from before its cutover. Already durable batches retain their exact bytes and
+original consent generation; the server accepts retries only while that scope and
+generation remain authorised.
 
 This stage does not import historical conversations. An explicit history-import
 flow is separate work. Transcripts remain until explicitly deleted. Turning
@@ -119,7 +125,7 @@ remains distinct. Input-bearing calls add `capture.tool_name` and put their inpu
 in the event's bounded `content`; older name-only calls keep their original shape.
 Empty input is distinct from missing input. Inputs never enter the identity
 metadata, and queued retry bytes and already acknowledged events remain unchanged.
-Release the backend accepting this additive name field before these hooks.
+The protocol guard requires a service accepting this field before any upload.
 
 Predecessors describe retained visible events, not every internal host record.
 They survive upload acknowledgement and resume. Account, context, consent,
@@ -186,14 +192,53 @@ Package tests cover credential import, private storage, client/consent boundarie
 retry, deletion, indefinite retention and no-backfill behavior. Synthetic installed-client probes are
 in [client-probes.md](client-probes.md). Live browser approval, Connector settings, fresh installation, updates and
 resumed sessions remain release checks.
-Deploy the companion app/API/MCP/scheduler before publishing the plugin feature.
-The compatible application must include the complete transcript stack through
-[Pensieve #986](https://github.com/pensieve-io/Pensieve/pull/986), including
-`capture.tool_name`, nullable receipt expiry, deletion tombstones, remembered
-harness consent and private pairing. See [release order](../CONTRIBUTING.md#release-order).
-Neo4j turn storage, retrieval, verified write links, extraction and conversation
-naming are application responsibilities; the plugin supplies native identities
-and new visible events.
+The guarded helper may be merged before the companion application release:
+it checks protocol support and preserves pending work until compatible services
+are deployed. Functional acceptance still requires the complete application stack
+through [Pensieve #996](https://github.com/pensieve-io/Pensieve/pull/996), its verified
+body migration and current API/MCP/worker builds. See
+[release order](../CONTRIBUTING.md#release-order). Storage, retrieval, verified
+write links, extraction and naming remain application responsibilities.
+
+### Capture state and saving status
+
+`capture_adapters.py` converts native records into one typed event stream;
+`capture_state.py` owns the four phases `ready`, `awaiting_attribution`, `capturing`
+and `blocked`. Native tool/turn bookkeeping is separate from file positions,
+credential cutovers and durable SQLite events/batches. Local legacy flags are
+migrated without rewriting queued bytes or identities.
+
+`capture_config.py` persists client-wide credential removals by scope. Each spool
+applies a byte-position cutover when it next opens its known source, so restoring
+the same key cannot import a disabled interval from a dormant conversation.
+Unchanged scopes continue normally; frozen attributed batches retain their receipts.
+The first observation also fences older spools across partial removal/restoration.
+Removing an owner-wide fallback leaves unchanged explicit context keys authorised;
+an explicit context revocation still wins. A new empty Claude file snapshots both
+credentials and removal epochs so past revocations cannot discard its first turn.
+No filesystem scan of host conversation history is introduced.
+
+Before private pairing/upload requests, `capture_protocol.py` checks the public
+service `/capabilities` manifest: protocol 1, service type, native clients and
+request bounds. No credentials are sent on this check. Absent/malformed/incompatible
+manifests or service/network failure preserve exact batches and pending claims.
+Redirects and arbitrary service origins remain disallowed. Each process caches
+checks for at most 30 seconds; the next lifecycle hook starts fresh. Servers also
+reject unsupported `X-Pensieve-Capture-Protocol` versions with 426. Purged/expired
+claims return terminal 410; deployment route 404 remains retryable.
+
+Connectors distinguishes Sharing enabled from Last saved, which records a
+retained accepted server upload, not proof of an empty device queue. For a known
+native session, inspect private local delivery status without network or body reads:
+
+```sh
+python3 pensieve/scripts/conversation_capture.py --client codex --status SESSION_UUID
+```
+
+The result contains per-segment context, queued count, last attempted delivery
+status and last validated acknowledgement time (up to 100 segments). It never
+prints transcript text or keys, creates a spool or infers saving from MCP login.
+
 
 ### Nested Codex write calls
 

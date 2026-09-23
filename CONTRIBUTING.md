@@ -9,8 +9,9 @@ This repository owns the installable plugin. Edit the files here directly:
 - `docs/distribution.md`: canonical directory metadata, listing copy and submission checks.
 - `pensieve/hooks/`: host-specific hook adapters.
 - `pensieve/scripts/context_receipt.py`: the standard-library-only client helper.
-- `pensieve/scripts/conversation_capture.py`: opt-in visible-conversation capture,
-  private retry state and separately authorized uploads. See
+- `pensieve/scripts/conversation_capture.py`: file checkpoints and immutable upload outbox.
+- `pensieve/scripts/capture_adapters.py` and `capture_state.py`: native parsing and shared capture phases.
+- `pensieve/scripts/capture_protocol.py`: public compatibility guard before private requests. See
   [conversation-capture.md](docs/conversation-capture.md).
 - `pensieve/scripts/capture_onboarding.py`: automatic first-use approval with preferences managed in Data → Connectors.
 - `pensieve/scripts/capture_pairing.py`: private credential exchange completed by normal hooks; no manual setup command or setup skill is shipped.
@@ -65,19 +66,29 @@ behaviour separately from live OAuth and desktop checks.
 
 ## Release order
 
-The transcript stack requires the complete application contract through
-[Pensieve #986](https://github.com/pensieve-io/Pensieve/pull/986): turn metadata
-(including `capture.tool_name`), nullable receipt expiry, deletion tombstones,
-user/context/harness consent, and browser pairing with private credential exchange.
-Older services reject new event fields and do not provide the pairing flow.
-Merging application code does not deploy these changes. Release the compatible
-app/API/MCP and its additive schema before distributing the plugin update, then
-record authenticated fresh-install and existing-install acceptance. Local package
-and synthetic client tests do not prove hosted compatibility.
-For the retention transition, hold upload ingress and drain old retention workers,
-update the backend and capturing helpers, then resume ingress. Preserve consent
-and queued work: switching consent off and on rotates its generation and discards
-that backlog. The application release ledger records the coordinated steps.
+The capture helper's protocol guard allows plugin #11 to merge before application
+#996 deploys. A new helper checks API and MCP capability manifests before sending
+private pairing/upload requests and waits with exact queued work intact when the
+contract is unavailable. Do not remove this guard, downgrade queued envelopes or
+claim capture works merely because both repositories merged.
+
+Release the complete app/API/MCP/worker stack and its canonical-body migration
+using the application release ledger. Then run:
+
+```sh
+python3 scripts/check_capture_compatibility.py
+```
+
+The manual **Capture compatibility** workflow runs the same unauthenticated probe.
+Both services must advertise protocol 1, supported clients and upload bounds. This
+probe transfers no private data and checks a declared contract; follow it with
+an authenticated fresh installation and existing-install update, browser pairing,
+real upload acknowledgement and member read. Package tests and synthetic native
+probes exercise different boundaries and do not replace that acceptance.
+
+Older installed helpers lack this guard. The coordinated retention/body migration
+still holds ingress and drains old workers while preserving consent and queued
+work. Toggling consent off/on rotates generation and is not a migration mechanism.
 
 The first hooks release requires the server-side work from Pensieve PR #881.
 Keep the hooks PR in draft until these checks are complete:
