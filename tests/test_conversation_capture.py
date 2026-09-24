@@ -1446,6 +1446,48 @@ def test_claude_compaction_and_local_commands_preserve_segment(tmp_path, monkeyp
     assert pending(state) == 0
 
 
+def claude_interruption(text="[Request interrupted by user]"):
+    notice = user(client="claude")
+    notice["message"]["content"] = [{"type": "text", "text": text}]
+    return notice
+
+
+@pytest.mark.parametrize(
+    "text", ["[Request interrupted by user]", "[Request interrupted by user for tool use]"]
+)
+def test_claude_interruption_notice_does_not_reopen_the_attributed_turn(
+    tmp_path, monkeypatch, text
+):
+    # Cancelling the previous turn's still-running Stop hook writes the notice
+    # after the next prompt's receipt, before its reply.
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    append(
+        path,
+        user(client="claude"),
+        hook_record("claude"),
+        claude_interruption(text),
+        assistant(client="claude"),
+    )
+    run()
+    assert [(e["kind"], e["content"]) for e in events(calls)] == [
+        ("user", "Visible question"),
+        ("assistant", "Visible answer"),
+    ]
+    assert pending(state) == 0
+
+
+def test_claude_prompt_with_provenance_is_never_an_interruption_notice(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    typed = claude_interruption()
+    typed.update(permissionMode="default", promptSource="user")
+    append(path, typed, hook_record("claude"), assistant(client="claude"))
+    run()
+    assert [e["content"] for e in events(calls)] == [
+        "[Request interrupted by user]",
+        "Visible answer",
+    ]
+
+
 @pytest.mark.parametrize("client", ["codex", "claude"])
 def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
     tmp_path, monkeypatch, client
