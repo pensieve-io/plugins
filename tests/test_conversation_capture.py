@@ -1476,16 +1476,54 @@ def test_claude_interruption_notice_does_not_reopen_the_attributed_turn(
     assert pending(state) == 0
 
 
-def test_claude_prompt_with_provenance_is_never_an_interruption_notice(tmp_path, monkeypatch):
+def test_claude_interruption_between_turns_preserves_segment(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    append(path, user("First", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    append(
+        path,
+        claude_interruption(),
+        user("Second", "claude"),
+        hook_record("claude"),
+        assistant(client="claude"),
+    )
+    run()
+    saved = events(calls)
+    assert {json.loads(batch["body"])["segment_id"] for batch, _ in calls} == {
+        json.loads(calls[0][0]["body"])["segment_id"]
+    }
+    assert [e["content"] for e in saved if e["kind"] == "user"] == ["First", "Second"]
+    assert saved[2]["capture"]["parent"]["event_id"] == saved[1]["event_id"]
+
+
+@pytest.mark.parametrize("provenance", [{"permissionMode": "default"}, {"promptSource": "typed"}])
+def test_claude_prompt_with_provenance_is_never_an_interruption_notice(
+    tmp_path, monkeypatch, provenance
+):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
     typed = claude_interruption()
-    typed.update(permissionMode="default", promptSource="user")
+    typed.update(provenance)
     append(path, typed, hook_record("claude"), assistant(client="claude"))
     run()
     assert [e["content"] for e in events(calls)] == [
         "[Request interrupted by user]",
         "Visible answer",
     ]
+
+
+def test_claude_invoked_skill_without_provenance_opens_its_turn(tmp_path, monkeypatch):
+    # Real skill invocations carry no prompt provenance; only the synthetic
+    # prefixes may be skipped, or the reply would join the previous turn.
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    append(path, user("First", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    skill = "<command-message>review</command-message>\n<command-name>/review</command-name>"
+    append(path, user(skill, "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    saved = events(calls)
+    assert [e["content"] for e in saved if e["kind"] == "user"] == ["First", skill]
+    assert saved[2]["capture"]["turn_id"] != saved[0]["capture"]["turn_id"]
+    assert saved[3]["capture"]["turn_id"] == saved[2]["capture"]["turn_id"]
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
