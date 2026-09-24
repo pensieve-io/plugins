@@ -166,7 +166,11 @@ interrupted turns respectively. Claude completion requires an `end_turn`
 assistant message followed by a successful native Stop summary with no
 continuation reason. A Stop invocation, tool result or process exit alone never
 certifies completion. Claude interruption and unrecognised failure signals
-remain incomplete. Native terminal records can be written **after** Stop;
+remain incomplete. Claude's `[Request interrupted by user…]` notice, like its
+local `/compact` and `/clear` output, is recognised by its prefix on a record
+without prompt provenance and never opens a new turn, so an interruption keeps
+the conversation in one segment. An invoked skill (`<command-message>`) also
+lacks provenance but still opens its turn. Native terminal records can be written **after** Stop;
 their marker uploads at a later checkpoint (including bounded recovery from another chat), while visible
 content still uploads at Stop. There is no polling process to eliminate that
 delay.

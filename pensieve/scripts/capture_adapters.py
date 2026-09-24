@@ -392,11 +392,21 @@ def normalise(
             "permissionMode" not in record
             and "promptSource" not in record
             and text.startswith(
-                ("<command-name>", "<local-command-stdout>", "<local-command-stderr>")
+                (
+                    "<command-name>",
+                    "<local-command-stdout>",
+                    "<local-command-stderr>",
+                    "[Request interrupted by user",
+                )
             )
         ):
-            # Claude's local /compact and /clear records are synthetic user
-            # messages without prompt provenance, not fresh model turns.
+            # Claude's local /compact and /clear records and its interruption
+            # notice are synthetic user messages, not fresh model turns. Match
+            # the prefix, not missing provenance alone: an invoked skill
+            # (<command-message>) also lacks provenance and opens its turn.
+            # Cancelling a still-running Stop hook writes the notice after the
+            # next prompt's receipt; reopening the turn there would discard
+            # the attributed reply that follows.
             return []
         return [prompt(state, text, record.get("uuid"))] if text else []
     for item in tool_results:
