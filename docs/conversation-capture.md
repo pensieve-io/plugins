@@ -39,6 +39,11 @@ claimable after an offline interval, until consumed or invalidated by account
 withdrawal. The helper polls the server before discarding an old offer so an accepted
 Deny is not mistaken for an expired request. A consumed credential is never returned
 a second time. `paired` means the hook is linked, not that transcript saving is on.
+Ordinary hooks allow up to two seconds for the capability check and private
+exchange within their existing 2.5-second budget. The short SessionEnd hook
+leaves pairing to the next ordinary hook, so host shutdown cannot interrupt a
+new credential exchange. A lost response still requires fresh browser approval;
+the server never replays an issued credential.
 Offline first-use attempts retry at most once every five minutes. Onboarding reads
 only accepted native attribution, never a quoted marker in a user or tool message.
 
