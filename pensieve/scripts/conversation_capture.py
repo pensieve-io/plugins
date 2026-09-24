@@ -734,12 +734,17 @@ def run_hook(
         return {}
     event = payload["hook_event_name"]
     deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
-    from capture_pairing import poll
+    if event != "SessionEnd":
+        from capture_pairing import poll
 
-    try:
-        poll(config, client, timeout=0.25)
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
+        try:
+            # Exchange consumes a one-time credential. Give the capability
+            # check and hosted response the ordinary pairing budget; a 250ms
+            # cap can lose a committed response. The short exit hook must not
+            # start an exchange it may be killed before persisting.
+            poll(config, client, timeout=2)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     configured = profiles(config, client)
     observe_credentials(state_root, client, configured)
     if event != "SessionEnd":

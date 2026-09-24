@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +80,7 @@ def service():
                     code, response = 503, {"detail": POLL_SECRET}
                 else:
                     response = {"status": "pending"}
+                time.sleep(state.get("exchange_delay", 0))
             elif self.path.endswith("/installations/heartbeat"):
                 code, response = 204, None
             else:
@@ -296,12 +298,16 @@ def test_pairing_never_sends_secrets_to_unapproved_endpoint(endpoint):
         pairing.checked_base(endpoint)
 
 
-def test_hook_finishes_pairing_without_reading_or_backfilling_old_work(
-    tmp_path, service, monkeypatch
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize("mode", ["approved", "registered"])
+def test_hook_finishes_hosted_latency_pairing_without_backfilling_old_work(
+    tmp_path, service, monkeypatch, client, mode
 ):
     config = new_config(tmp_path)
-    start(config, service)
-    service["mode"] = "approved"
+    start(config, service, client)
+    # The service commits its single-use exchange before sending the response.
+    # Ordinary hosted latency must not consume a credential the hook cannot save.
+    service.update(mode=mode, exchange_delay=0.35)
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text(
         json.dumps({"type": "session_meta", "payload": {"id": SESSION}})
@@ -320,13 +326,29 @@ def test_hook_finishes_pairing_without_reading_or_backfilling_old_work(
     assert (
         capture.run_hook(
             {"session_id": SESSION, "hook_event_name": "Stop", "transcript_path": str(transcript)},
-            "codex",
+            client,
             config,
             tmp_path / "spool",
         )
         == {}
     )
-    assert credentials.profiles(config, "codex") == {f"{OWNER}:497": KEY}
+    assert credentials.profiles(config, client) == {f"{OWNER}:497": KEY}
+    assert not pairing.pairing_path(config, client).exists()
+
+
+def test_session_end_preserves_approved_claim_for_next_ordinary_hook(tmp_path, service):
+    config = new_config(tmp_path)
+    start(config, service)
+    service["mode"] = "approved"
+    capture.run_hook(
+        {"session_id": SESSION, "hook_event_name": "SessionEnd"},
+        "codex",
+        config,
+        tmp_path / "spool",
+    )
+    assert credentials.profiles(config, "codex") == {}
+    assert pairing.pairing_path(config, "codex").exists()
+    assert not any(path.endswith("/exchange") for path, _, _ in service["requests"])
 
 
 def test_concurrent_hook_cannot_claim_a_pairing_while_setup_holds_it(tmp_path, service):
