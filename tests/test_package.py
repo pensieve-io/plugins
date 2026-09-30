@@ -81,40 +81,22 @@ def test_skills_have_valid_identity_and_a_visible_readme_entry():
         assert f"`{name}`" in readme
 
 
-@pytest.mark.parametrize(
-    "client,filename,server",
-    [("claude", "hooks.json", "plugin:pensieve:pensieve"), ("codex", "codex.json", "pensieve")],
-)
-def test_host_adapters_use_the_right_mcp_namespace_and_bundled_helper(client, filename, server):
+@pytest.mark.parametrize("client,filename", [("claude", "hooks.json"), ("codex", "codex.json")])
+def test_host_adapters_use_command_briefing_and_preserve_capture(client, filename):
     hooks = read_json(PLUGIN / "hooks" / filename)["hooks"]
-    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+    expected = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+    assert set(hooks) == expected | ({"PreToolUse"} if client == "claude" else set())
     flattened = [hook for entries in hooks.values() for entry in entries for hook in entry["hooks"]]
-    assert len(flattened) == 9
-    for hook in flattened:
-        if hook["type"] == "mcp_tool":
-            assert hook["timeout"] == 5
-            assert hook["server"] == server
-            assert hook["tool"] == "context_briefing"
-            assert hook["input"]["client"] == client
-            assert hook["input"]["session_id"] == "${session_id}"
-            assert hook["input"]["event"] == "${hook_event_name}"
-        else:
-            assert hook["type"] == "command"
-            if "conversation_capture.py" in hook["command"]:
-                assert hook["timeout"] in {1, 3}
-                assert hook["command"] == (
-                    'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py" --client '
-                    + client
-                )
-            else:
-                assert hook["timeout"] == 5
-                assert hook["command"] == (
-                    'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/context_receipt.py" --client ' + client
-                )
-    assert (PLUGIN / "scripts/context_receipt.py").is_file()
-    assert (PLUGIN / "scripts/conversation_capture.py").is_file()
-    assert all(
-        hook["type"] == "command" and hook["timeout"] == 1
-        for group in hooks["SessionEnd"]
-        for hook in group["hooks"]
-    )
+    assert all(hook["type"] == "command" for hook in flattened)
+    assert all(" --client " + client in hook["command"] for hook in flattened)
+    for event in ("SessionStart", "UserPromptSubmit"):
+        scripts = [h["command"] for g in hooks[event] for h in g["hooks"]]
+        assert len(scripts) == 2
+        assert "context_briefing.py" in scripts[0]
+        assert "conversation_capture.py" in scripts[1]
+        assert all("context_receipt.py" not in command for command in scripts)
+    if client == "claude":
+        assert hooks["PreToolUse"][0]["matcher"] == "^mcp__plugin_pensieve_pensieve__.*$"
+    for script in ("context_briefing", "context_receipt", "conversation_capture"):
+        assert (PLUGIN / "scripts" / (script + ".py")).is_file()
+    assert all(hook["timeout"] == 1 for group in hooks["SessionEnd"] for hook in group["hooks"])

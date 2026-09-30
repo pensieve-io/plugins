@@ -8,7 +8,8 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/assets/`: bundled Pensieve branding used by supported client fields.
 - `docs/distribution.md`: canonical directory metadata, listing copy and submission checks.
 - `pensieve/hooks/`: host-specific hook adapters.
-- `pensieve/scripts/context_receipt.py`: the standard-library-only client helper.
+- `pensieve/scripts/context_briefing.py`: authenticated command hook, browser bootstrap and Claude call binding.
+- `pensieve/scripts/context_receipt.py`: bounded native delivery receipt recognition.
 - `pensieve/scripts/conversation_capture.py`: file checkpoints and immutable upload outbox.
 - `pensieve/scripts/capture_adapters.py` and `capture_state.py`: native parsing and shared capture phases.
 - `pensieve/scripts/capture_protocol.py`: public compatibility guard before private requests. See
@@ -66,6 +67,15 @@ behaviour separately from live OAuth and desktop checks.
 
 ## Release order
 
+The script-briefing change replaces a native MCP hook with authenticated HTTP
+endpoints and removes the MCP tool. Coordinate the backend and plugin releases:
+the new plugin requires `/hooks/briefing`, `/hooks/tool-binding` and explicit
+`briefing_enabled` pairing support; old installed hooks cannot keep calling a
+removed tool. Run fresh-install and existing-key upgrade acceptance before
+publishing. Do not silently grant old upload-only keys read access. Transcript
+sharing must remain optional throughout this upgrade.
+
+
 The capture helper's protocol guard allows plugin #11 to merge before application
 #996 deploys. A new helper checks API and MCP capability manifests before sending
 private pairing/upload requests and waits with exact queued work intact when the
@@ -119,14 +129,15 @@ requires a new scan or upload for updates; a Git push does not update it live.
 Local/synthetic package tests need no application release. Live tests against
 `mcp.pensieve.uk` require the compatible backend to be released first. A staging
 test can run earlier with a disposable package: change `.mcp.json` and the
-helper's `DELIVERY_ENDPOINT` constant to the staging MCP and receipt URLs.
+helpers' `BRIEFING_ENDPOINT`, `BINDING_ENDPOINT` and `DELIVERY_ENDPOINT` constants
+to the staging MCP, briefing, binding and receipt URLs.
 For capture, also change `conversation_capture.UPLOAD_ENDPOINT` and
 `capture_pairing.API_BASE` in that disposable copy. Change the fixed approval
 host checked by `capture_pairing.validate_pending` from `app.pensieve.uk` to the
 staging app host so staging-issued browser links can be accepted. Use the staging
-pairing flow to install its upload-only key in an isolated private test config.
-Do not point any part of this disposable setup at production; check all five
-locations before running the hooks.
+pairing flow to install an explicitly briefing-enabled device key in an isolated private test config.
+Do not point any part of this disposable setup at production; check every service
+location before running the hooks.
 Passing a staging URL to `--endpoint` alone is rejected; that override accepts
 only the fixed service URL or HTTP loopback. Production endpoints in the
 shipped package stay fixed.

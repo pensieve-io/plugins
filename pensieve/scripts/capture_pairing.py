@@ -24,7 +24,7 @@ from capture_config import (
 from capture_protocol import HEADER, VERSION, check
 
 API_BASE = "https://api.pensieve.uk/users/me/conversation-capture"
-PLUGIN_VERSION = "capture-pairing-1"
+PLUGIN_VERSION = "script-briefing-1"
 RUNTIMES = {"codex_cli", "claude_code_cli", "unknown"}
 
 
@@ -164,12 +164,14 @@ def start(
         raise ValueError("Runtime does not match client")
     if runtime.startswith("claude") and client != "claude":
         raise ValueError("Runtime does not match client")
-    if (expected_user_id is None) != (expected_context_id is None):
-        raise ValueError("Pairing identity must include account and context")
+    if expected_context_id is not None and expected_user_id is None:
+        raise ValueError("Pairing context must include its account")
     if expected_user_id is not None and (
         not valid_uuid(expected_user_id)
-        or type(expected_context_id) is not int
-        or expected_context_id <= 0
+        or (
+            expected_context_id is not None
+            and (type(expected_context_id) is not int or expected_context_id <= 0)
+        )
     ):
         raise ValueError("Invalid pairing identity")
     path = pairing_path(config, client)
@@ -194,6 +196,7 @@ def start(
                 "label": "Codex" if client == "codex" else "Claude Code",
                 "plugin_version": PLUGIN_VERSION,
                 "host_version": host_version,
+                "briefing_enabled": True,
                 "expected_user_id": expected_user_id,
                 "expected_context_id": expected_context_id,
             },
@@ -215,6 +218,7 @@ def start(
                 "client": client,
                 "runtime": runtime,
                 "host_version": host_version,
+                "briefing_enabled": True,
                 "next_poll_at": 0,
                 "expected_user_id": expected_user_id,
                 "expected_context_id": expected_context_id,
@@ -274,9 +278,12 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             raise ValueError("Invalid approval")
         if not valid_uuid(response.get("installation_id")):
             raise ValueError("Invalid approval")
-        if pending.get("expected_user_id") is not None and (
-            response.get("user_id") != pending["expected_user_id"]
-            or response.get("context_id") != pending["expected_context_id"]
+        if (
+            pending.get("expected_user_id") is not None
+            and response.get("user_id") != pending["expected_user_id"]
+        ) or (
+            pending.get("expected_context_id") is not None
+            and response.get("context_id") != pending["expected_context_id"]
         ):
             raise ValueError("Approval does not match the initiating connection")
         install_profile(
@@ -289,6 +296,10 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
                 "context_id": response["context_id"],
                 "runtime": pending["runtime"],
                 "host_version": pending["host_version"],
+                "briefing_enabled": (
+                    pending.get("briefing_enabled") is True
+                    and response.get("briefing_enabled") is True
+                ),
             },
         )
         path.unlink()
@@ -296,5 +307,9 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             "status": "paired",
             "client": client,
             "context_id": response["context_id"],
+            "user_id": response["user_id"],
+            "briefing_enabled": (
+                pending.get("briefing_enabled") is True and response.get("briefing_enabled") is True
+            ),
             "message": "Device paired. Capture and company contribution are controlled in Pensieve.",
         }

@@ -147,7 +147,7 @@ def test_pairing_returns_only_public_link_then_installs_private_client_credentia
     assert pairing.poll(config, "codex")["status"] == "no_pending_pairing"
     assert len([r for r in service["requests"] if r[0].endswith("exchange")]) == 1
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
-    assert "enabled" not in config.read_text()
+    assert json.loads(config.read_text())["profiles"][0]["briefing_enabled"] is False
 
 
 def test_pending_rate_limit_and_offline_retry_preserve_challenge(tmp_path, service):

@@ -6,23 +6,57 @@ registration and recognition of context the host actually accepted.
 
 ## Briefing request
 
-The MCP tool is `context_briefing`. Hook adapters send:
+`context_briefing.py` calls `POST https://mcp.pensieve.uk/hooks/briefing`
+using the browser-paired device credential in `Authorization: Bearer`.
+There is no briefing MCP tool and no agent fallback that calls one. The
+existing browser connection screen explicitly authorises briefing reads;
+transcript sharing remains independently optional.
 
-- `client`: `claude` or `codex`.
-- `session_id`: the host's conversation UUID.
-- `event`: `SessionStart` or `UserPromptSubmit`.
-- `source`: the host's startup source where available, including `clear` or
-  `compact`.
+Hook adapters send `client` (`claude` or `codex`), the host `session_id` UUID,
+and the actual `event` (`SessionStart` or `UserPromptSubmit`). Optional `source`
+records startup/clear/compact; Codex's `turn_id` preserves native capture
+attribution. A private `delivery_id` UUID is stable during the host run and
+renews at SessionStart. `force_refresh` restores grounding after compaction,
+missing transcripts or a bounded tail that cannot establish delivery. It does
+not change the event, so a recovered prompt still receives its capture marker.
 
-Claude's hook server name is `plugin:pensieve:pensieve`; Codex's is `pensieve`.
-Ordinary MCP calls remain available alongside these hooks.
+The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
+and `hookSpecificOutput.additionalContext`. The script forwards it directly.
+It acknowledges accepted receipts synchronously before requesting a refresh;
+other capture handlers may run concurrently. The server assembles company
+content, enforces current membership and permissions, and owns durable
+conversation selection. No company content is cached locally.
 
-The response's text is JSON containing `hookSpecificOutput.hookEventName` and
-`hookSpecificOutput.additionalContext`. An unchanged, acknowledged briefing may
-have empty additional context. **`event="SessionStart"` forces a fresh briefing**
-even if the server still holds an acknowledgement of pre-compaction content.
-The helper requests that event when transcript loss, a bounded tail or a failed
-reset means the old acknowledgement can no longer establish current grounding.
+Credentials are client/context scoped. A 409 `pairing_required` response names
+the authenticated account and currently selected Context. The helper uses an
+already approved matching credential, or opens the existing browser flow for
+that exact destination. It never resets the conversation to fit an available
+credential. Initial account selection uses a prior accepted native marker or
+private conversation identity; multiple accounts require browser approval,
+rather than guessing which account the host means. Definitive 401/403 key
+rejections may try another explicitly approved credential for that same account,
+within the hook deadline. A successful lifecycle fetch remembers the good
+credential's fingerprint so subsequent calls do not keep choosing a revoked key.
+Other failures do not justify switching keys. If every key rejects, browser
+recovery pins the account but allows a currently available Context, rather than
+forcing a deleted membership. The server still owns conversation selection.
+
+Claude ordinary calls provide a tool-use ID but no conversation ID. A synchronous
+`PreToolUse` command registers `{client: "claude", session_id, tool_use_id}` at
+`POST /hooks/tool-binding`. The following OAuth-authenticated MCP request
+resolves that exact ID from `_meta["claudecode/toolUseId"]`. Missing bindings
+never reuse another conversation's transport selection. The hook matches only
+`mcp__plugin_pensieve_pensieve__*` and checks native plugin provenance when the
+host supplies it. Expected failures deny the call; server enforcement is also
+necessary because host command timeouts fail open. Codex supplies
+`_meta.threadId` directly and needs no per-tool binding request.
+
+Old local profiles and pending pairings without explicit `briefing_enabled`
+remain upload-only. Every new pairing requests briefing permission, and a
+profile gains it only when both its saved request and server exchange confirm
+it. Pairing works before any briefing exists, eliminating a bootstrap cycle.
+Failure notices describe reconnect/retry without asking the agent to call a
+briefing tool or revealing a credential.
 
 ## Delivery receipt
 
@@ -59,8 +93,8 @@ Capture requests identify themselves as `Pensieve-Plugin-Capture/1.0`, following
 the receipt helper's explicit identification so the production edge admits them.
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-The first native context hook offers browser approval and a private one-time
-exchange to install a client/context-scoped upload key. Ordinary hooks complete
+The first command hook offers browser approval and a private one-time
+exchange to install a client/context-scoped device key. Ordinary hooks complete
 pending pairing. No OAuth credential is read or passed through model output.
 Every upload checks membership, the enabled consent generation and the key's
 scope/revocation. Legacy account profiles retain their previous policy until
@@ -82,8 +116,7 @@ contain credentials. The helper does not treat a quoted marker as authorization.
 
 Command capture hooks establish a baseline at `SessionStart`, checkpoint at
 `UserPromptSubmit` and `Stop`, and attempt a bounded flush at `SessionEnd`.
-The last hook has a one-second configured timeout and no native MCP companion:
-Codex does not support native MCP hooks at SessionEnd. Same-event handlers may
+The last hook has a one-second configured timeout. Same-event handlers may
 run concurrently, so a checkpoint can be completed by the following hook.
 
 Uploads use `POST https://mcp.pensieve.uk/hooks/conversations` with the key in
@@ -113,7 +146,7 @@ erase the queue. See
 
 ## Hook registration and sharing
 
-The first accepted native context hook offers browser setup for unknown consent.
+The first command briefing hook offers browser setup before reading company content.
 An explicit signed-in Approve or Deny registers the helper and sets sharing on
 or off respectively. The helper privately exchanges its one-time poll secret
 for the linked profile; a `registered` response is valid even while sharing is off.
