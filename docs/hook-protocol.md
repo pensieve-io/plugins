@@ -21,7 +21,12 @@ missing transcripts or a bounded tail that cannot establish delivery. It does
 not change the event, so a recovered prompt still receives its capture marker.
 
 The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
-and `hookSpecificOutput.additionalContext`. The script forwards it directly.
+and `hookSpecificOutput.additionalContext`. A root-rendering fallback also sets
+`briefing_available: false`; the script consumes that field before forwarding
+the hook JSON. Full and unchanged responses omit it. Before network work the
+script records an unfinished refresh. Failure, interruption or unavailable root
+keeps that flag, forcing the next successful briefing to replace the unavailable
+notice even when an older briefing was acknowledged. Success clears the flag.
 It acknowledges accepted receipts synchronously before requesting a refresh;
 other capture handlers may run concurrently. The server assembles company
 content, enforces current membership and permissions, and owns durable
@@ -40,6 +45,14 @@ credential's fingerprint so subsequent calls do not keep choosing a revoked key.
 Other failures do not justify switching keys. If every key rejects, browser
 recovery pins the account but allows a currently available Context, rather than
 forcing a deleted membership. The server still owns conversation selection.
+
+Automatic browser pairing records its initiating conversation in private local
+state. Any capture or briefing hook may finish the shared exchange; before the
+pending claim is removed, it saves the chosen account and Context in that
+conversation's private receipt. Only the initiating conversation adopts that
+choice, once per claim. A capture/Stop hook or another open conversation winning
+the exchange cannot lose or redirect the browser choice. These receipts contain
+identifiers only, never credentials or company content.
 
 Claude ordinary calls provide a tool-use ID but no conversation ID. A synchronous
 `PreToolUse` command registers `{client: "claude", session_id, tool_use_id}` at

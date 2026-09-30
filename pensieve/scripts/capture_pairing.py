@@ -106,6 +106,31 @@ def pairing_path(config: Path, client: str) -> Path:
     return config.with_name(f"capture-pairing-{client}.json")
 
 
+def pairing_receipt_path(config: Path, client: str, session_id: str) -> Path:
+    if client not in CLIENTS or not valid_uuid(session_id):
+        raise ValueError("Invalid pairing conversation")
+    return config.parent / "briefing-pairings" / f"{client}-{session_id}.json"
+
+
+def completed_pairing(config: Path, client: str, session_id: str) -> dict:
+    """Recover this conversation's browser choice, whichever hook exchanged it."""
+    try:
+        result = json.loads(
+            private_file(pairing_receipt_path(config, client, session_id), MAX_CONFIG_BYTES)
+        )
+    except FileNotFoundError:
+        return {}
+    if (
+        not isinstance(result, dict)
+        or not valid_uuid(result.get("pairing_id"))
+        or not valid_uuid(result.get("user_id"))
+        or type(result.get("context_id")) is not int
+        or result["context_id"] <= 0
+    ):
+        raise ValueError("Invalid completed pairing")
+    return result
+
+
 def public_status(pending: dict) -> dict:
     return {
         "status": "awaiting_approval",
@@ -142,6 +167,8 @@ def validate_pending(value: object, client: str) -> dict:
         raise ValueError("Invalid approval address")
     if value.get("runtime") not in RUNTIMES:
         raise ValueError("Invalid pairing runtime")
+    if value.get("session_id") is not None and not valid_uuid(value["session_id"]):
+        raise ValueError("Invalid pairing conversation")
     interval = value.get("poll_interval_seconds")
     if not isinstance(interval, int) or isinstance(interval, bool) or not 1 <= interval <= 60:
         raise ValueError("Invalid pairing interval")
@@ -157,6 +184,7 @@ def start(
     expected_user_id: str | None = None,
     expected_context_id: int | None = None,
     timeout: float = 5,
+    session_id: str | None = None,
 ) -> dict:
     if runtime not in RUNTIMES or len(host_version) > 100:
         raise ValueError("Unsupported runtime")
@@ -164,6 +192,8 @@ def start(
         raise ValueError("Runtime does not match client")
     if runtime.startswith("claude") and client != "claude":
         raise ValueError("Runtime does not match client")
+    if session_id is not None and not valid_uuid(session_id):
+        raise ValueError("Invalid pairing conversation")
     if expected_context_id is not None and expected_user_id is None:
         raise ValueError("Pairing context must include its account")
     if expected_user_id is not None and (
@@ -184,6 +214,7 @@ def start(
             if (
                 old.get("expected_user_id") == expected_user_id
                 and old.get("expected_context_id") == expected_context_id
+                and old.get("session_id") == session_id
             ):
                 return public_status(old)
             return {"status": "another_connection_pending"}
@@ -222,6 +253,7 @@ def start(
                 "next_poll_at": 0,
                 "expected_user_id": expected_user_id,
                 "expected_context_id": expected_context_id,
+                "session_id": session_id,
             },
             client,
         )
@@ -302,6 +334,18 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
                 ),
             },
         )
+        if pending.get("session_id") is not None:
+            # Capture, manual setup and other conversations can all win poll().
+            # Commit the initiating conversation's choice before removing the
+            # claim; config alone cannot identify that choice across accounts.
+            save_private_json(
+                pairing_receipt_path(config, client, pending["session_id"]),
+                {
+                    "pairing_id": pending["id"],
+                    "user_id": response["user_id"],
+                    "context_id": response["context_id"],
+                },
+            )
         path.unlink()
         return {
             "status": "paired",

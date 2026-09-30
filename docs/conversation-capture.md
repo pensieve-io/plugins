@@ -50,6 +50,11 @@ Offline first-use attempts retry at most once every five minutes. Initial
 briefing pairing can start without a native marker. Once identity is known,
 accepted native attribution or private per-conversation state pins the expected
 account and Context; a quoted marker in a user or tool message never does.
+Automatic pairing also retains the initiating conversation locally. Any hook
+can complete its exchange, including capture on Stop, but the browser's account
+choice is saved in a private receipt for that conversation before the pending
+claim is removed. Another conversation cannot adopt the choice, and the receipt
+is applied once so it cannot undo later context switches.
 
 The version-3 config stores account/client/context-scoped profiles under
 `~/.config/pensieve/capture.json` (mode `0600`, private directory `0700`). Existing

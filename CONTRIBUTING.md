@@ -75,9 +75,15 @@ removed tool. Run fresh-install and existing-key upgrade acceptance before
 publishing. Do not silently grant old upload-only keys read access. Transcript
 sharing must remain optional throughout this upgrade.
 
+Merging this change to `main` publishes the new hooks to Git marketplace installs
+and updates. Keep the plugin PR unmerged until the compatible application
+schema/API/MCP is deployed and fresh-install plus existing-device reconnection
+acceptance has passed using the candidate branch. Record the deployed application
+SHA and tested plugin SHA before merging.
 
-The capture helper's protocol guard allows plugin #11 to merge before application
-#996 deploys. A new helper checks API and MCP capability manifests before sending
+The historical capture-only protocol guard allowed plugin #11 to merge before
+application #996 deployed; it does not make script briefings safe to publish
+before their endpoints exist. A new helper checks API and MCP capability manifests before sending
 private pairing/upload requests and waits with exact queued work intact when the
 contract is unavailable. Do not remove this guard, downgrade queued envelopes or
 claim capture works merely because both repositories merged.

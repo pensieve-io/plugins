@@ -92,6 +92,55 @@ def test_missing_or_compacted_transcript_forces_refresh_without_losing_prompt_ma
     assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
 
 
+@pytest.mark.parametrize("failure", ["unavailable", 503, "root_unavailable", "interrupted"])
+def test_failed_refresh_cannot_reuse_an_older_acknowledged_briefing(setup, monkeypatch, failure):
+    path, calls = setup
+    briefing.run_hook(payload(), "codex", path)
+    failed = False
+
+    def request(_endpoint, _key, body, **_kwargs):
+        nonlocal failed
+        calls.append(("retry", body))
+        if not failed:
+            failed = True
+            if failure == "interrupted":
+                raise KeyboardInterrupt
+            if failure == "root_unavailable":
+                return 200, {
+                    "briefing_available": False,
+                    "hookSpecificOutput": {
+                        "hookEventName": body["event"],
+                        "additionalContext": "Root unavailable; retry on the next prompt.",
+                    },
+                }
+            return failure, None
+        # Model the server's ACK suppression for an unchanged root. A fresh
+        # fetch alone cannot supersede the failure instruction in the chat.
+        return 200, {
+            "hookSpecificOutput": {
+                "hookEventName": body["event"],
+                "additionalContext": "restored company primer" if body.get("force_refresh") else "",
+            }
+        }
+
+    monkeypatch.setattr(briefing, "request", request)
+    if failure == "interrupted":
+        with pytest.raises(KeyboardInterrupt):
+            briefing.run_hook(payload(), "codex", path)
+    else:
+        unavailable = briefing.run_hook(payload(), "codex", path)
+        assert "unavailable" in unavailable["hookSpecificOutput"]["additionalContext"]
+        assert "briefing_available" not in unavailable
+    restored = briefing.run_hook(payload(), "codex", path)
+    assert restored["hookSpecificOutput"]["additionalContext"] == "restored company primer"
+    assert calls[-1][1]["force_refresh"] is True
+    assert "needs_refresh" not in json.loads(
+        briefing.state_path(path, "codex", SESSION).read_text()
+    )
+    briefing.run_hook(payload(), "codex", path)
+    assert "force_refresh" not in calls[-1][1]
+
+
 def test_session_start_resets_receipt_and_delivery_scope(setup):
     path, calls = setup
     briefing.run_hook(payload(), "codex", path)
@@ -496,6 +545,10 @@ def test_account_only_pairing_adopts_chosen_live_profile(setup, monkeypatch):
 
     def exchange(*_a, **_k):
         config.install_profile(path, profile(context=498))
+        config.save_private_json(
+            pairing.pairing_receipt_path(path, "codex", SESSION),
+            {"pairing_id": TURN, "user_id": OWNER, "context_id": 498},
+        )
         return {"status": "paired", "user_id": OWNER, "context_id": 498, "briefing_enabled": True}
 
     monkeypatch.setattr(briefing, "poll", exchange)

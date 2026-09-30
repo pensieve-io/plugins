@@ -31,7 +31,7 @@ from capture_config import (
     valid_uuid,
 )
 from capture_onboarding import current_offer, open_approval
-from capture_pairing import API_BASE, NoRedirects, pairing_path, poll, start
+from capture_pairing import API_BASE, NoRedirects, completed_pairing, pairing_path, poll, start
 from context_receipt import (
     DELIVERY_ENDPOINT,
     MAX_INPUT_BYTES,
@@ -217,6 +217,7 @@ def offer_pairing(config: Path, client: str, session: str, state: dict, base: st
         expected_user_id=owner,
         expected_context_id=context if owner else None,
         timeout=1,
+        session_id=session,
     )
     if result["status"] == "awaiting_approval":
         if sys.platform == "darwin":
@@ -297,6 +298,11 @@ def run_hook(
         return {} if code == 204 else failure(event, client, session)
     with private_lock(path.with_suffix(".lock")):
         state = read_state(path)
+        needs_refresh = state.get("needs_refresh") is True
+        # Persist before network work: a timeout or killed hook must not let an
+        # older accepted receipt suppress the briefing that restores grounding.
+        state["needs_refresh"] = True
+        save_private_json(path, state)
         # Native accepted attribution outranks local identity state, including
         # switching to another account after reconnecting the host.
         offer = current_offer(payload.get("transcript_path"), client, session)
@@ -317,15 +323,23 @@ def run_hook(
                 state.update(user_id=prior["user_id"], context_id=prior.get("context_id"))
         # Pairing locks serialize with capture hooks. If another hook is already
         # exchanging, use existing credentials and let the next event retry.
-        paired = {}
         try:
             # A one-time exchange needs its full established response budget;
             # never start one in the shorter pre-tool authorization hook.
-            paired = poll(config, client, timeout=2)
+            poll(config, client, timeout=2)
         except BlockingIOError:
             pass
-        if paired.get("status") == "paired" and state.get("user_id") in {None, paired["user_id"]}:
-            state.update(user_id=paired["user_id"], context_id=paired["context_id"])
+        paired = completed_pairing(config, client, session)
+        if (
+            paired
+            and paired["pairing_id"] != state.get("pairing_id")
+            and state.get("user_id") in {None, paired["user_id"]}
+        ):
+            state.update(
+                user_id=paired["user_id"],
+                context_id=paired["context_id"],
+                pairing_id=paired["pairing_id"],
+            )
             state.pop("pending_context_id", None)
             state.pop("preferred_credential", None)
         profiles = available_profiles(config, client)
@@ -337,7 +351,7 @@ def run_hook(
         state.setdefault("user_id", profile["user_id"])
         state.setdefault("context_id", profile.get("context_id"))
         receipt = latest_receipt(payload.get("transcript_path"), session, client)
-        force = event == "SessionStart" or receipt is None or receipt[1] == "reset"
+        force = needs_refresh or event == "SessionStart" or receipt is None or receipt[1] == "reset"
         if receipt:
             send_receipt(
                 receipt[0], "reset" if event == "SessionStart" else receipt[1], receipt_endpoint
@@ -399,6 +413,7 @@ def run_hook(
                 save_private_json(path, state)
                 return failure(event, client, session, message)
         if code == 200 and isinstance(result, dict):
+            available = result.pop("briefing_available", True) is True
             output = result.get("hookSpecificOutput")
             if result == {} or (
                 isinstance(output, dict)
@@ -410,6 +425,8 @@ def run_hook(
                 state["preferred_credential"] = hashlib.sha256(
                     profile["upload_key"].encode()
                 ).hexdigest()
+                if available:
+                    state.pop("needs_refresh", None)
                 save_private_json(path, state)
                 return result
         message = ""
