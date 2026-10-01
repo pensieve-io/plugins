@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,7 @@ def mcp_server(output: Path) -> None:
                         },
                         "annotations": {"readOnlyHint": True},
                     }
-                    for name in ("context_briefing", "ordinary", "set_context", "edit_page")
+                    for name in ("ordinary", "set_context", "edit_page")
                 ]
             }
         elif method == "tools/call":
@@ -90,37 +91,7 @@ def mcp_server(output: Path) -> None:
                     )
                     + " -->"
                 )
-            if params["name"] == "context_briefing":
-                args = params.get("arguments", {})
-                context_marker = ""
-                if event == "UserPromptSubmit":
-                    context_marker = (
-                        "\n<!-- pensieve-capture-context "
-                        + json.dumps(
-                            {
-                                "v": 2,
-                                "capture_generation": CAPTURE_OWNER,
-                                "kind": "prompt",
-                                "user_id": CAPTURE_OWNER,
-                                "client": "codex",
-                                "conversation_id": args["session_id"],
-                                "context_id": 497,
-                                "turn_id": args.get("turn_id"),
-                            }
-                        )
-                        + " -->"
-                    )
-                result["content"][0]["text"] = json.dumps(
-                    {
-                        "hookSpecificOutput": {
-                            "hookEventName": event,
-                            "additionalContext": marker
-                            + f"\n<!-- pensieve-delivery token={RECEIPT_TOKEN} -->"
-                            + context_marker,
-                        }
-                    }
-                )
-                result["structuredContent"] = {"ignored_marker": "HOOK_PROBE_STRUCTURED_ONLY"}
+
         else:
             result = {}
         print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
@@ -144,32 +115,33 @@ def run_probe(
     plugin = output / "plugin"
     shutil.copytree(Path(__file__).resolve().parents[1] / "pensieve", plugin)
     sequence = 0
+    fixture_id = uuid.uuid4().hex
     capture_attempts = []
     model_waiting = threading.Event()
     release_model = threading.Event()
     capture_batch_scopes = {}
     capture_config = output / "capture-config.json"
-    if capture:
-        if not persist:
-            raise ValueError("capture probe requires --persist for a real local transcript")
-        capture_config.write_text(
-            json.dumps(
-                {
-                    "version": 3,
-                    "profiles": [
-                        {
-                            "user_id": CAPTURE_OWNER,
-                            "upload_key": CAPTURE_KEY,
-                            "client": "codex",
-                            "installation_id": "11111111-1111-4111-8111-111111111111",
-                            "runtime": "unknown",
-                            "host_version": "",
-                        }
-                    ],
-                }
-            )
+    if capture and not persist:
+        raise ValueError("capture probe requires --persist for a real local transcript")
+    capture_config.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "profiles": [
+                    {
+                        "user_id": CAPTURE_OWNER,
+                        "upload_key": CAPTURE_KEY,
+                        "client": "codex",
+                        "installation_id": "11111111-1111-4111-8111-111111111111",
+                        "runtime": "unknown",
+                        "host_version": "",
+                        "briefing_enabled": True,
+                    }
+                ],
+            }
         )
-        capture_config.chmod(0o600)
+    )
+    capture_config.chmod(0o600)
 
     class ModelHandler(BaseHTTPRequestHandler):
         def log_message(self, *_: Any) -> None:
@@ -198,6 +170,41 @@ def run_probe(
             nonlocal sequence
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             request = json.loads(raw)
+            if self.path == "/hooks/briefing":
+                assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
+                append(output / "briefings.jsonl", request)
+                event = request["event"]
+                marker = "HOOK_PROBE_" + event.upper()
+                if request.get("source"):
+                    marker += "_" + request["source"].upper()
+                content = "Pensieve is the company's shared, curated context layer.\n" + marker
+                content += f"\n<!-- pensieve-delivery token={RECEIPT_TOKEN} -->"
+                if event == "UserPromptSubmit":
+                    content += (
+                        "\n<!-- pensieve-capture-context "
+                        + json.dumps(
+                            {
+                                "v": 2,
+                                "capture_generation": CAPTURE_OWNER if capture else None,
+                                "kind": "prompt",
+                                "user_id": CAPTURE_OWNER,
+                                "client": "codex",
+                                "conversation_id": request["session_id"],
+                                "context_id": 497,
+                                "turn_id": request.get("turn_id"),
+                            }
+                        )
+                        + " -->"
+                    )
+                payload = json.dumps(
+                    {"hookSpecificOutput": {"hookEventName": event, "additionalContext": content}}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             if self.path == "/hooks/conversations":
                 assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
                 scope = request["context_id"]
@@ -253,18 +260,14 @@ def run_probe(
                     "capture_key_in_model": any(key in json.dumps(items) for key in (CAPTURE_KEY,)),
                 },
             )
-            has_result = any(
-                item.get("type") in {"function_call_output", "custom_tool_call_output"}
-                for item in items
-            )
             if interrupt:
                 model_waiting.set()
                 release_model.wait(timeout=120)
                 return
-            if not has_result and (not compact or sequence == 1):
+            if sequence == 1:
                 item = {
                     "type": "function_call",
-                    "call_id": "probe-ordinary",
+                    "call_id": "probe-ordinary-" + fixture_id,
                     "namespace": "mcp__pensieve",
                     "name": "set_context" if context_switch else "ordinary",
                     "arguments": "{}",
@@ -272,7 +275,7 @@ def run_probe(
                 if context_switch == "code-mode":
                     item = {
                         "type": "custom_tool_call",
-                        "call_id": "probe-wrapper",
+                        "call_id": "probe-wrapper-" + fixture_id,
                         "namespace": "functions",
                         "name": "exec",
                         "input": "text(await tools.mcp__pensieve__edit_page({})); text(await tools.mcp__pensieve__set_context({})); text(await tools.mcp__pensieve__edit_page({}));",
@@ -281,7 +284,7 @@ def run_probe(
                 item = {
                     "type": "message",
                     "role": "assistant",
-                    "id": "probe-answer",
+                    "id": "probe-answer-" + fixture_id,
                     "content": [
                         {
                             "type": "output_text",
@@ -292,12 +295,12 @@ def run_probe(
                     ],
                 }
             events = [
-                {"type": "response.created", "response": {"id": f"probe-{sequence}"}},
+                {"type": "response.created", "response": {"id": f"probe-{fixture_id}-{sequence}"}},
                 {"type": "response.output_item.done", "item": item},
                 {
                     "type": "response.completed",
                     "response": {
-                        "id": f"probe-{sequence}",
+                        "id": f"probe-{fixture_id}-{sequence}",
                         "usage": {
                             "input_tokens": 100000 if compact and sequence == 1 else 0,
                             "output_tokens": 0,
@@ -318,7 +321,7 @@ def run_probe(
     hooks = json.loads((plugin / "hooks/codex.json").read_text())["hooks"]
     # Direct CLI settings need the plugin-root expansion normally supplied by
     # the loader. Otherwise execute the generated adapters and bundled helper,
-    # changing only its receipt destination to the synthetic local service.
+    # replacing private credentials and service destinations with local fixtures.
     for groups in hooks.values():
         for group in groups:
             for hook in group["hooks"]:
@@ -327,6 +330,11 @@ def run_probe(
                     if "context_receipt.py" in hook["command"]:
                         hook["command"] += (
                             f" --endpoint http://127.0.0.1:{server.server_port}/hooks/delivery"
+                        )
+                    elif "context_briefing.py" in hook["command"]:
+                        hook["command"] += (
+                            f' --config "{capture_config}" --endpoint http://127.0.0.1:{server.server_port}/hooks/briefing'
+                            f" --receipt-endpoint http://127.0.0.1:{server.server_port}/hooks/delivery"
                         )
                     else:
                         hook["command"] += (
@@ -423,25 +431,22 @@ def run_probe(
     (output / "stderr.txt").write_text(result.stderr)
     if result.returncode and not interrupt:
         raise RuntimeError(f"Codex exited {result.returncode}; inspect {output / 'stderr.txt'}")
-    calls = [json.loads(line) for line in (output / "mcp.jsonl").read_text().splitlines()]
+    calls_path = output / "mcp.jsonl"
+    calls = (
+        [json.loads(line) for line in calls_path.read_text().splitlines()]
+        if calls_path.exists()
+        else []
+    )
+    briefings = [json.loads(line) for line in (output / "briefings.jsonl").read_text().splitlines()]
     model_requests = [
         json.loads(line) for line in (output / "model.jsonl").read_text().splitlines()
     ]
     assert model_requests[0]["local_primer_delivered"]
     assert "HOOK_PROBE_USERPROMPTSUBMIT" in model_requests[0]["markers"]
-    assert all(
-        call["arguments"].get("source") not in {"startup", "resume"}
-        for call in calls
-        if call["name"] == "context_briefing"
-    )
-    assert all("HOOK_PROBE_STRUCTURED_ONLY" not in request["markers"] for request in model_requests)
-    thread_ids = {call["_meta"]["threadId"] for call in calls}
+    assert all(call["name"] != "context_briefing" for call in calls)
+    thread_ids = {request["session_id"] for request in briefings}
     assert len(thread_ids) == 1
-    assert all(
-        call["arguments"]["session_id"] == call["_meta"]["threadId"]
-        for call in calls
-        if call["name"] == "context_briefing"
-    )
+    assert all(call["_meta"]["threadId"] in thread_ids for call in calls)
     if compact:
         assert model_requests[-1]["markers"] == ["HOOK_PROBE_SESSIONSTART_COMPACT"]
     receipt_path = output / "receipts.jsonl"
@@ -462,10 +467,9 @@ def run_probe(
             "native_turn_identity": all(
                 event.get("capture", {}).get("turn_id")
                 in {
-                    call["arguments"].get("turn_id")
-                    for call in calls
-                    if call["name"] == "context_briefing"
-                    and call["arguments"].get("event") == "UserPromptSubmit"
+                    request.get("turn_id")
+                    for request in briefings
+                    if request.get("event") == "UserPromptSubmit"
                 }
                 for event in captured
             ),

@@ -1,4 +1,4 @@
-"""Private, client-scoped capture credentials. Standard library, Python 3.9+."""
+"""Private, client-scoped plugin credentials. Standard library, Python 3.9+."""
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ def valid_uuid(value: object) -> bool:
 
 
 def validate_profile(profile: object) -> dict:
-    if not isinstance(profile, dict) or set(profile) - {"context_id"} != {
+    if not isinstance(profile, dict) or set(profile) - {"context_id", "briefing_enabled"} != {
         "user_id",
         "client",
         "upload_key",
@@ -112,6 +112,8 @@ def validate_profile(profile: object) -> dict:
         "host_version",
     }:
         raise ValueError("invalid capture profile")
+    if type(profile.get("briefing_enabled", False)) is not bool:
+        raise ValueError("invalid briefing permission")
     context = profile.get("context_id")
     if context is not None and (type(context) is not int or context <= 0):
         raise ValueError("invalid capture context")

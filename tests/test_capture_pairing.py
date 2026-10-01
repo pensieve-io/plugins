@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import capture_config as credentials
 import capture_pairing as pairing
+import context_briefing as briefing
 import conversation_capture as capture
 import pytest
 
@@ -72,6 +73,7 @@ def service():
                         "context_id": state["context"],
                         "installation_id": str(uuid.uuid4()),
                         "upload_key": KEY,
+                        "briefing_enabled": state.get("briefing_enabled", False),
                     }
                     state["mode"] = "consumed"
                 elif mode in {"expired", "consumed", "revoked"}:
@@ -147,7 +149,7 @@ def test_pairing_returns_only_public_link_then_installs_private_client_credentia
     assert pairing.poll(config, "codex")["status"] == "no_pending_pairing"
     assert len([r for r in service["requests"] if r[0].endswith("exchange")]) == 1
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
-    assert "enabled" not in config.read_text()
+    assert json.loads(config.read_text())["profiles"][0]["briefing_enabled"] is False
 
 
 def test_pending_rate_limit_and_offline_retry_preserve_challenge(tmp_path, service):
@@ -165,6 +167,88 @@ def test_pending_rate_limit_and_offline_retry_preserve_challenge(tmp_path, servi
     ready(config)
     service["mode"] = "approved"
     assert pairing.poll(config, "codex")["status"] == "paired"
+
+
+@pytest.mark.parametrize("consumer", ["capture", "other_conversation"])
+def test_browser_account_choice_survives_another_hook_exchanging_it(
+    tmp_path, service, monkeypatch, consumer
+):
+    config = new_config(tmp_path)
+    for owner, context in [(OWNER, 497), (OTHER, 529)]:
+        credentials.install_profile(
+            config,
+            {
+                "user_id": owner,
+                "context_id": context,
+                "client": "codex",
+                "upload_key": KEY + str(context),
+                "installation_id": str(uuid.uuid4()),
+                "runtime": "unknown",
+                "host_version": "",
+                "briefing_enabled": True,
+            },
+        )
+    monkeypatch.setattr(briefing, "open_approval", lambda *_a: None)
+    monkeypatch.setattr(briefing, "current_offer", lambda *_a: None)
+    monkeypatch.setattr(briefing, "latest_receipt", lambda *_a: None)
+    requests = []
+
+    def request(_endpoint, key, body, **_kwargs):
+        requests.append((key, body))
+        return 200, {
+            "hookSpecificOutput": {
+                "hookEventName": body["event"],
+                "additionalContext": "Company selected in the browser",
+            }
+        }
+
+    monkeypatch.setattr(briefing, "request", request)
+    event = {"hook_event_name": "UserPromptSubmit", "session_id": SESSION}
+    first = briefing.run_hook(event, "codex", config, pairing_base=service["base"])
+    assert "Approve this device" in str(first)
+    pending = json.loads(pairing.pairing_path(config, "codex").read_text())
+    assert pending["session_id"] == SESSION
+    assert "session_id" not in service["requests"][0][1]
+    service.update(mode="registered", owner=OTHER, context=529, briefing_enabled=True)
+    other_session = str(uuid.uuid4())
+    if consumer == "capture":
+        capture.run_hook(
+            {"hook_event_name": "Stop", "session_id": other_session},
+            "codex",
+            config,
+            tmp_path / "spool",
+        )
+    else:
+        # A concurrent briefing may finish the exchange, but cannot treat that
+        # browser choice as its own permission to select an account.
+        result = briefing.run_hook(
+            dict(event, session_id=other_session),
+            "codex",
+            config,
+            pairing_base=service["base"],
+        )
+        assert "Company selected in the browser" not in str(result)
+        assert (
+            briefing.read_state(briefing.state_path(config, "codex", other_session)).get("user_id")
+            is None
+        )
+    assert requests == []
+    receipt = pairing.completed_pairing(config, "codex", SESSION)
+    assert receipt == {"pairing_id": pending["id"], "user_id": OTHER, "context_id": 529}
+    assert pairing.completed_pairing(config, "codex", other_session) == {}
+    assert pairing.completed_pairing(config, "claude", SESSION) == {}
+    assert KEY not in json.dumps(receipt) and POLL_SECRET not in json.dumps(receipt)
+    result = briefing.run_hook(event, "codex", config, pairing_base=service["base"])
+    assert "Company selected in the browser" in str(result)
+    assert requests[-1][0] == KEY
+    saved = briefing.read_state(briefing.state_path(config, "codex", SESSION))
+    assert saved["user_id"] == OTHER and saved["pairing_id"] == pending["id"]
+
+    # Once adopted, the durable receipt must not undo a later context choice.
+    saved.update(context_id=601, pending_context_id=601)
+    credentials.save_private_json(briefing.state_path(config, "codex", SESSION), saved)
+    briefing.run_hook(event, "codex", config, pairing_base=service["base"])
+    assert briefing.read_state(briefing.state_path(config, "codex", SESSION))["context_id"] == 601
 
 
 @pytest.mark.parametrize("mode", ["expired", "consumed", "revoked"])

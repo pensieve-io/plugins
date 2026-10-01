@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -424,11 +423,9 @@ def test_successful_session_reset_still_requires_current_conversation_binding(
         client,
     )
     text = result["hookSpecificOutput"]["additionalContext"]
-    binding = f'context_briefing(client="{client}", session_id="{SESSION}", event="SessionStart")'
-    assert binding in text
-    assert text.index(binding) < text.index("list_contexts") < text.index("set_context")
-    assert "Only after that succeeds" in text
-    assert "do not use Pensieve company tools" in text
+    assert "context_briefing(" not in text
+    assert "will retry automatically" in text
+    assert "Do not use a context selection left over" in text
 
 
 @pytest.mark.parametrize("event", ["SessionStart", "UserPromptSubmit"])
@@ -441,7 +438,7 @@ def test_missing_current_transcript_never_reuses_previous_conversation_selection
     text = result["hookSpecificOutput"]["additionalContext"]
     assert OTHER_SESSION in text
     assert SESSION not in text
-    assert "context_briefing(" in text
+    assert "context_briefing(" not in text
     assert (
         receipt.run_hook(
             {"hook_event_name": "Stop", "session_id": OTHER_SESSION, "transcript_path": str(path)},
@@ -494,6 +491,6 @@ def test_compaction_recovery_requests_a_forced_server_briefing(
         },
         client,
     )["hookSpecificOutput"]["additionalContext"]
-    # SessionStart forces delivery even when the server still holds the old ACK.
-    assert re.search(r'event="([^"]+)"', fallback).group(1) == "SessionStart"
-    assert f'session_id="{SESSION}"' in fallback
+    assert "context_briefing(" not in fallback
+    assert "will retry automatically" in fallback
+    assert SESSION in fallback

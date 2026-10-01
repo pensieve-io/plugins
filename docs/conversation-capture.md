@@ -8,19 +8,21 @@ include transcripts only when explicitly requested. Installing the plugin alone 
 
 ## Connect an installation
 
-The plugin offers browser approval after its first authenticated native context
-hook when the user's harness/context choice is unknown. Approve enables saving
-and useful-knowledge extraction; Deny remembers the decline. There is no separate
-checkbox. A new device with remembered approval shows Connect to authorise its
-private uploader. Compatible apps on one computer can share an existing credential.
-The account and context must match authenticated native attribution. Extraction
-also requires the separately gated application worker.
+The first command briefing hook opens the existing browser connection screen.
+It authorises reading that Context's briefing and separately offers saving and
+useful-knowledge extraction. Declining sharing still registers the helper for
+briefings. A new device authorises its own private credential; compatible apps
+on one computer may reuse a credential for the same client and Context.
+Extraction also requires the separately gated application worker.
 
-The helper installs an upload-only credential privately; the user does not run
-commands, download files or paste tokens. Consent applies to that user's harness
-type and context. The remote MCP connection is unchanged. The helper never reads
-the harness's OAuth credentials, and neither upload key nor polling secret reaches
-the agent or browser approval page.
+The helper stores the device credential privately; the user does not run
+commands, download files or paste tokens. New pairings explicitly request
+`briefing_enabled`, and the exchange must confirm it. Existing upload-only
+credentials and previously pending pairings retain their original authority;
+a fresh browser approval is needed for briefing reads. Consent applies to that
+user's harness type and Context. The remote MCP connection remains OAuth
+authenticated. The helper never reads the harness's OAuth credentials, and
+neither the device key nor polling secret reaches the agent or approval page.
 
 The helper remembers displayed offers. A decline suppresses prompts across devices;
 a dismissed offer does not reopen on every prompt. After the server confirms that
@@ -44,8 +46,15 @@ exchange within their existing 2.5-second budget. The short SessionEnd hook
 leaves pairing to the next ordinary hook, so host shutdown cannot interrupt a
 new credential exchange. A lost response still requires fresh browser approval;
 the server never replays an issued credential.
-Offline first-use attempts retry at most once every five minutes. Onboarding reads
-only accepted native attribution, never a quoted marker in a user or tool message.
+Offline first-use attempts retry at most once every five minutes. Initial
+briefing pairing can start without a native marker. Once identity is known,
+accepted native attribution or private per-conversation state pins the expected
+account and Context; a quoted marker in a user or tool message never does.
+Automatic pairing also retains the initiating conversation locally. Any hook
+can complete its exchange, including capture on Stop, but the browser's account
+choice is saved in a private receipt for that conversation before the pending
+claim is removed. Another conversation cannot adopt the choice, and the receipt
+is applied once so it cannot undo later context switches.
 
 The version-3 config stores account/client/context-scoped profiles under
 `~/.config/pensieve/capture.json` (mode `0600`, private directory `0700`). Existing
@@ -68,7 +77,8 @@ and Save. No separate connection button or repeat approval is needed. Turning of
 stops your uploads and extraction across installations; your hook stays linked,
 MCP access and other members' sharing stay unchanged, and enabling starts fresh.
 
-Keys cannot read transcripts or call MCP tools. The server checks client,
+Keys cannot read transcripts or call MCP tools. Explicitly approved keys may
+fetch the Context briefing and register Claude tool-call correlation. The server checks client,
 context, membership, current consent generation and key status on every batch.
 `PENSIEVE_CAPTURE_CONFIG` and `PENSIEVE_CAPTURE_STATE` can override local paths;
 secrets never belong in hook manifests.
@@ -267,8 +277,9 @@ remain immutable; this adds no backfill and changes no existing retry bytes.
 ### Remembered harness preferences
 
 Consent belongs to a user, context and harness type. The authenticated native marker
-carries approved/declined/unknown status. Unknown offers the first browser screen;
-declined suppresses further offers. Once a private profile exists, changing the
+carries approved/declined/unknown status. Declining sharing suppresses further
+sharing offers; upgrading an old upload-only key separately requires explicit
+briefing permission. Once a private profile exists, changing the
 sharing preference never re-pairs it. Same-machine apps of one harness reuse
 `~/.config/pensieve/capture.json`. A new computer still requires Connect using a
 remembered approval; merely visiting a public pairing URL cannot authorise a helper.

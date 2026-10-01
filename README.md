@@ -153,7 +153,12 @@ settings. Receiving the package also requires a host that supports its hooks.
 
 ## Automatic company context
 
-Before the first response, the hooks load a briefing containing the selected
+The first conversation opens the existing Pensieve browser connection screen
+to authorise company briefings. Transcript sharing is an independent choice and
+can remain off. Existing upload-only installations need this explicit approval
+before their credentials can read a briefing.
+
+Before the first response after connection, command hooks load a briefing containing the selected
 company's overview, top-level topics, available source trees and guidance for
 further reading. The agent uses MCP tools to open the detail and its sources.
 
@@ -162,6 +167,7 @@ restores it after the client compacts the conversation. Your last explicit
 context choice is remembered for new conversations; each existing conversation
 keeps its own selection.
 
+A bundled script fetches briefings; agents see only ordinary company tools.
 The context hooks send delivery receipts for the briefing the client received.
 Optional [work conversation capture](docs/conversation-capture.md) requires browser
 approval per user, context and harness type. A new device separately confirms
@@ -208,9 +214,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release ord
 
 ### Connect conversations
 
-The plugin offers browser approval after its first authenticated native context
-hook. Approve saving for your harness type in that context; the helper installs
-its device upload key privately. Compatible apps of the same harness share your
+The plugin offers browser approval from its first command hook. The same
+connection authorises company briefings and offers optional saving for your
+harness type in that context; the helper installs its device key privately. Compatible apps of the same harness share your
 preference, while another context or harness has its own choice. Declining keeps MCP tools available
 and does not trigger repeated prompts. After either choice, change sharing directly in **Data → Connectors in the context**. Declining keeps the hook linked with saving off; no reconnect action is needed.
 Normal hooks complete pending setup and retry authorised uploads. V1 saves new

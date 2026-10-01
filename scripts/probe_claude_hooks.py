@@ -34,6 +34,9 @@ class ModelStub(BaseHTTPRequestHandler):
     mcp_requests: ClassVar[list[dict[str, Any]]] = []
     receipt_requests: ClassVar[list[dict[str, Any]]] = []
     capture_requests: ClassVar[list[dict[str, Any]]] = []
+    briefing_requests: ClassVar[list[dict[str, Any]]] = []
+    binding_requests: ClassVar[list[dict[str, Any]]] = []
+    capture_enabled = False
     fail_hook: bool = False
     interrupt_waiting = threading.Event()
     release_interrupted = threading.Event()
@@ -66,6 +69,43 @@ class ModelStub(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         body = json.loads(raw)
+        if self.path == "/hooks/briefing":
+            assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
+            self.briefing_requests.append(body)
+            if self.fail_hook:
+                self.send_response(503)
+                self.end_headers()
+                return
+            event, source = body["event"], body.get("source", "")
+            content = "Pensieve is the company's shared, curated context layer.\n"
+            content += f"{MARKER}{event}_{source}\n<!-- pensieve-delivery token={RECEIPT_TOKEN} -->"
+            if event == "UserPromptSubmit":
+                content += (
+                    "\n<!-- pensieve-capture-context "
+                    + json.dumps(
+                        {
+                            "v": 2,
+                            "capture_generation": CAPTURE_OWNER if self.capture_enabled else None,
+                            "kind": "prompt",
+                            "user_id": CAPTURE_OWNER,
+                            "client": "claude",
+                            "conversation_id": body["session_id"],
+                            "context_id": 497,
+                            "turn_id": None,
+                        }
+                    )
+                    + " -->"
+                )
+            self.reply_json(
+                {"hookSpecificOutput": {"hookEventName": event, "additionalContext": content}}
+            )
+            return
+        if self.path == "/hooks/tool-binding":
+            assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
+            self.binding_requests.append(body)
+            self.send_response(204)
+            self.end_headers()
+            return
         if self.path == "/hooks/conversations":
             assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
             self.capture_requests.append({"body": body, "sha": hashlib.sha256(raw).hexdigest()})
@@ -107,50 +147,16 @@ class ModelStub(BaseHTTPRequestHandler):
                             "description": "Synthetic hook probe",
                             "inputSchema": {"type": "object", "additionalProperties": True},
                         }
-                        for name in ("context_briefing", "ordinary")
+                        for name in ("ordinary",)
                     ]
                 }
             elif method == "tools/call":
-                args = body.get("params", {}).get("arguments", {})
-                event, source = args.get("event", "unknown"), args.get("source", "")
-                capture_marker = ""
-                if event == "UserPromptSubmit":
-                    capture_marker = (
-                        "\n<!-- pensieve-capture-context "
-                        + json.dumps(
-                            {
-                                "v": 2,
-                                "capture_generation": CAPTURE_OWNER,
-                                "kind": "prompt",
-                                "user_id": CAPTURE_OWNER,
-                                "client": "claude",
-                                "conversation_id": args["session_id"],
-                                "context_id": 497,
-                                "turn_id": None,
-                            }
-                        )
-                        + " -->"
-                    )
-                payload = {
-                    "hookSpecificOutput": {
-                        "hookEventName": event,
-                        "additionalContext": f"{MARKER}{event}_{source}\n<!-- pensieve-delivery token={RECEIPT_TOKEN} -->"
-                        + capture_marker,
-                    }
-                }
-                result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
-                if args.get("ordinary"):
-                    result = {"content": [{"type": "text", "text": "Synthetic ordinary result."}]}
-                if self.fail_hook and event == "UserPromptSubmit":
-                    result = {
-                        "isError": True,
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Synthetic temporary hook failure",
-                            }
-                        ],
-                    }
+                meta = body.get("params", {}).get("_meta", {})
+                assert any(
+                    binding["tool_use_id"] == meta.get("claudecode/toolUseId")
+                    for binding in self.binding_requests
+                ), "ordinary call preceded binding"
+                result = {"content": [{"type": "text", "text": "Synthetic ordinary result."}]}
             else:
                 result = {}
             self.mcp_requests.append(
@@ -299,6 +305,7 @@ def stream_probe(common: list[str], env: dict[str, str], root: Path) -> list[dic
         ]:
             before = len(ModelStub.requests)
             before_mcp = len(ModelStub.mcp_requests)
+            before_briefing = len(ModelStub.briefing_requests)
             assert process.stdin is not None
             process.stdin.write(
                 json.dumps(
@@ -345,6 +352,7 @@ def stream_probe(common: list[str], env: dict[str, str], root: Path) -> list[dic
                     "model_requests": len(messages),
                     "grounding_delivered": MARKER in json.dumps(messages),
                     "mcp_calls": ModelStub.mcp_requests[before_mcp:],
+                    "briefings": ModelStub.briefing_requests[before_briefing:],
                     "session_ids": sorted(
                         {entry["session_id"] for entry in received if "session_id" in entry}
                     ),
@@ -373,43 +381,52 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
     ModelStub.mcp_requests.clear()
     ModelStub.receipt_requests.clear()
     ModelStub.capture_requests.clear()
+    ModelStub.briefing_requests.clear()
+    ModelStub.binding_requests.clear()
+    ModelStub.capture_enabled = capture
     with tempfile.TemporaryDirectory(prefix="pensieve-claude-hooks-") as directory:
         root = Path(directory)
         plugin = root / "plugin"
         capture_config = root / "capture.json"
-        if capture:
-            capture_config.write_text(
-                json.dumps(
-                    {
-                        "version": 3,
-                        "profiles": [
-                            {
-                                "user_id": CAPTURE_OWNER,
-                                "upload_key": CAPTURE_KEY,
-                                "client": "claude",
-                                "installation_id": "11111111-1111-4111-8111-111111111111",
-                                "runtime": "unknown",
-                                "host_version": "",
-                            }
-                        ],
-                    }
-                )
+        capture_config.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "profiles": [
+                        {
+                            "user_id": CAPTURE_OWNER,
+                            "upload_key": CAPTURE_KEY,
+                            "client": "claude",
+                            "installation_id": "11111111-1111-4111-8111-111111111111",
+                            "runtime": "unknown",
+                            "host_version": "",
+                            "briefing_enabled": True,
+                        }
+                    ],
+                }
             )
-            capture_config.chmod(0o600)
+        )
+        capture_config.chmod(0o600)
         shutil.copytree(Path(__file__).resolve().parents[1] / "pensieve", plugin)
         server = ThreadingHTTPServer(("127.0.0.1", 0), ModelStub)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         hook_path = plugin / "hooks/hooks.json"
         hooks = json.loads(hook_path.read_text())
-        # Keep generated inputs, matchers, timeouts and the bundled helper;
-        # only its receipt destination changes to the synthetic local service.
+        # Keep packaged matchers, timeouts and helpers; replace service
+        # destinations and the private credential file with local fixtures.
         for groups in hooks["hooks"].values():
             for group in groups:
                 for hook in group["hooks"]:
                     if hook["type"] == "command" and "context_receipt.py" in hook["command"]:
                         hook["command"] += (
                             f" --endpoint http://127.0.0.1:{server.server_port}/hooks/delivery"
+                        )
+                    elif hook["type"] == "command" and "context_briefing.py" in hook["command"]:
+                        hook["command"] += (
+                            f' --config "{capture_config}" --endpoint http://127.0.0.1:{server.server_port}/hooks/briefing'
+                            f" --binding-endpoint http://127.0.0.1:{server.server_port}/hooks/tool-binding"
+                            f" --receipt-endpoint http://127.0.0.1:{server.server_port}/hooks/delivery"
                         )
                     elif hook["type"] == "command":
                         hook["command"] += (
@@ -462,7 +479,6 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
             "--permission-mode",
             "dontAsk",
             "--allowedTools",
-            "mcp__plugin_pensieve_pensieve__context_briefing",
             "mcp__plugin_pensieve_pensieve__ordinary",
             "--model",
             "claude-sonnet-4-6",
@@ -487,6 +503,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                 ModelStub.fail_hook = label == "hook_failure"
                 before = len(ModelStub.requests)
                 before_mcp = len(ModelStub.mcp_requests)
+                before_briefing = len(ModelStub.briefing_requests)
                 debug = root / f"{label}.debug"
                 result = subprocess.run(
                     [*common, "--debug-file", str(debug), *extra, prompt],
@@ -513,6 +530,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                         "model_requests": len(messages),
                         "grounding_delivered": MARKER in json.dumps(messages),
                         "mcp_calls": ModelStub.mcp_requests[before_mcp:],
+                        "briefings": ModelStub.briefing_requests[before_briefing:],
                         "compact_briefing_delivered": f"{MARKER}SessionStart_compact"
                         in json.dumps(messages),
                         "mcp_status": [
@@ -534,6 +552,8 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                 )
             report["stream_cases"] = stream_probe(common, env, root)
             report["mcp_events"] = ModelStub.mcp_requests
+            report["briefing_requests"] = ModelStub.briefing_requests
+            report["binding_requests"] = ModelStub.binding_requests
             report["receipt_requests"] = ModelStub.receipt_requests
             if capture:
                 attempts = ModelStub.capture_requests
@@ -723,11 +743,11 @@ def verify_report(report: dict[str, Any]) -> dict[str, bool]:
     def calls(case: dict[str, Any]) -> list[dict[str, Any]]:
         return [entry for entry in case["mcp_calls"] if entry["method"] == "tools/call"]
 
-    first = calls(cases["startup"])[0]
-    resumed = calls(cases["resume"])[0]
+    first = cases["startup"]["briefings"][0]
+    resumed = cases["resume"]["briefings"][0]
     stream_first, clear, after_clear, interrupted = report["stream_cases"]
-    clear_call = calls(clear)[0]
-    stream_call = calls(stream_first)[0]
+    clear_call = clear["briefings"][0]
+    stream_call = stream_first["briefings"][0]
     ordinary = next(
         entry
         for entry in calls(cases["ordinary_tool"])
@@ -735,19 +755,21 @@ def verify_report(report: dict[str, Any]) -> dict[str, bool]:
     )
     checks = {
         "first_prompt_grounded": cases["startup"]["grounding_delivered"],
-        "startup_uses_local_primer": cases["startup"]["local_primer_delivered"]
-        and all(
-            call["params"]["arguments"].get("event") != "SessionStart"
-            for call in calls(cases["startup"])
+        "startup_uses_command_briefing": cases["startup"]["local_primer_delivered"]
+        and first["event"] == "SessionStart",
+        "resume_keeps_conversation": first["session_id"] == resumed["session_id"],
+        "resume_refreshes_delivery_scope": first["delivery_id"] != resumed["delivery_id"],
+        "compaction_restores_context": cases["after_compact"]["grounding_delivered"],
+        "clear_changes_conversation": clear_call["session_id"] != stream_call["session_id"],
+        "ordinary_call_bound_before_execution": any(
+            binding["tool_use_id"] == ordinary["params"]["_meta"]["claudecode/toolUseId"]
+            for binding in report["binding_requests"]
         ),
-        "resume_keeps_conversation": first["params"]["arguments"]["session_id"]
-        == resumed["params"]["arguments"]["session_id"],
-        "resume_reconnects_transport": first["transport_id"] != resumed["transport_id"],
-        "compaction_restores_context": cases["after_compact"]["compact_briefing_delivered"],
-        "clear_changes_conversation_on_same_transport": clear_call["transport_id"]
-        == stream_call["transport_id"]
-        and clear_call["params"]["arguments"]["session_id"]
-        != stream_call["params"]["arguments"]["session_id"],
+        "briefing_tool_absent": all(
+            entry.get("params", {}).get("name") != "context_briefing"
+            for entry in report["mcp_events"]
+            if entry["method"] == "tools/call"
+        ),
         "after_clear_grounded": after_clear["grounding_delivered"],
         "ordinary_tool_has_no_conversation_metadata": set(ordinary["params"].get("_meta", {}))
         == {"claudecode/toolUseId", "progressToken"},

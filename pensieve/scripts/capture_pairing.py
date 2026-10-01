@@ -24,7 +24,7 @@ from capture_config import (
 from capture_protocol import HEADER, VERSION, check
 
 API_BASE = "https://api.pensieve.uk/users/me/conversation-capture"
-PLUGIN_VERSION = "capture-pairing-1"
+PLUGIN_VERSION = "script-briefing-1"
 RUNTIMES = {"codex_cli", "claude_code_cli", "unknown"}
 
 
@@ -106,6 +106,31 @@ def pairing_path(config: Path, client: str) -> Path:
     return config.with_name(f"capture-pairing-{client}.json")
 
 
+def pairing_receipt_path(config: Path, client: str, session_id: str) -> Path:
+    if client not in CLIENTS or not valid_uuid(session_id):
+        raise ValueError("Invalid pairing conversation")
+    return config.parent / "briefing-pairings" / f"{client}-{session_id}.json"
+
+
+def completed_pairing(config: Path, client: str, session_id: str) -> dict:
+    """Recover this conversation's browser choice, whichever hook exchanged it."""
+    try:
+        result = json.loads(
+            private_file(pairing_receipt_path(config, client, session_id), MAX_CONFIG_BYTES)
+        )
+    except FileNotFoundError:
+        return {}
+    if (
+        not isinstance(result, dict)
+        or not valid_uuid(result.get("pairing_id"))
+        or not valid_uuid(result.get("user_id"))
+        or type(result.get("context_id")) is not int
+        or result["context_id"] <= 0
+    ):
+        raise ValueError("Invalid completed pairing")
+    return result
+
+
 def public_status(pending: dict) -> dict:
     return {
         "status": "awaiting_approval",
@@ -142,6 +167,8 @@ def validate_pending(value: object, client: str) -> dict:
         raise ValueError("Invalid approval address")
     if value.get("runtime") not in RUNTIMES:
         raise ValueError("Invalid pairing runtime")
+    if value.get("session_id") is not None and not valid_uuid(value["session_id"]):
+        raise ValueError("Invalid pairing conversation")
     interval = value.get("poll_interval_seconds")
     if not isinstance(interval, int) or isinstance(interval, bool) or not 1 <= interval <= 60:
         raise ValueError("Invalid pairing interval")
@@ -157,6 +184,7 @@ def start(
     expected_user_id: str | None = None,
     expected_context_id: int | None = None,
     timeout: float = 5,
+    session_id: str | None = None,
 ) -> dict:
     if runtime not in RUNTIMES or len(host_version) > 100:
         raise ValueError("Unsupported runtime")
@@ -164,12 +192,16 @@ def start(
         raise ValueError("Runtime does not match client")
     if runtime.startswith("claude") and client != "claude":
         raise ValueError("Runtime does not match client")
-    if (expected_user_id is None) != (expected_context_id is None):
-        raise ValueError("Pairing identity must include account and context")
+    if session_id is not None and not valid_uuid(session_id):
+        raise ValueError("Invalid pairing conversation")
+    if expected_context_id is not None and expected_user_id is None:
+        raise ValueError("Pairing context must include its account")
     if expected_user_id is not None and (
         not valid_uuid(expected_user_id)
-        or type(expected_context_id) is not int
-        or expected_context_id <= 0
+        or (
+            expected_context_id is not None
+            and (type(expected_context_id) is not int or expected_context_id <= 0)
+        )
     ):
         raise ValueError("Invalid pairing identity")
     path = pairing_path(config, client)
@@ -182,6 +214,7 @@ def start(
             if (
                 old.get("expected_user_id") == expected_user_id
                 and old.get("expected_context_id") == expected_context_id
+                and old.get("session_id") == session_id
             ):
                 return public_status(old)
             return {"status": "another_connection_pending"}
@@ -194,6 +227,7 @@ def start(
                 "label": "Codex" if client == "codex" else "Claude Code",
                 "plugin_version": PLUGIN_VERSION,
                 "host_version": host_version,
+                "briefing_enabled": True,
                 "expected_user_id": expected_user_id,
                 "expected_context_id": expected_context_id,
             },
@@ -215,9 +249,11 @@ def start(
                 "client": client,
                 "runtime": runtime,
                 "host_version": host_version,
+                "briefing_enabled": True,
                 "next_poll_at": 0,
                 "expected_user_id": expected_user_id,
                 "expected_context_id": expected_context_id,
+                "session_id": session_id,
             },
             client,
         )
@@ -274,9 +310,12 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             raise ValueError("Invalid approval")
         if not valid_uuid(response.get("installation_id")):
             raise ValueError("Invalid approval")
-        if pending.get("expected_user_id") is not None and (
-            response.get("user_id") != pending["expected_user_id"]
-            or response.get("context_id") != pending["expected_context_id"]
+        if (
+            pending.get("expected_user_id") is not None
+            and response.get("user_id") != pending["expected_user_id"]
+        ) or (
+            pending.get("expected_context_id") is not None
+            and response.get("context_id") != pending["expected_context_id"]
         ):
             raise ValueError("Approval does not match the initiating connection")
         install_profile(
@@ -289,12 +328,32 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
                 "context_id": response["context_id"],
                 "runtime": pending["runtime"],
                 "host_version": pending["host_version"],
+                "briefing_enabled": (
+                    pending.get("briefing_enabled") is True
+                    and response.get("briefing_enabled") is True
+                ),
             },
         )
+        if pending.get("session_id") is not None:
+            # Capture, manual setup and other conversations can all win poll().
+            # Commit the initiating conversation's choice before removing the
+            # claim; config alone cannot identify that choice across accounts.
+            save_private_json(
+                pairing_receipt_path(config, client, pending["session_id"]),
+                {
+                    "pairing_id": pending["id"],
+                    "user_id": response["user_id"],
+                    "context_id": response["context_id"],
+                },
+            )
         path.unlink()
         return {
             "status": "paired",
             "client": client,
             "context_id": response["context_id"],
+            "user_id": response["user_id"],
+            "briefing_enabled": (
+                pending.get("briefing_enabled") is True and response.get("briefing_enabled") is True
+            ),
             "message": "Device paired. Capture and company contribution are controlled in Pensieve.",
         }

@@ -1,5 +1,28 @@
 # Client hook probes
 
+The current probes execute the packaged command briefing helper against a local
+HTTP endpoint. They provide a private synthetic `briefing_enabled` credential
+and expose no briefing MCP tool. The Claude fixture requires a matching
+PreToolUse binding before accepting its ordinary MCP call. Credential, receipt
+and optional capture boundaries remain separately asserted. Older dated results
+below describe the previous native MCP-hook implementation.
+
+## Command briefing verification — 30 September 2026
+
+Claude Code 2.1.285 passed fourteen briefing, exact-call binding and receipt
+checks plus all capture checks using the packaged command hooks. This covers
+startup, resume, compaction, clear, fork, failed briefing retry and interruption.
+The fixture exposes only an ordinary MCP tool and rejects its execution unless
+the matching PreToolUse call binding has already arrived.
+
+Codex CLI 0.159.0 passed first-run and compaction probes, each with ten capture
+checks, and resume with eleven checks including its existing parent turn.
+Compaction observed both receipt ACK and reset. Response, message and call IDs
+are unique per synthetic run so resumed history cannot collide with the fixture. Both hosts kept device
+credentials out of model input and preserved native capture identities.
+These are synthetic local services and credentials: live browser approval,
+production rollout and desktop execution still need separate acceptance.
+
 ## Claude Code
 
 Run from the repository root with Python 3.12 and the installed Claude Code CLI:
@@ -166,9 +189,10 @@ receipt readers must respect this boundary and avoid recursively searching every
 JSON string. Ephemeral or non-local sessions can have `transcript_path=null` and
 must use the conservative delivery fallback.
 
-Handlers for the same event run concurrently. An acknowledgement helper cannot
-be assumed to finish before the MCP refresh hook, so a delayed acknowledgement
-may cause one safe repeat. MCP replies do not themselves acknowledge injection.
+Handlers for the same event run concurrently. The current briefing command
+acknowledges receipts and fetches context sequentially within one helper, while
+capture handlers can run concurrently. An HTTP reply does not itself acknowledge
+that the host injected the briefing.
 
 ## Limits
 

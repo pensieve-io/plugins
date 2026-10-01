@@ -2,7 +2,7 @@
 
 The host owns its transcript. This helper reads only that supplied file, uses
 non-secret authenticated context markers, and uploads with a separately issued
-upload-only key from a private local config. It never reads MCP/OAuth credentials.
+device key with upload authority from a private local config. It never reads MCP/OAuth credentials.
 """
 
 from __future__ import annotations

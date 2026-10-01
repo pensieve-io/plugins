@@ -130,6 +130,7 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
             expected_user_id=owner,
             expected_context_id=context,
             timeout=0.5,
+            session_id=session,
         )
         if result["status"] == "awaiting_approval":
             state[identity]["offered"] = True
