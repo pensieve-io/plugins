@@ -1,8 +1,9 @@
-"""Offer browser consent once, using only authenticated native hook attribution.
+"""Ask once whether to share transcripts, using only authenticated hook attribution.
 
-No transcript is uploaded here. A remembered decline suppresses onboarding on every
-installation. A signed-in choice registers the helper even when sharing is off;
-subsequent changes happen directly in the context connector settings.
+No transcript is uploaded and no credential is issued here: the helper is already
+connected through MCP sign-in, so the page only records the member's choice. A
+remembered decline suppresses the prompt on every installation; later changes
+happen in the context's connector settings.
 """
 
 from __future__ import annotations
@@ -22,10 +23,11 @@ from capture_config import (
     private_lock,
     save_private_json,
 )
-from capture_pairing import pairing_path, start
 from context_receipt import accepted_contexts, compaction_boundary, json_object, transcript_tail
 
 CONSENT_MARKER = re.compile(r"<!-- pensieve-capture-consent (\{[^\r\n]*?\}) -->")
+CONSENT_PAGE = "https://app.pensieve.uk/oauth/conversation-capture"
+OFFER_INTERVAL_SECONDS = 600
 
 
 def current_offer(path: object, client: str, session: str) -> dict | None:
@@ -67,8 +69,8 @@ def current_offer(path: object, client: str, session: str) -> dict | None:
     return None
 
 
-def open_approval(url: str) -> None:
-    # v1's accepted local runtime is macOS. The URL was validated by pairing;
+def open_page(url: str) -> None:
+    # v1's accepted local runtime is macOS. The URL is built from fixed parts;
     # no shell, credentials, model-directed command or transcript is involved.
     subprocess.Popen(
         ["/usr/bin/open", url],
@@ -82,13 +84,11 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
     if sys.platform != "darwin":
         return
     offer = current_offer(payload.get("transcript_path"), client, session)
-    if offer is None:
+    if offer is None or offer["consent"] != "unknown":
         return
-    marker = offer
-    if marker["consent"] == "declined":
-        return
-    owner, context = marker["user_id"], marker["context_id"]
-    if key_for(configured, owner, context) is not None:
+    owner, context = offer["user_id"], offer["context_id"]
+    # Only a connected helper can record a choice; connecting is MCP's job.
+    if key_for(configured, owner, context) is None:
         return
     identity = f"{client}:{owner}:{context}"
     path = config.with_name("capture-onboarding.json")
@@ -102,37 +102,10 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
         previous = state.get(identity, {})
         if not isinstance(previous, dict):
             raise ValueError("Invalid onboarding state")
-        generation = marker["capture_generation"]
-        changed = previous.get("generation") != generation
-        # Poll runs before onboarding. Until the server discards this offer, it
-        # may be an accepted registration awaiting exchange after an offline
-        # interval. Its browser deadline cannot justify replacing the claim.
-        pending = pairing_path(config, client)
-        if pending.exists() or pending.is_symlink():
+        # Once per conversation, and not again for a while: closing the page
+        # without choosing asks again later, never on every prompt.
+        if previous.get("session") == session or previous.get("retry_at", 0) > time.time():
             return
-        if previous.get("offered") and not changed and previous.get("session") == session:
-            return
-        if not changed and previous.get("retry_at", 0) > time.time():
-            return
-        # Remember attempts before I/O. Offline first-use attempts may retry
-        # after five minutes. An unanswered offer can retry in a later
-        # conversation after the server has discarded it, never every prompt.
-        state[identity] = {
-            "offered": bool(previous.get("offered")),
-            "generation": generation,
-            "session": session,
-            "retry_at": time.time() + 300,
-        }
+        state[identity] = {"session": session, "retry_at": time.time() + OFFER_INTERVAL_SECONDS}
         save_private_json(path, state)
-        result = start(
-            config,
-            client,
-            expected_user_id=owner,
-            expected_context_id=context,
-            timeout=0.5,
-            session_id=session,
-        )
-        if result["status"] == "awaiting_approval":
-            state[identity]["offered"] = True
-            save_private_json(path, state)
-            open_approval(result["verification_url"])
+    open_page(f"{CONSENT_PAGE}?client={client}&context_id={int(context)}")

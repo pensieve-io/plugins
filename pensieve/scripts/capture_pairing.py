@@ -1,4 +1,9 @@
-"""Browser-approved pairing and opportunistic hooks. Never emit credentials."""
+"""Register this device through the member's MCP sign-in. Never emit credentials.
+
+A pending pairing holds a private poll secret. The hooks bind it to the call or
+thread their host is about to send to Pensieve's MCP server; that signed-in call
+registers it, and the next hook exchanges the secret for a scoped credential.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from capture_config import (
@@ -24,7 +29,7 @@ from capture_config import (
 from capture_protocol import HEADER, VERSION, check
 
 API_BASE = "https://api.pensieve.uk/users/me/conversation-capture"
-PLUGIN_VERSION = "script-briefing-1"
+PLUGIN_VERSION = "mcp-handoff-1"
 RUNTIMES = {"codex_cli", "claude_code_cli", "unknown"}
 
 
@@ -113,7 +118,7 @@ def pairing_receipt_path(config: Path, client: str, session_id: str) -> Path:
 
 
 def completed_pairing(config: Path, client: str, session_id: str) -> dict:
-    """Recover this conversation's browser choice, whichever hook exchanged it."""
+    """Recover this conversation's registration, whichever hook exchanged it."""
     try:
         result = json.loads(
             private_file(pairing_receipt_path(config, client, session_id), MAX_CONFIG_BYTES)
@@ -133,8 +138,7 @@ def completed_pairing(config: Path, client: str, session_id: str) -> dict:
 
 def public_status(pending: dict) -> dict:
     return {
-        "status": "awaiting_approval",
-        "verification_url": pending["verification_url"],
+        "status": "awaiting_registration",
         "expires_at": pending["expires_at"],
         "client": pending["client"],
     }
@@ -156,15 +160,6 @@ def validate_pending(value: object, client: str) -> dict:
         raise ValueError("Invalid pairing state")
     checked_base(value["base"])
     timestamp(value["expires_at"])
-    parsed = urlsplit(value["verification_url"])
-    if (
-        parsed.scheme != "https"
-        or parsed.netloc != "app.pensieve.uk"
-        or parsed.path != "/oauth/conversation-capture"
-        or parsed.fragment
-        or parse_qs(parsed.query) != {"pairing_id": [value["id"]]}
-    ):
-        raise ValueError("Invalid approval address")
     if value.get("runtime") not in RUNTIMES:
         raise ValueError("Invalid pairing runtime")
     if value.get("session_id") is not None and not valid_uuid(value["session_id"]):
@@ -173,6 +168,24 @@ def validate_pending(value: object, client: str) -> dict:
     if not isinstance(interval, int) or isinstance(interval, bool) or not 1 <= interval <= 60:
         raise ValueError("Invalid pairing interval")
     return value
+
+
+def pending_claim(config: Path, client: str) -> dict | None:
+    """The private claim awaiting registration. Replacement is atomic: no lock."""
+    try:
+        raw = private_file(pairing_path(config, client), MAX_CONFIG_BYTES)
+    except FileNotFoundError:
+        return None
+    return validate_pending(json.loads(raw), client)
+
+
+def discard_claim(config: Path, client: str, pairing_id: str) -> None:
+    """Drop a claim the server reports closed, unless another hook replaced it."""
+    path = pairing_path(config, client)
+    with private_lock(path.with_suffix(".lock")):
+        current = pending_claim(config, client)
+        if current is not None and current["id"] == pairing_id:
+            path.unlink()
 
 
 def start(
@@ -208,9 +221,9 @@ def start(
     with private_lock(path.with_suffix(".lock")):
         if path.exists() or path.is_symlink():
             old = validate_pending(json.loads(private_file(path, MAX_CONFIG_BYTES)), client)
-            # Browser expiry is not claim expiry: approval/decline may already
-            # have registered a credential while exchange was offline. Only a
-            # terminal server response in poll() can discard this private claim.
+            # Expiry is not claim expiry: a signed-in call may already have
+            # registered it while exchange was offline. Only a terminal server
+            # response in poll() can discard this private claim.
             if (
                 old.get("expected_user_id") == expected_user_id
                 and old.get("expected_context_id") == expected_context_id
@@ -227,7 +240,6 @@ def start(
                 "label": "Codex" if client == "codex" else "Claude Code",
                 "plugin_version": PLUGIN_VERSION,
                 "host_version": host_version,
-                "briefing_enabled": True,
                 "expected_user_id": expected_user_id,
                 "expected_context_id": expected_context_id,
             },
@@ -242,14 +254,12 @@ def start(
             {
                 "id": response.get("id"),
                 "poll_secret": response.get("poll_secret"),
-                "verification_url": response.get("verification_url"),
                 "expires_at": response.get("expires_at"),
                 "poll_interval_seconds": response.get("poll_interval_seconds"),
                 "base": checked_base(base),
                 "client": client,
                 "runtime": runtime,
                 "host_version": host_version,
-                "briefing_enabled": True,
                 "next_poll_at": 0,
                 "expected_user_id": expected_user_id,
                 "expected_context_id": expected_context_id,
@@ -273,8 +283,8 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             pending = validate_pending(json.loads(private_file(path, MAX_CONFIG_BYTES)), client)
         except FileNotFoundError:
             return {"status": "no_pending_pairing"}
-        # Only unanswered browser offers expire. A signed-in choice leaves a
-        # private registration claim that can finish on a later hook, even off.
+        # Only unregistered claims expire. A registered one can finish on a
+        # later hook, even after an offline interval.
         if pending.get("next_poll_at", 0) > time.time():
             return public_status(pending)
         # Persist the rate limit before a network attempt; concurrent hooks and
@@ -302,14 +312,14 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             return {"status": "offline", "message": "Pairing will retry at the next agent hook."}
         if response.get("status") == "pending":
             return public_status(pending)
-        if response.get("status") not in {"approved", "registered"}:
+        if response.get("status") != "registered":
             return {"status": "offline", "message": "Pairing will retry at the next agent hook."}
         if not isinstance(response.get("context_id"), int) or isinstance(
             response["context_id"], bool
         ):
-            raise ValueError("Invalid approval")
+            raise ValueError("Invalid registration")
         if not valid_uuid(response.get("installation_id")):
-            raise ValueError("Invalid approval")
+            raise ValueError("Invalid registration")
         if (
             pending.get("expected_user_id") is not None
             and response.get("user_id") != pending["expected_user_id"]
@@ -317,7 +327,7 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             pending.get("expected_context_id") is not None
             and response.get("context_id") != pending["expected_context_id"]
         ):
-            raise ValueError("Approval does not match the initiating connection")
+            raise ValueError("Registration does not match the initiating connection")
         install_profile(
             config,
             {
@@ -328,16 +338,13 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
                 "context_id": response["context_id"],
                 "runtime": pending["runtime"],
                 "host_version": pending["host_version"],
-                "briefing_enabled": (
-                    pending.get("briefing_enabled") is True
-                    and response.get("briefing_enabled") is True
-                ),
+                "briefing_enabled": response.get("briefing_enabled") is True,
             },
         )
         if pending.get("session_id") is not None:
             # Capture, manual setup and other conversations can all win poll().
-            # Commit the initiating conversation's choice before removing the
-            # claim; config alone cannot identify that choice across accounts.
+            # Commit the initiating conversation's registration before removing
+            # the claim; config alone cannot identify it across accounts.
             save_private_json(
                 pairing_receipt_path(config, client, pending["session_id"]),
                 {
@@ -352,8 +359,6 @@ def poll(config: Path, client: str, timeout: float = 2) -> dict:
             "client": client,
             "context_id": response["context_id"],
             "user_id": response["user_id"],
-            "briefing_enabled": (
-                pending.get("briefing_enabled") is True and response.get("briefing_enabled") is True
-            ),
-            "message": "Device paired. Capture and company contribution are controlled in Pensieve.",
+            "briefing_enabled": response.get("briefing_enabled") is True,
+            "message": "Device connected. Transcript sharing is controlled in Pensieve.",
         }

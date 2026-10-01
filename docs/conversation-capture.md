@@ -8,53 +8,54 @@ include transcripts only when explicitly requested. Installing the plugin alone 
 
 ## Connect an installation
 
-The first command briefing hook opens the existing browser connection screen.
-It authorises reading that Context's briefing and separately offers saving and
-useful-knowledge extraction. Declining sharing still registers the helper for
-briefings. A new device authorises its own private credential; compatible apps
-on one computer may reuse a credential for the same client and Context.
+The hooks connect automatically on the first Pensieve tool call after MCP
+sign-in. That signed-in call registers the helper and authorises reading the
+Context's briefing, which starts on the next prompt. Once connected, the plugin
+asks once, on a separate Approve/Deny page, about saving and useful-knowledge
+extraction. Declining sharing keeps the helper registered for briefings. A new
+device registers its own private credential; compatible apps on one computer
+may reuse a credential for the same client and Context.
 Extraction also requires the separately gated application worker.
 
 The helper stores the device credential privately; the user does not run
-commands, download files or paste tokens. New pairings explicitly request
-`briefing_enabled`, and the exchange must confirm it. Existing upload-only
-credentials and previously pending pairings retain their original authority;
-a fresh browser approval is needed for briefing reads. Consent applies to that
-user's harness type and Context. The remote MCP connection remains OAuth
-authenticated. The helper never reads the harness's OAuth credentials, and
-neither the device key nor polling secret reaches the agent or approval page.
+commands, download files or paste tokens. The exchange must confirm
+`briefing_enabled`. Existing upload-only credentials retain their original
+authority; briefing reads need a fresh registration through MCP sign-in. Consent
+applies to that user's harness type and Context. The remote MCP connection
+remains OAuth authenticated. The helper never reads the harness's OAuth
+credentials, and neither the device key nor polling secret reaches the agent or
+the sharing page; the poll secret goes only to the enrolment and exchange
+endpoints, never with a bearer credential.
 
-The helper remembers displayed offers. A decline suppresses prompts across devices;
-a dismissed offer does not reopen on every prompt. After the server confirms that
-an unanswered offer expired, a later conversation can offer it again. An existing
-private claim survives new conversations, context switches and consent changes
-while polling retries. Another context waits for that claim to finish; its
-approval cannot replace the pending secret.
-Either explicit signed-in browser
-choice links the helper: Approve enables sharing, while Deny keeps sharing off.
-The helper privately exchanges its one-time secret and stores a scoped credential
-even when declined. It captures no messages without a fresh enabled-consent marker,
-and the server independently rejects uploads while sharing is off.
+The helper remembers displayed sharing pages. A decline suppresses the question
+across devices. A page closed without a choice is asked again at most once in a
+later conversation, at least ten minutes later, never on every prompt. An
+existing private claim survives new conversations, context switches and consent
+changes while polling retries. Another context waits for that claim to finish;
+its registration cannot replace the pending secret. On the sharing page, Approve
+enables sharing, while Deny keeps sharing off; either way the helper stays
+linked. It captures no messages without a fresh enabled-consent marker, and the
+server independently rejects uploads while sharing is off.
 
-Unanswered browser offers expire after ten minutes. Accepted registrations remain
-claimable after an offline interval, until consumed or invalidated by account
-withdrawal. The helper polls the server before discarding an old offer so an accepted
-Deny is not mistaken for an expired request. A consumed credential is never returned
-a second time. `paired` means the hook is linked, not that transcript saving is on.
+Unregistered claims expire; the server sets their lifetime, which the helper
+accepts up to one hour. Registered claims remain claimable after an offline
+interval, until consumed or invalidated by account withdrawal. The helper polls
+the server before discarding an old claim so a completed registration is not
+mistaken for an expired request; a 410 from enrolment or exchange discards it.
+A consumed credential is never returned a second time. `paired` means the hook is linked, not that transcript saving is on.
 Ordinary hooks allow up to two seconds for the capability check and private
 exchange within their existing 2.5-second budget. The short SessionEnd hook
 leaves pairing to the next ordinary hook, so host shutdown cannot interrupt a
-new credential exchange. A lost response still requires fresh browser approval;
-the server never replays an issued credential.
-Offline first-use attempts retry at most once every five minutes. Initial
+new credential exchange. A lost response requires a fresh registration on a
+later tool call; the server never replays an issued credential. Initial
 briefing pairing can start without a native marker. Once identity is known,
 accepted native attribution or private per-conversation state pins the expected
 account and Context; a quoted marker in a user or tool message never does.
 Automatic pairing also retains the initiating conversation locally. Any hook
-can complete its exchange, including capture on Stop, but the browser's account
-choice is saved in a private receipt for that conversation before the pending
-claim is removed. Another conversation cannot adopt the choice, and the receipt
-is applied once so it cannot undo later context switches.
+can complete its exchange, including capture on Stop, but the registered account
+and Context are saved in a private receipt for that conversation before the
+pending claim is removed. Another conversation cannot adopt that registration,
+and the receipt is applied once so it cannot undo later context switches.
 
 The version-3 config stores account/client/context-scoped profiles under
 `~/.config/pensieve/capture.json` (mode `0600`, private directory `0700`). Existing
@@ -72,12 +73,12 @@ current member has linked a hook, even if everyone has sharing off. The people c
 expands current contributors. Your + becomes a cog when sharing is on. Both open the
 same modal, changing only your user/context/harness preference. Without a registered
 hook, the toggle and Save are disabled with a plugin-setup tooltip and docs link.
-After either initial browser choice, you can change sharing directly with the toggle
+After either choice on the sharing page, you can change sharing directly with the toggle
 and Save. No separate connection button or repeat approval is needed. Turning off
 stops your uploads and extraction across installations; your hook stays linked,
 MCP access and other members' sharing stay unchanged, and enabling starts fresh.
 
-Keys cannot read transcripts or call MCP tools. Explicitly approved keys may
+Keys cannot read transcripts or call MCP tools. Briefing-enabled keys may
 fetch the Context briefing and register Claude tool-call correlation. The server checks client,
 context, membership, current consent generation and key status on every batch.
 `PENSIEVE_CAPTURE_CONFIG` and `PENSIEVE_CAPTURE_STATE` can override local paths;
@@ -209,7 +210,7 @@ transcript require separate verification. MCP connectivity does not prove captur
 
 Package tests cover credential import, private storage, client/consent boundaries,
 retry, deletion, indefinite retention and no-backfill behavior. Synthetic installed-client probes are
-in [client-probes.md](client-probes.md). Live browser approval, Connector settings, fresh installation, updates and
+in [client-probes.md](client-probes.md). Live MCP sign-in registration, the sharing page, Connector settings, fresh installation, updates and
 resumed sessions remain release checks.
 The guarded helper may be merged before the companion application release:
 it checks protocol support and preserves pending work until compatible services
@@ -278,9 +279,9 @@ remain immutable; this adds no backfill and changes no existing retry bytes.
 
 Consent belongs to a user, context and harness type. The authenticated native marker
 carries approved/declined/unknown status. Declining sharing suppresses further
-sharing offers; upgrading an old upload-only key separately requires explicit
-briefing permission. Once a private profile exists, changing the
+sharing offers; upgrading an old upload-only key separately requires a fresh
+registration through MCP sign-in. Once a private profile exists, changing the
 sharing preference never re-pairs it. Same-machine apps of one harness reuse
-`~/.config/pensieve/capture.json`. A new computer still requires Connect using a
-remembered approval; merely visiting a public pairing URL cannot authorise a helper.
-Cloud runtimes are not supported by this macOS-only onboarding helper.
+`~/.config/pensieve/capture.json`. A new computer connects through its own MCP
+sign-in and applies the remembered choice; merely visiting the sharing page cannot
+authorise a helper. Cloud runtimes are not supported by this macOS-only sharing prompt.

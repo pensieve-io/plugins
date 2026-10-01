@@ -153,10 +153,11 @@ settings. Receiving the package also requires a host that supports its hooks.
 
 ## Automatic company context
 
-The first conversation opens the existing Pensieve browser connection screen
-to authorise company briefings. Transcript sharing is an independent choice and
-can remain off. Existing upload-only installations need this explicit approval
-before their credentials can read a briefing.
+After you sign in to the Pensieve MCP server, the hooks connect this device
+automatically on your first Pensieve tool call; company briefings start on the
+next prompt. Transcript sharing is an independent choice and can remain off.
+Existing upload-only installations reconnect the same way before their
+credentials can read a briefing.
 
 Before the first response after connection, command hooks load a briefing containing the selected
 company's overview, top-level topics, available source trees and guidance for
@@ -169,9 +170,10 @@ keeps its own selection.
 
 A bundled script fetches briefings; agents see only ordinary company tools.
 The context hooks send delivery receipts for the briefing the client received.
-Optional [work conversation capture](docs/conversation-capture.md) requires browser
-approval per user, context and harness type. A new device separately confirms
-its private connection. The installed plugin offers approval on first use; **Data → Connectors in the context** manages sharing after either choice. No setup
+Optional [work conversation capture](docs/conversation-capture.md) requires your
+approval per user, context and harness type. Each device connects its own private
+credential through MCP sign-in. Once connected, the plugin asks once on a separate
+Approve/Deny page; **Data → Connectors in the context** manages sharing after either choice. No setup
 skill, credential download or terminal command is needed. New visible work
 belongs to the selected context for team handoffs. Previous chats are not imported.
 
@@ -214,9 +216,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release ord
 
 ### Connect conversations
 
-The plugin offers browser approval from its first command hook. The same
-connection authorises company briefings and offers optional saving for your
-harness type in that context; the helper installs its device key privately. Compatible apps of the same harness share your
+The hooks connect on your first Pensieve tool call after MCP sign-in, which
+authorises company briefings; the helper installs its device key privately. The
+plugin then asks once, on a separate Approve/Deny page, whether to save
+conversations for your harness type in that context. Compatible apps of the same harness share your
 preference, while another context or harness has its own choice. Declining keeps MCP tools available
 and does not trigger repeated prompts. After either choice, change sharing directly in **Data → Connectors in the context**. Declining keeps the hook linked with saving off; no reconnect action is needed.
 Normal hooks complete pending setup and retry authorised uploads. V1 saves new

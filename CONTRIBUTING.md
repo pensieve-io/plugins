@@ -8,13 +8,13 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/assets/`: bundled Pensieve branding used by supported client fields.
 - `docs/distribution.md`: canonical directory metadata, listing copy and submission checks.
 - `pensieve/hooks/`: host-specific hook adapters.
-- `pensieve/scripts/context_briefing.py`: authenticated command hook, browser bootstrap and Claude call binding.
+- `pensieve/scripts/context_briefing.py`: authenticated command hook, MCP sign-in enrolment and Claude call binding.
 - `pensieve/scripts/context_receipt.py`: bounded native delivery receipt recognition.
 - `pensieve/scripts/conversation_capture.py`: file checkpoints and immutable upload outbox.
 - `pensieve/scripts/capture_adapters.py` and `capture_state.py`: native parsing and shared capture phases.
 - `pensieve/scripts/capture_protocol.py`: public compatibility guard before private requests. See
   [conversation-capture.md](docs/conversation-capture.md).
-- `pensieve/scripts/capture_onboarding.py`: automatic first-use approval with preferences managed in Data → Connectors.
+- `pensieve/scripts/capture_onboarding.py`: asks once, on an Approve/Deny page, whether to share transcripts; preferences are managed in Data → Connectors.
 - `pensieve/scripts/capture_pairing.py`: private credential exchange completed by normal hooks; no manual setup command or setup skill is shipped.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
@@ -69,9 +69,9 @@ behaviour separately from live OAuth and desktop checks.
 
 The script-briefing change replaces a native MCP hook with authenticated HTTP
 endpoints and removes the MCP tool. Coordinate the backend and plugin releases:
-the new plugin requires `/hooks/briefing`, `/hooks/tool-binding` and explicit
-`briefing_enabled` pairing support; old installed hooks cannot keep calling a
-removed tool. Run fresh-install and existing-key upgrade acceptance before
+the new plugin requires `/hooks/briefing`, `/hooks/tool-binding` and
+`/hooks/enrolment`, with pairings registered by the signed-in MCP call (exchange
+status `registered`); old installed hooks cannot keep calling a removed tool. Run fresh-install and existing-key upgrade acceptance before
 publishing. Do not silently grant old upload-only keys read access. Transcript
 sharing must remain optional throughout this upgrade.
 
@@ -98,7 +98,7 @@ python3 scripts/check_capture_compatibility.py
 The manual **Capture compatibility** workflow runs the same unauthenticated probe.
 Both services must advertise protocol 1, supported clients and upload bounds. This
 probe transfers no private data and checks a declared contract; follow it with
-an authenticated fresh installation and existing-install update, browser pairing,
+an authenticated fresh installation and existing-install update, MCP sign-in pairing,
 real upload acknowledgement and member read. Package tests and synthetic native
 probes exercise different boundaries and do not replace that acceptance.
 
@@ -135,13 +135,13 @@ requires a new scan or upload for updates; a Git push does not update it live.
 Local/synthetic package tests need no application release. Live tests against
 `mcp.pensieve.uk` require the compatible backend to be released first. A staging
 test can run earlier with a disposable package: change `.mcp.json` and the
-helpers' `BRIEFING_ENDPOINT`, `BINDING_ENDPOINT` and `DELIVERY_ENDPOINT` constants
-to the staging MCP, briefing, binding and receipt URLs.
+helpers' `BRIEFING_ENDPOINT`, `BINDING_ENDPOINT`, `ENROLMENT_ENDPOINT` and
+`DELIVERY_ENDPOINT` constants to the staging MCP, briefing, binding, enrolment and
+receipt URLs.
 For capture, also change `conversation_capture.UPLOAD_ENDPOINT` and
-`capture_pairing.API_BASE` in that disposable copy. Change the fixed approval
-host checked by `capture_pairing.validate_pending` from `app.pensieve.uk` to the
-staging app host so staging-issued browser links can be accepted. Use the staging
-pairing flow to install an explicitly briefing-enabled device key in an isolated private test config.
+`capture_pairing.API_BASE` in that disposable copy, and point
+`capture_onboarding.CONSENT_PAGE` at the staging app host. Sign in to the staging
+MCP so its first Pensieve tool call registers a device key in an isolated private test config.
 Do not point any part of this disposable setup at production; check every service
 location before running the hooks.
 Passing a staging URL to `--endpoint` alone is rejected; that override accepts

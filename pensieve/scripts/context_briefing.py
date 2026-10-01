@@ -1,8 +1,11 @@
-"""Deliver company briefings through private, browser-approved hook credentials.
+"""Deliver company briefings through private hook credentials.
 
-No MCP tool, OAuth credential store or model-directed command participates. The
-server owns content and conversation selection. Local state contains identities
-and delivery cursors only; capture remains independently controlled by consent.
+A credential is registered by the member's own MCP sign-in: this helper binds its
+pending claim to the call or thread its host sends to Pensieve, and that signed-in
+call registers it. No MCP tool, OAuth credential store or model-directed command
+participates. The server owns content and conversation selection. Local state
+contains identities and delivery cursors only; capture remains independently
+controlled by consent.
 """
 
 from __future__ import annotations
@@ -25,13 +28,22 @@ from capture_config import (
     CONFIG_PATH,
     MAX_CONFIG_BYTES,
     load_config,
+    private_directory,
     private_file,
     private_lock,
     save_private_json,
     valid_uuid,
 )
-from capture_onboarding import current_offer, open_approval
-from capture_pairing import API_BASE, NoRedirects, completed_pairing, pairing_path, poll, start
+from capture_onboarding import current_offer
+from capture_pairing import (
+    API_BASE,
+    NoRedirects,
+    completed_pairing,
+    discard_claim,
+    pending_claim,
+    poll,
+    start,
+)
 from context_receipt import (
     DELIVERY_ENDPOINT,
     MAX_INPUT_BYTES,
@@ -44,12 +56,13 @@ from context_receipt import (
 
 BRIEFING_ENDPOINT = "https://mcp.pensieve.uk/hooks/briefing"
 BINDING_ENDPOINT = "https://mcp.pensieve.uk/hooks/tool-binding"
+ENROLMENT_ENDPOINT = "https://mcp.pensieve.uk/hooks/enrolment"
 MAX_RESPONSE_BYTES = 32 * 1024
 HTTP_TIMEOUT_SECONDS = 3
 
 
 def checked_endpoint(value: str) -> str:
-    if value in {BRIEFING_ENDPOINT, BINDING_ENDPOINT}:
+    if value in {BRIEFING_ENDPOINT, BINDING_ENDPOINT, ENROLMENT_ENDPOINT}:
         return value
     parsed = urlsplit(value)
     try:
@@ -66,7 +79,7 @@ def checked_endpoint(value: str) -> str:
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or parsed.path not in {"/hooks/briefing", "/hooks/tool-binding"}
+        or parsed.path not in {"/hooks/briefing", "/hooks/tool-binding", "/hooks/enrolment"}
         or (parsed.port is not None and parsed.port < 1)
     ):
         raise ValueError("Only the fixed Pensieve endpoint or HTTP loopback fixture is supported")
@@ -74,16 +87,16 @@ def checked_endpoint(value: str) -> str:
 
 
 def request(
-    endpoint: str, key: str, body: dict, timeout: float = HTTP_TIMEOUT_SECONDS
+    endpoint: str, key: str | None, body: dict, timeout: float = HTTP_TIMEOUT_SECONDS
 ) -> tuple[int | str, dict | None]:
+    headers = {"Content-Type": "application/json", "User-Agent": "Pensieve-Plugin-Briefing/1.0"}
+    if key is not None:
+        # Enrolment proves the pending claim's secret in its body instead.
+        headers["Authorization"] = "Bearer " + key
     req = Request(
         checked_endpoint(endpoint),
         data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + key,
-            "User-Agent": "Pensieve-Plugin-Briefing/1.0",
-        },
+        headers=headers,
         method="POST",
     )
     opener = build_opener(ProxyHandler({}), NoRedirects())
@@ -199,18 +212,37 @@ def read_state(path: Path) -> dict:
     return value
 
 
-def offer_pairing(config: Path, client: str, session: str, state: dict, base: str) -> str:
-    pending = pairing_path(config, client)
-    if pending.exists() or pending.is_symlink():
-        return "Complete the Pensieve browser connection already awaiting approval."
+CONNECTING = (
+    "Pensieve connects this device's hooks on its first Pensieve tool call after MCP "
+    "sign-in; company briefings start on the next prompt."
+)
+
+
+def bind_claim(
+    config: Path, client: str, session: str, tool_use_id: str | None, endpoint: str, timeout: float
+) -> bool:
+    """Bind the pending claim to this call (Claude) or thread (Codex). Never a read."""
+    claim = pending_claim(config, client)
+    if claim is None:
+        return False
+    body = {
+        "pairing_id": claim["id"],
+        "poll_secret": claim["poll_secret"],
+        "client": client,
+        "session_id": session,
+    }
+    if tool_use_id is not None:
+        body["tool_use_id"] = tool_use_id
+    code, _ = request(endpoint, None, body, timeout=timeout)
+    if code == 410:
+        discard_claim(config, client, claim["id"])
+    return code == 204
+
+
+def claim_for(config: Path, client: str, session: str, state: dict, base: str) -> str:
+    """Keep one claim pending for the conversation's known account and context."""
     owner, context = state.get("user_id"), state.get("context_id")
-    identity = f"{owner}:{context}"
-    previous = state.get("offer", {})
-    if previous.get("identity") == identity and previous.get("session") == session:
-        if previous.get("opened") or previous.get("retry_at", 0) > time.time():
-            return "Complete the Pensieve browser connection, or reconnect in Pensieve settings."
-    state["offer"] = {"identity": identity, "session": session, "retry_at": time.time() + 300}
-    result = start(
+    return start(
         config,
         client,
         base=base,
@@ -218,13 +250,26 @@ def offer_pairing(config: Path, client: str, session: str, state: dict, base: st
         expected_context_id=context if owner else None,
         timeout=1,
         session_id=session,
-    )
-    if result["status"] == "awaiting_approval":
-        if sys.platform == "darwin":
-            open_approval(result["verification_url"])
-        state["offer"]["opened"] = True
-        return "Approve this device for company briefings: " + result["verification_url"]
-    return "Pensieve could not start the browser connection; it will retry automatically."
+    )["status"]
+
+
+def connect(
+    config: Path, client: str, session: str, state: dict, base: str, enrolment_endpoint: str
+) -> str:
+    """Codex binds its thread now; Claude binds its next Pensieve tool call."""
+    retry = "Pensieve could not start connecting this device; it retries automatically."
+    # Back off after a failed start so an offline machine does not spend each
+    # prompt's budget retrying; a Pensieve tool call still starts one at once.
+    if state.get("connect_retry_at", 0) > time.time() and pending_claim(config, client) is None:
+        return retry
+    status = claim_for(config, client, session, state, base)
+    if status not in {"awaiting_registration", "another_connection_pending"}:
+        state["connect_retry_at"] = time.time() + 300
+        return retry
+    state.pop("connect_retry_at", None)
+    if client == "codex":
+        bind_claim(config, client, session, None, enrolment_endpoint, timeout=1)
+    return CONNECTING
 
 
 def failure(event: str, client: str, session: str | None, reason: str = "") -> dict:
@@ -234,7 +279,7 @@ def failure(event: str, client: str, session: str | None, reason: str = "") -> d
                 "hookEventName": event,
                 "permissionDecision": "deny",
                 "permissionDecisionReason": "Pensieve could not verify this conversation. "
-                "Complete the plugin browser connection or retry after it reconnects.",
+                "Retry after the plugin reconnects.",
             }
         }
     return {
@@ -254,6 +299,7 @@ def run_hook(
     binding_endpoint: str = BINDING_ENDPOINT,
     receipt_endpoint: str = DELIVERY_ENDPOINT,
     pairing_base: str = API_BASE,
+    enrolment_endpoint: str = ENROLMENT_ENDPOINT,
 ) -> dict:
     event = payload.get("hook_event_name")
     deadline = time.monotonic() + (4.25 if event == "PreToolUse" else 8.5)
@@ -287,7 +333,22 @@ def run_hook(
         profiles = available_profiles(config, client)
         profile = select_profile(profiles, state)
         if profile is None:
-            return failure(event, client, session)
+            # No credential yet: bind this exact call so the member's signed-in
+            # MCP request registers the device. Never block their tool call.
+            try:
+                if pending_claim(config, client) is None:
+                    claim_for(config, client, session, state, pairing_base)
+                bind_claim(
+                    config,
+                    client,
+                    session,
+                    tool_id,
+                    enrolment_endpoint,
+                    timeout=max(0.1, deadline - time.monotonic() - 0.25),
+                )
+            except BlockingIOError:
+                pass
+            return {}
         code, _, _, _ = try_profiles(
             binding_endpoint,
             profile,
@@ -296,6 +357,9 @@ def run_hook(
             deadline,
         )
         return {} if code == 204 else failure(event, client, session)
+    # Create the config folder privately before its state subfolder: mkdir would
+    # otherwise give this parent umask permissions, which pairing then refuses.
+    private_directory(config.parent)
     with private_lock(path.with_suffix(".lock")):
         state = read_state(path)
         needs_refresh = state.get("needs_refresh") is True
@@ -315,8 +379,8 @@ def run_hook(
                 context_id=state.get("pending_context_id", offer["context_id"]),
             )
         # Upgrading an existing installation keeps its known account even if
-        # an older pending browser claim completes on this hook. Never use the
-        # old credential for a read or inherit a different browser account.
+        # an older pending claim completes on this hook. Never use the
+        # old credential for a read or inherit a different account.
         if not state.get("user_id"):
             prior = select_profile(available_profiles(config, client, include_upload_only=True), {})
             if prior:
@@ -345,7 +409,7 @@ def run_hook(
         profiles = available_profiles(config, client)
         profile = select_profile(profiles, state)
         if profile is None:
-            message = offer_pairing(config, client, session, state, pairing_base)
+            message = connect(config, client, session, state, pairing_base, enrolment_endpoint)
             save_private_json(path, state)
             return failure(event, client, session, message)
         state.setdefault("user_id", profile["user_id"])
@@ -374,7 +438,7 @@ def run_hook(
             body["turn_id"] = turn
         # Reserve one full pairing-start attempt after a definitive rejection.
         # Otherwise slow rejected keys could consume every prompt's budget and
-        # prevent the browser recovery from ever starting.
+        # prevent reconnection from ever starting.
         request_deadline = deadline - 1.25
         code, result, profile, rejected = try_profiles(
             endpoint, profile, profiles, body, request_deadline
@@ -406,9 +470,9 @@ def run_hook(
                 )
             else:
                 message = (
-                    offer_pairing(config, client, session, state, pairing_base)
+                    connect(config, client, session, state, pairing_base, enrolment_endpoint)
                     if deadline - time.monotonic() >= 1.25
-                    else "The browser connection will retry on the next prompt."
+                    else "Connecting this context retries on the next prompt."
                 )
                 save_private_json(path, state)
                 return failure(event, client, session, message)
@@ -432,11 +496,11 @@ def run_hook(
         message = ""
         if code in {401, 403} and deadline - time.monotonic() >= 1.25:
             if not selected_challenge:
-                # Every approved key rejected. Keep the account but let the
-                # browser choose among current memberships, not a deleted one.
+                # Every key rejected. Keep the account but let registration use
+                # the conversation's current context, not a deleted one.
                 state["context_id"] = None
                 state.pop("pending_context_id", None)
-            message = offer_pairing(config, client, session, state, pairing_base)
+            message = connect(config, client, session, state, pairing_base, enrolment_endpoint)
         save_private_json(path, state)
         print(
             f"Pensieve briefing unavailable ({code}); automatic retry remains enabled.",
@@ -457,6 +521,7 @@ def main() -> None:
     parser.add_argument("--binding-endpoint", type=checked_endpoint, default=BINDING_ENDPOINT)
     parser.add_argument("--receipt-endpoint", default=DELIVERY_ENDPOINT)
     parser.add_argument("--pairing-base", default=API_BASE)
+    parser.add_argument("--enrolment-endpoint", type=checked_endpoint, default=ENROLMENT_ENDPOINT)
     args = parser.parse_args()
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     payload = json_object(raw) if len(raw) <= MAX_INPUT_BYTES else None
@@ -472,6 +537,7 @@ def main() -> None:
             args.binding_endpoint,
             args.receipt_endpoint,
             args.pairing_base,
+            args.enrolment_endpoint,
         )
     except (OSError, ValueError):
         print(

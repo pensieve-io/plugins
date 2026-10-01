@@ -7,10 +7,11 @@ registration and recognition of context the host actually accepted.
 ## Briefing request
 
 `context_briefing.py` calls `POST https://mcp.pensieve.uk/hooks/briefing`
-using the browser-paired device credential in `Authorization: Bearer`.
-There is no briefing MCP tool and no agent fallback that calls one. The
-existing browser connection screen explicitly authorises briefing reads;
-transcript sharing remains independently optional.
+using the device credential registered through MCP sign-in in
+`Authorization: Bearer`. There is no briefing MCP tool and no agent fallback
+that calls one. The member's signed-in MCP call authorises briefing reads when
+it registers the device (see enrolment below); transcript sharing remains
+independently optional.
 
 Hook adapters send `client` (`claude` or `codex`), the host `session_id` UUID,
 and the actual `event` (`SessionStart` or `UserPromptSubmit`). Optional `source`
@@ -34,24 +35,25 @@ conversation selection. No company content is cached locally.
 
 Credentials are client/context scoped. A 409 `pairing_required` response names
 the authenticated account and currently selected Context. The helper uses an
-already approved matching credential, or opens the existing browser flow for
-that exact destination. It never resets the conversation to fit an available
-credential. Initial account selection uses a prior accepted native marker or
-private conversation identity; multiple accounts require browser approval,
-rather than guessing which account the host means. Definitive 401/403 key
-rejections may try another explicitly approved credential for that same account,
+already registered matching credential, or keeps a pending claim for that exact
+destination for the next signed-in Pensieve tool call to register. It never
+resets the conversation to fit an available credential. Initial account
+selection uses a prior accepted native marker or private conversation identity;
+with multiple accounts, the conversation's signed-in MCP call registers the
+account rather than the helper guessing which one the host means. Definitive
+401/403 key rejections may try another registered credential for that same account,
 within the hook deadline. A successful lifecycle fetch remembers the good
 credential's fingerprint so subsequent calls do not keep choosing a revoked key.
-Other failures do not justify switching keys. If every key rejects, browser
-recovery pins the account but allows a currently available Context, rather than
+Other failures do not justify switching keys. If every key rejects,
+reconnection pins the account but allows a currently available Context, rather than
 forcing a deleted membership. The server still owns conversation selection.
 
-Automatic browser pairing records its initiating conversation in private local
+Automatic pairing records its initiating conversation in private local
 state. Any capture or briefing hook may finish the shared exchange; before the
 pending claim is removed, it saves the chosen account and Context in that
 conversation's private receipt. Only the initiating conversation adopts that
-choice, once per claim. A capture/Stop hook or another open conversation winning
-the exchange cannot lose or redirect the browser choice. These receipts contain
+registration, once per claim. A capture/Stop hook or another open conversation
+winning the exchange cannot lose or redirect it. These receipts contain
 identifiers only, never credentials or company content.
 
 Claude ordinary calls provide a tool-use ID but no conversation ID. A synchronous
@@ -60,14 +62,26 @@ Claude ordinary calls provide a tool-use ID but no conversation ID. A synchronou
 resolves that exact ID from `_meta["claudecode/toolUseId"]`. Missing bindings
 never reuse another conversation's transport selection. The hook matches only
 `mcp__plugin_pensieve_pensieve__*` and checks native plugin provenance when the
-host supplies it. Expected failures deny the call; server enforcement is also
-necessary because host command timeouts fail open. Codex supplies
-`_meta.threadId` directly and needs no per-tool binding request.
+host supplies it. With a credential, expected failures deny the call; server
+enforcement is also necessary because host command timeouts fail open. Codex
+supplies `_meta.threadId` directly and needs no per-tool binding request.
 
-Old local profiles and pending pairings without explicit `briefing_enabled`
-remain upload-only. Every new pairing requests briefing permission, and a
-profile gains it only when both its saved request and server exchange confirm
-it. Pairing works before any briefing exists, eliminating a bootstrap cycle.
+Without a briefing credential, the helper keeps one private pending claim and
+binds it to what its host is about to send to Pensieve's MCP server:
+`POST /hooks/enrolment` with `{pairing_id, poll_secret, client, session_id}`,
+plus the exact `tool_use_id` for Claude. Enrolment sends no `Authorization`
+header; the claim's poll secret is its only proof. Claude binds in `PreToolUse`
+and always allows that call; Codex binds its thread from the lifecycle hook. The
+following OAuth-authenticated MCP request registers the claim for the signed-in
+account and Context, and the next lifecycle or capture hook exchanges it
+(status `registered`) for a scoped device key. A 410 discards the claim so the
+next call starts afresh; other failures keep it for a retry.
+
+Old local profiles without explicit `briefing_enabled` remain upload-only and
+connect again through MCP sign-in. A profile gains briefing permission only when
+the server's `registered` exchange confirms it; the retired browser `approved`
+status is never accepted. Pairing works before any briefing exists, eliminating
+a bootstrap cycle.
 Failure notices describe reconnect/retry without asking the agent to call a
 briefing tool or revealing a credential.
 
@@ -106,9 +120,9 @@ Capture requests identify themselves as `Pensieve-Plugin-Capture/1.0`, following
 the receipt helper's explicit identification so the production edge admits them.
 
 Capture has separate authorization; delivery receipt tokens remain receipt-only.
-The first command hook offers browser approval and a private one-time
-exchange to install a client/context-scoped device key. Ordinary hooks complete
-pending pairing. No OAuth credential is read or passed through model output.
+The first Pensieve tool call after MCP sign-in registers the device, and a
+private one-time exchange installs a client/context-scoped device key. Ordinary
+hooks complete pending pairing. No OAuth credential is read or passed through model output.
 Every upload checks membership, the enabled consent generation and the key's
 scope/revocation. Legacy account profiles retain their previous policy until
 replaced; see the capture guide for migration and reconnect boundaries.
@@ -159,14 +173,17 @@ erase the queue. See
 
 ## Hook registration and sharing
 
-The first command briefing hook offers browser setup before reading company content.
-An explicit signed-in Approve or Deny registers the helper and sets sharing on
-or off respectively. The helper privately exchanges its one-time poll secret
-for the linked profile; a `registered` response is valid even while sharing is off.
-Only unanswered browser offers expire; after the server confirms expiry, a later
-conversation may offer setup again. A decline never triggers that retry, and an
-unclaimed registration is preserved while offline. Native consent markers and server upload
-admission independently require an enabled, current generation. The settings toggle
-changes the same preference without another approval screen. The obsolete
+The first Pensieve tool call after MCP sign-in registers the helper before any
+company content is read; registration does not change sharing. The helper
+privately exchanges its one-time poll secret for the linked profile; a
+`registered` response is valid even while sharing is off. Only unregistered
+claims expire, and an unclaimed registration is preserved while offline.
+Once a key exists and the native consent marker reports `unknown`, the helper
+opens `https://app.pensieve.uk/oauth/conversation-capture?client=<client>&context_id=<id>`
+on macOS, where Approve or Deny records the sharing choice. It asks at most once
+per conversation and not again within ten minutes; a decline is remembered and
+never re-asked. Native consent markers and server upload admission independently
+require an enabled, current generation. The settings toggle changes the same
+preference without another approval screen. The obsolete
 connection-intent API and `pensieve-capture-setup` marker are no longer produced or
 used; older marker text is still stripped from visible captured messages.
