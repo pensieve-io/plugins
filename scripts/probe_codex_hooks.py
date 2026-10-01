@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -27,7 +28,7 @@ from typing import Any
 
 RECEIPT_TOKEN = "a" * 64 + "." + "b" * 32
 CAPTURE_OWNER = "353e0b53-8178-4a3c-8d40-a07414144741"
-CAPTURE_KEY = "synthetic-upload-only-key-not-a-real-credential"
+CAPTURE_KEY = "pcap_" + "a" * 43
 
 
 def append(path: Path, value: dict[str, Any]) -> None:
@@ -35,66 +36,70 @@ def append(path: Path, value: dict[str, Any]) -> None:
         handle.write(json.dumps(value) + "\n")
 
 
-def mcp_server(output: Path) -> None:
-    """Serve synthetic tools over stdio, retaining only fixture request data."""
-    for line in sys.stdin:
-        request = json.loads(line)
-        method = request.get("method")
-        if "id" not in request:
-            continue
-        if method == "initialize":
-            result = {
-                "protocolVersion": request["params"]["protocolVersion"],
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "pensieve-hook-probe", "version": "1"},
-            }
-        elif method == "tools/list":
-            result = {
-                "tools": [
+def mcp_result(output: Path, request: dict):
+    method = request.get("method")
+    if "id" not in request:
+        return None
+    if method == "initialize":
+        result = {
+            "protocolVersion": request["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "pensieve-hook-probe", "version": "1"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [
+                {
+                    "name": name,
+                    "description": "Synthetic hook probe; returns a fixture marker.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": True,
+                    },
+                    "annotations": {"readOnlyHint": True},
+                }
+                for name in ("ordinary", "set_context", "edit_page")
+            ]
+        }
+    elif method == "tools/call":
+        params = request["params"]
+        append(output / "mcp.jsonl", {"pid": os.getpid(), **params})
+        event = params.get("arguments", {}).get("event", "ordinary")
+        marker = "HOOK_PROBE_" + event.upper()
+        if source := params.get("arguments", {}).get("source"):
+            marker += "_" + source.upper()
+        result = {"content": [{"type": "text", "text": marker}]}
+        if params["name"] == "ordinary":
+            result["content"][0]["text"] += " SOURCE_CONTEXT_SENTINEL"
+        if params["name"] == "set_context":
+            result["content"][0]["text"] = (
+                "DESTINATION_CONTEXT_SENTINEL\n<!-- pensieve-capture-context "
+                + json.dumps(
                     {
-                        "name": name,
-                        "description": "Synthetic hook probe; returns a fixture marker.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {},
-                            "additionalProperties": True,
-                        },
-                        "annotations": {"readOnlyHint": True},
+                        "v": 2,
+                        "capture_generation": CAPTURE_OWNER,
+                        "kind": "selection",
+                        "user_id": CAPTURE_OWNER,
+                        "client": "codex",
+                        "conversation_id": params["_meta"]["threadId"],
+                        "context_id": 12,
+                        "turn_id": None,
                     }
-                    for name in ("ordinary", "set_context", "edit_page")
-                ]
-            }
-        elif method == "tools/call":
-            params = request["params"]
-            append(output / "mcp.jsonl", {"pid": os.getpid(), **params})
-            event = params.get("arguments", {}).get("event", "ordinary")
-            marker = "HOOK_PROBE_" + event.upper()
-            if source := params.get("arguments", {}).get("source"):
-                marker += "_" + source.upper()
-            result = {"content": [{"type": "text", "text": marker}]}
-            if params["name"] == "ordinary":
-                result["content"][0]["text"] += " SOURCE_CONTEXT_SENTINEL"
-            if params["name"] == "set_context":
-                result["content"][0]["text"] = (
-                    "DESTINATION_CONTEXT_SENTINEL\n<!-- pensieve-capture-context "
-                    + json.dumps(
-                        {
-                            "v": 2,
-                            "capture_generation": CAPTURE_OWNER,
-                            "kind": "selection",
-                            "user_id": CAPTURE_OWNER,
-                            "client": "codex",
-                            "conversation_id": params["_meta"]["threadId"],
-                            "context_id": 12,
-                            "turn_id": None,
-                        }
-                    )
-                    + " -->"
                 )
+                + " -->"
+            )
 
-        else:
-            result = {}
-        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+    else:
+        result = {}
+    return {"jsonrpc": "2.0", "id": request["id"], "result": result}
+
+
+def mcp_server(output: Path) -> None:
+    for line in sys.stdin:
+        result = mcp_result(output, json.loads(line))
+        if result is not None:
+            print(json.dumps(result), flush=True)
 
 
 def run_probe(
@@ -120,7 +125,11 @@ def run_probe(
     model_waiting = threading.Event()
     release_model = threading.Event()
     capture_batch_scopes = {}
-    capture_config = output / "capture-config.json"
+    capture_config = output / ".config/pensieve/capture.json"
+    capture_config.parent.mkdir(mode=0o700, parents=True)
+    headers_path = capture_config.with_name("mcp-headers-codex.json")
+    headers_path.write_text(json.dumps({"X-Pensieve-Plugin": "codex " + CAPTURE_KEY}))
+    headers_path.chmod(0o600)
     if capture and not persist:
         raise ValueError("capture probe requires --persist for a real local transcript")
     capture_config.write_text(
@@ -148,6 +157,10 @@ def run_probe(
             pass
 
         def do_GET(self) -> None:
+            if self.path == "/mcp":
+                self.send_response(405)
+                self.end_headers()
+                return
             payload = json.dumps(
                 {
                     "protocol_version": 1,
@@ -170,6 +183,21 @@ def run_probe(
             nonlocal sequence
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             request = json.loads(raw)
+            if self.path == "/mcp":
+                assert self.headers.get("X-Pensieve-Plugin") == "codex " + CAPTURE_KEY
+                assert self.headers.get("Authorization") == "Bearer synthetic-native-fixture"
+                append(
+                    output / "http-methods.jsonl",
+                    {"method": request.get("method"), "native_auth_and_private_proof": True},
+                )
+                result = mcp_result(output, request)
+                payload = json.dumps(result).encode() if result is not None else b""
+                self.send_response(200 if result is not None else 202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             if self.path == "/hooks/briefing":
                 assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
                 append(output / "briefings.jsonl", request)
@@ -360,8 +388,14 @@ def run_probe(
             "requires_openai_auth": False,
         },
         "mcp_servers.pensieve": {
-            "command": sys.executable,
-            "args": [str(Path(__file__).resolve()), "--mcp", str(output)],
+            "url": f"http://127.0.0.1:{server.server_port}/mcp",
+            "http_headers_helper": "HOME="
+            + shlex.quote(str(output))
+            + " "
+            + json.loads((plugin / ".mcp.json").read_text())["mcpServers"]["pensieve"][
+                "http_headers_helper"
+            ],
+            "http_headers": {"Authorization": "Bearer synthetic-native-fixture"},
         },
         "hooks": hooks,
         "features.hooks": True,

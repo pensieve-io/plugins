@@ -8,87 +8,60 @@ include transcripts only when explicitly requested. Installing the plugin alone 
 
 ## Connect an installation
 
-The first command briefing hook opens the existing browser connection screen.
-It authorises reading that Context's briefing and separately offers saving and
-useful-knowledge extraction. Declining sharing still registers the helper for
-briefings. A new device authorises its own private credential; compatible apps
-on one computer may reuse a credential for the same client and Context.
-Extraction also requires the separately gated application worker.
+Native MCP authentication authorizes the installed hooks during connection
+initialization/discovery. The supported header helper sends a private installation
+proof alongside the harness's OAuth bearer; it creates the proof before connecting,
+so login does not depend on a prior hook. The server binds its hash to the verified
+user and harness. Scripts can then load briefings without a model tool or a second
+device-login page. The helper never reads the harness's OAuth credentials.
 
-The helper stores the device credential privately; the user does not run
-commands, download files or paste tokens. New pairings explicitly request
-`briefing_enabled`, and the exchange must confirm it. Existing upload-only
-credentials and previously pending pairings retain their original authority;
-a fresh browser approval is needed for briefing reads. Consent applies to that
-user's harness type and Context. The remote MCP connection remains OAuth
-authenticated. The helper never reads the harness's OAuth credentials, and
-neither the device key nor polling secret reaches the agent or approval page.
+On the first undecided user/context/harness use, the plugin opens a separate
+Approve/Deny page. Both answers persist across conversations and devices. Closing
+without choosing allows a later prompt in another conversation after ten minutes.
+The page checks that the browser account matches the authenticated hook account.
+Declining keeps briefing enabled. Uploads require a fresh enabled-consent marker;
+the server also checks explicit consent and its generation on every batch.
+Extraction requires the separately gated application worker.
 
-The helper remembers displayed offers. A decline suppresses prompts across devices;
-a dismissed offer does not reopen on every prompt. After the server confirms that
-an unanswered offer expired, a later conversation can offer it again. An existing
-private claim survives new conversations, context switches and consent changes
-while polling retries. Another context waits for that claim to finish; its
-approval cannot replace the pending secret.
-Either explicit signed-in browser
-choice links the helper: Approve enables sharing, while Deny keeps sharing off.
-The helper privately exchanges its one-time secret and stores a scoped credential
-even when declined. It captures no messages without a fresh enabled-consent marker,
-and the server independently rejects uploads while sharing is off.
+The header proof lives in `~/.config/pensieve/mcp-headers-{client}.json`, with the
+authenticated profile in `~/.config/pensieve/capture.json` (files `0600`, directory
+`0700`). It is client-bound and follows the member's selected context; context
+switches do not create keys. No secret enters model text, tool arguments or the
+consent page. The script resolves its owner through `/hooks/connection`, then
+uses the same proof for briefing, exact Claude call binding and opted-in upload.
 
-Unanswered browser offers expire after ten minutes. Accepted registrations remain
-claimable after an offline interval, until consumed or invalidated by account
-withdrawal. The helper polls the server before discarding an old offer so an accepted
-Deny is not mistaken for an expired request. A consumed credential is never returned
-a second time. `paired` means the hook is linked, not that transcript saving is on.
-Ordinary hooks allow up to two seconds for the capability check and private
-exchange within their existing 2.5-second budget. The short SessionEnd hook
-leaves pairing to the next ordinary hook, so host shutdown cannot interrupt a
-new credential exchange. A lost response still requires fresh browser approval;
-the server never replays an issued credential.
-Offline first-use attempts retry at most once every five minutes. Initial
-briefing pairing can start without a native marker. Once identity is known,
-accepted native attribution or private per-conversation state pins the expected
-account and Context; a quoted marker in a user or tool message never does.
-Automatic pairing also retains the initiating conversation locally. Any hook
-can complete its exchange, including capture on Stop, but the browser's account
-choice is saved in a private receipt for that conversation before the pending
-claim is removed. Another conversation cannot adopt the choice, and the receipt
-is applied once so it cannot undo later context switches.
+Native login never widens existing upload-only keys. After verified registration,
+obsolete local profiles are replaced and credential cutovers prevent old work
+being imported. A revoked proof cannot be reactivated by reconnecting. Use the
+[explicit reset command](../README.md#reset-a-connection) to rotate it, remove that
+harness's profile and fence dormant queues before reauthentication. Native account
+mismatch revokes the previous installation. Clearing OAuth alone does not revoke
+this persistent installation credential; revoke it in Pensieve to stop hooks.
 
-The version-3 config stores account/client/context-scoped profiles under
-`~/.config/pensieve/capture.json` (mode `0600`, private directory `0700`). Existing
-version-2 account profiles keep their previous consent until replaced by new
-pairing. Pairing migrates obsolete local credential entries without touching
-transcript spools. Context-scoped profiles coexist, so connecting another
-context cannot replace the first context's key. Credential changes establish a
-byte-position cutover only for affected scopes: unread work for unchanged scopes
-continues to capture, while new or replaced credentials cannot import earlier work.
-These cutovers survive bounded scans, and an empty Claude baseline records the
-credential snapshot even before the host creates its transcript. Older paired version-3 profiles without a context keep their existing scope
-until replaced; unpaired version-3 entries require pairing before capture can run.
 **Data → Connectors** shows a shared card per harness. It is Connected when any
 current member has linked a hook, even if everyone has sharing off. The people count
 expands current contributors. Your + becomes a cog when sharing is on. Both open the
 same modal, changing only your user/context/harness preference. Without a registered
 hook, the toggle and Save are disabled with a plugin-setup tooltip and docs link.
-After either initial browser choice, you can change sharing directly with the toggle
+After either choice on the sharing page, you can change sharing directly with the toggle
 and Save. No separate connection button or repeat approval is needed. Turning off
 stops your uploads and extraction across installations; your hook stays linked,
 MCP access and other members' sharing stay unchanged, and enabling starts fresh.
 
-Keys cannot read transcripts or call MCP tools. Explicitly approved keys may
+Keys cannot read transcripts or call MCP tools. Briefing-enabled keys may
 fetch the Context briefing and register Claude tool-call correlation. The server checks client,
 context, membership, current consent generation and key status on every batch.
-`PENSIEVE_CAPTURE_CONFIG` and `PENSIEVE_CAPTURE_STATE` can override local paths;
-secrets never belong in hook manifests.
+`PENSIEVE_CAPTURE_CONFIG` and `PENSIEVE_CAPTURE_STATE` override script paths for
+fixtures; a custom MCP configuration must point its helper at the same config
+directory. Production manifests use the fixed private home directory and contain
+no credential values.
 
 ### Offline and reconnect behaviour
 
 MCP OAuth expiry alone does not revoke the separate upload key. Already
 attributed durable batches retry on later hooks after a network interruption.
 New turns need their own authenticated context marker; work without one is not
-silently assigned to the last context or backfilled on MCP reconnect. Disconnect
+silently assigned to the last context or backfilled on MCP reconnect. Revoking the installation in Pensieve
 revokes uploads, including queued retries. A new credential cannot authorise unread
 work from before its cutover. Already durable batches retain their exact bytes and
 original consent generation; the server accepts retries only while that scope and
@@ -209,7 +182,7 @@ transcript require separate verification. MCP connectivity does not prove captur
 
 Package tests cover credential import, private storage, client/consent boundaries,
 retry, deletion, indefinite retention and no-backfill behavior. Synthetic installed-client probes are
-in [client-probes.md](client-probes.md). Live browser approval, Connector settings, fresh installation, updates and
+in [client-probes.md](client-probes.md). Live MCP sign-in registration, the sharing page, Connector settings, fresh installation, updates and
 resumed sessions remain release checks.
 The guarded helper may be merged before the companion application release:
 it checks protocol support and preserves pending work until compatible services
@@ -237,14 +210,13 @@ an explicit context revocation still wins. A new empty Claude file snapshots bot
 credentials and removal epochs so past revocations cannot discard its first turn.
 No filesystem scan of host conversation history is introduced.
 
-Before private pairing/upload requests, `capture_protocol.py` checks the public
+Before upload requests, `capture_protocol.py` checks the public
 service `/capabilities` manifest: protocol 1, service type, native clients and
 request bounds. No credentials are sent on this check. Absent/malformed/incompatible
-manifests or service/network failure preserve exact batches and pending claims.
+manifests or service/network failure preserve exact batches.
 Redirects and arbitrary service origins remain disallowed. Each process caches
 checks for at most 30 seconds; the next lifecycle hook starts fresh. Servers also
-reject unsupported `X-Pensieve-Capture-Protocol` versions with 426. Purged/expired
-claims return terminal 410; deployment route 404 remains retryable.
+reject unsupported `X-Pensieve-Capture-Protocol` versions with 426. A deleted or disabled segment returns a scoped 410; deployment route 404 remains retryable.
 
 Connectors distinguishes Sharing enabled from Last saved, which records a
 retained accepted server upload, not proof of an empty device queue. For a known
@@ -278,9 +250,9 @@ remain immutable; this adds no backfill and changes no existing retry bytes.
 
 Consent belongs to a user, context and harness type. The authenticated native marker
 carries approved/declined/unknown status. Declining sharing suppresses further
-sharing offers; upgrading an old upload-only key separately requires explicit
-briefing permission. Once a private profile exists, changing the
+sharing offers; upgrading an old upload-only key separately requires a fresh
+registration through MCP sign-in. Once a private profile exists, changing the
 sharing preference never re-pairs it. Same-machine apps of one harness reuse
-`~/.config/pensieve/capture.json`. A new computer still requires Connect using a
-remembered approval; merely visiting a public pairing URL cannot authorise a helper.
-Cloud runtimes are not supported by this macOS-only onboarding helper.
+`~/.config/pensieve/capture.json`. A new computer connects through its own MCP
+sign-in and applies the remembered choice; merely visiting the sharing page cannot
+authorise a helper. Cloud runtimes are not supported by this macOS-only sharing prompt.

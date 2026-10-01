@@ -8,14 +8,16 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/assets/`: bundled Pensieve branding used by supported client fields.
 - `docs/distribution.md`: canonical directory metadata, listing copy and submission checks.
 - `pensieve/hooks/`: host-specific hook adapters.
-- `pensieve/scripts/context_briefing.py`: authenticated command hook, browser bootstrap and Claude call binding.
+- `pensieve/scripts/context_briefing.py`: authenticated command hook, native MCP installation authorization and Claude call binding.
 - `pensieve/scripts/context_receipt.py`: bounded native delivery receipt recognition.
 - `pensieve/scripts/conversation_capture.py`: file checkpoints and immutable upload outbox.
 - `pensieve/scripts/capture_adapters.py` and `capture_state.py`: native parsing and shared capture phases.
 - `pensieve/scripts/capture_protocol.py`: public compatibility guard before private requests. See
   [conversation-capture.md](docs/conversation-capture.md).
-- `pensieve/scripts/capture_onboarding.py`: automatic first-use approval with preferences managed in Data → Connectors.
-- `pensieve/scripts/capture_pairing.py`: private credential exchange completed by normal hooks; no manual setup command or setup skill is shipped.
+- `pensieve/scripts/capture_onboarding.py`: asks once, on an Approve/Deny page, whether to share transcripts; preferences are managed in Data → Connectors.
+- `pensieve/scripts/plugin_headers.py`: private proof generation/read, shared by hooks and MCP headers.
+- `pensieve/scripts/plugin_connection.py`: authenticated owner lookup and explicit connection reset.
+- `scripts/build_mcp_config.py`: generates the MCP manifest with the same header helper embedded for Codex.
 - `tests/` and `scripts/probe_*`: package tests and synthetic client probes.
 
 The application repository owns the hosted MCP implementation, authentication,
@@ -69,9 +71,9 @@ behaviour separately from live OAuth and desktop checks.
 
 The script-briefing change replaces a native MCP hook with authenticated HTTP
 endpoints and removes the MCP tool. Coordinate the backend and plugin releases:
-the new plugin requires `/hooks/briefing`, `/hooks/tool-binding` and explicit
-`briefing_enabled` pairing support; old installed hooks cannot keep calling a
-removed tool. Run fresh-install and existing-key upgrade acceptance before
+the new plugin requires `/hooks/briefing`, `/hooks/tool-binding` and
+`/hooks/connection`, with installation registration through the private header
+alongside native OAuth; old installed hooks cannot keep calling a removed tool. Run fresh-install and existing-key upgrade acceptance before
 publishing. Do not silently grant old upload-only keys read access. Transcript
 sharing must remain optional throughout this upgrade.
 
@@ -83,8 +85,8 @@ SHA and tested plugin SHA before merging.
 
 The historical capture-only protocol guard allowed plugin #11 to merge before
 application #996 deployed; it does not make script briefings safe to publish
-before their endpoints exist. A new helper checks API and MCP capability manifests before sending
-private pairing/upload requests and waits with exact queued work intact when the
+before their endpoints exist. The capture helper checks the MCP capability manifest before sending
+upload requests and waits with exact queued work intact when the
 contract is unavailable. Do not remove this guard, downgrade queued envelopes or
 claim capture works merely because both repositories merged.
 
@@ -96,9 +98,9 @@ python3 scripts/check_capture_compatibility.py
 ```
 
 The manual **Capture compatibility** workflow runs the same unauthenticated probe.
-Both services must advertise protocol 1, supported clients and upload bounds. This
+The upload service must advertise protocol 1, supported clients and upload bounds. This
 probe transfers no private data and checks a declared contract; follow it with
-an authenticated fresh installation and existing-install update, browser pairing,
+an authenticated fresh installation and existing-install update, native MCP sign-in plus installation registration,
 real upload acknowledgement and member read. Package tests and synthetic native
 probes exercise different boundaries and do not replace that acceptance.
 
@@ -135,25 +137,9 @@ requires a new scan or upload for updates; a Git push does not update it live.
 Local/synthetic package tests need no application release. Live tests against
 `mcp.pensieve.uk` require the compatible backend to be released first. A staging
 test can run earlier with a disposable package: change `.mcp.json` and the
-helpers' `BRIEFING_ENDPOINT`, `BINDING_ENDPOINT` and `DELIVERY_ENDPOINT` constants
-to the staging MCP, briefing, binding and receipt URLs.
-For capture, also change `conversation_capture.UPLOAD_ENDPOINT` and
-`capture_pairing.API_BASE` in that disposable copy. Change the fixed approval
-host checked by `capture_pairing.validate_pending` from `app.pensieve.uk` to the
-staging app host so staging-issued browser links can be accepted. Use the staging
-pairing flow to install an explicitly briefing-enabled device key in an isolated private test config.
-Do not point any part of this disposable setup at production; check every service
-location before running the hooks.
-Passing a staging URL to `--endpoint` alone is rejected; that override accepts
-only the fixed service URL or HTTP loopback. Production endpoints in the
-shipped package stay fixed.
-
-After a skill change is released, the application repository can run
-`python -m scripts.sync_agent_skills --revision <full-commit-sha>` followed by
-`python -m scripts.generate_agent_skills`, then commit its dependency pin and
-generated docs. This intentionally lets documentation and MCP prompts adopt
-reviewed revisions without fetching GitHub at runtime or during normal builds.
-The current hosted importer accepts only self-contained `SKILL.md` files and
-rejects companion references, scripts or assets. Extend hosted import and
-delivery before adopting an attachment-backed skill there; the plugin format
-itself supports companion files.
+helpers' `BRIEFING_ENDPOINT`, `BINDING_ENDPOINT`, `ENROLMENT_ENDPOINT` and
+`DELIVERY_ENDPOINT` constants to the staging MCP, briefing, binding, connection and
+receipt endpoints. Use a disposable HOME/config/state directory for both the MCP
+header helper and hook scripts. Authenticate the staged plugin through native
+MCP and verify discovery registers its installation before any model tool call.
+The production endpoints in the shipped package stay fixed.

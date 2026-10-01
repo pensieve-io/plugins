@@ -39,9 +39,13 @@ def test_manifests_resolve_the_installed_components():
 
 
 def test_plugin_bundles_the_hosted_mcp_without_credentials():
-    assert read_json(PLUGIN / ".mcp.json") == {
-        "mcpServers": {"pensieve": {"type": "http", "url": "https://mcp.pensieve.uk/mcp"}}
-    }
+    server = read_json(PLUGIN / ".mcp.json")["mcpServers"]["pensieve"]
+    assert server["type"] == "http"
+    assert server["url"] == "https://mcp.pensieve.uk/mcp"
+    for field, client in (("headersHelper", "claude"), ("http_headers_helper", "codex")):
+        assert client in server[field]
+        assert "Authorization" not in server[field]
+    assert not re.search(r"pcap_[A-Za-z0-9_-]{43}", json.dumps(server))
 
 
 def test_codex_presentation_assets_are_bundled_pngs():
