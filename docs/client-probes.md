@@ -1,5 +1,29 @@
 # Client hook probes
 
+## Native authentication and private-header validation
+
+`python3 scripts/probe_native_oauth.py` runs installed Claude against a disposable
+OAuth authorization server with PKCE and the packaged header helper. It uses only
+synthetic credentials, then verifies a packaged briefing hook uses the registered
+proof. On Claude Code 2.1.287 this passed: native token exchange, authenticated
+initialize/tools-list with the private header, and hook briefing. Interactive
+login uses a PTY; login launched from a noninteractive hook is unsupported.
+
+`probe_claude_hooks.py --capture` now checks both native-auth and installation
+headers on HTTP MCP calls and passed all 14 lifecycle/binding checks plus capture,
+retry, account-secret exclusion and compaction checks on 2.1.287. These fixtures
+verify client behavior independently of the real backend. Backend tests exercise
+actual FastMCP discovery middleware and isolated Postgres grants/consent. Deployed
+fresh-install acceptance remains a separate release gate.
+
+Codex CLI 0.159.3 passed the final HTTP/private-header probe and the persisted
+capture probe: initialize/list/ordinary call, model-visible briefing, receipt ACK,
+all ten capture assertions and no credential in model input. One persisted run
+timed out after its final response; a diagnostic retry completed successfully,
+including host completion and persisted-history backfill. This intermittent host
+probe timeout has no established plugin cause and remains recorded here.
+
+
 The current probes execute the packaged command briefing helper against a local
 HTTP endpoint. They provide a private synthetic `briefing_enabled` credential
 and expose no briefing MCP tool. The Claude fixture requires a matching

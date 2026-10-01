@@ -108,4 +108,4 @@ def offer_connection(payload: dict, client: str, session: str, config: Path, con
             return
         state[identity] = {"session": session, "retry_at": time.time() + OFFER_INTERVAL_SECONDS}
         save_private_json(path, state)
-    open_page(f"{CONSENT_PAGE}?client={client}&context_id={int(context)}")
+    open_page(f"{CONSENT_PAGE}?client={client}&context_id={int(context)}&user_id={owner}")

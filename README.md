@@ -154,10 +154,10 @@ settings. Receiving the package also requires a host that supports its hooks.
 ## Automatic company context
 
 After you sign in to the Pensieve MCP server, the hooks connect this device
-automatically on your first Pensieve tool call; company briefings start on the
-next prompt. Transcript sharing is an independent choice and can remain off.
-Existing upload-only installations reconnect the same way before their
-credentials can read a briefing.
+automatically when the authenticated MCP connection is established; company
+briefings load on the next session or prompt hook. Transcript sharing is an independent choice and can remain off.
+Existing upload-only installations receive a new restricted hook credential;
+old credentials never gain extra access.
 
 Before the first response after connection, command hooks load a briefing containing the selected
 company's overview, top-level topics, available source trees and guidance for
@@ -176,6 +176,32 @@ credential through MCP sign-in. Once connected, the plugin asks once on a separa
 Approve/Deny page; **Data → Connectors in the context** manages sharing after either choice. No setup
 skill, credential download or terminal command is needed. New visible work
 belongs to the selected context for team handoffs. Previous chats are not imported.
+
+## Reset a connection
+
+Revoked installations stay revoked. To connect again or switch Pensieve accounts,
+close active sessions, run the bundled script from your installed plugin directory,
+then authenticate/reconnect the plugin's MCP server:
+
+```sh
+python3 /path/to/pensieve/scripts/plugin_connection.py --client claude --reset
+# For Codex, use --client codex, then: codex mcp login pensieve
+```
+
+Reset rotates the local installation proof, removes that harness's cached
+credential and fences its queued transcripts. It does not delete saved transcripts
+or change your sharing choices. Reconnect never automatically undoes revocation.
+A native OAuth account change also revokes the old hook installation.
+
+The installation credential is separate from OAuth: clearing native MCP login
+alone does not disconnect hooks or opted-in capture. Revoke the installation in
+Pensieve to stop both; Data → Connectors turns transcript sharing off independently.
+
+For Codex, remove a standalone `mcp_servers.pensieve` entry when installing the
+full plugin: a manual server with the same name overrides the plugin configuration
+and its header helper. Authenticate the plugin server with `codex mcp login pensieve`.
+Claude exposes it as `plugin:pensieve:pensieve` in `/mcp`. A hook can direct you
+there; it cannot launch Claude's interactive login from a background hook.
 
 ## Other ways to use the skills
 
@@ -216,8 +242,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release ord
 
 ### Connect conversations
 
-The hooks connect on your first Pensieve tool call after MCP sign-in, which
-authorises company briefings; the helper installs its device key privately. The
+Native MCP sign-in authorises the installation during connection discovery.
+The private header helper runs before login and shares only an installation
+proof; OAuth tokens remain in the harness. The
 plugin then asks once, on a separate Approve/Deny page, whether to save
 conversations for your harness type in that context. Compatible apps of the same harness share your
 preference, while another context or harness has its own choice. Declining keeps MCP tools available
@@ -225,3 +252,8 @@ and does not trigger repeated prompts. After either choice, change sharing direc
 Normal hooks complete pending setup and retry authorised uploads. V1 saves new
 work from setup onwards, with no history import. Saved transcripts remain until
 explicitly deleted.
+
+The MCP manifest embeds the same private header helper for Codex, whose HTTP
+helper has no plugin-relative working directory. After editing
+`pensieve/scripts/plugin_headers.py`, run `python3 scripts/build_mcp_config.py`.
+The package test rejects drift between source and embedded command.

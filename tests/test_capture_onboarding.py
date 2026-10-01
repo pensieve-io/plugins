@@ -7,7 +7,6 @@ from uuid import uuid4
 
 import capture_config as credentials
 import capture_onboarding as onboarding
-import capture_pairing as pairing
 import pytest
 from test_conversation_capture import OTHER_OWNER, OWNER, SESSION, append, hook_record, marker
 
@@ -15,7 +14,7 @@ CONNECTED = {f"{OWNER}:497": "synthetic-private-key"}
 
 
 def page(client):
-    return f"https://app.pensieve.uk/oauth/conversation-capture?client={client}&context_id=497"
+    return f"https://app.pensieve.uk/oauth/conversation-capture?client={client}&context_id=497&user_id={OWNER}"
 
 
 def consent_record(client="codex", consent="unknown", generation=None, session=SESSION):
@@ -72,7 +71,6 @@ def test_unknown_consent_opens_the_exact_page_once_per_conversation(tmp_path, mo
     opened.assert_called_once_with(page(client))
     # The page only records a choice: nothing is paired, issued or stored secretly.
     assert not config.exists()
-    assert not pairing.pairing_path(config, client).exists()
     path, state = onboarding_state(config)
     assert "synthetic-private-key" not in path.read_text()
     [entry] = state.values()
@@ -97,7 +95,6 @@ def test_without_a_key_for_this_context_connecting_is_left_to_mcp(
     onboarding.offer_connection(payload, "codex", SESSION, config, configured)
     opened.assert_not_called()
     assert not config.with_name("capture-onboarding.json").exists()
-    assert not pairing.pairing_path(config, "codex").exists()
 
 
 @pytest.mark.parametrize("configured", [{}, CONNECTED], ids=["new_installation", "connected"])
