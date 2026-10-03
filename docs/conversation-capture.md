@@ -100,6 +100,22 @@ wait provisionally for its own marker; ambiguous/unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
 
+### One context per conversation
+
+A conversation is saved to one context: the first one its Pensieve tools use.
+The helper also reads every Pensieve tool call's `context_id` from the transcript,
+whichever connection carried it. When a second context appears, saving stops for
+the rest of the host conversation: the current turn's unsent events are
+withdrawn (its prompt was attributed before the switch and may describe the
+other company), and later markers are ignored even if they name the first
+context again, because earlier turns stay in the agent's window. The server
+applies the same rule to the markers it emits; the client rule covers calls the
+server could not tie to this conversation. A batch already sent before the
+switch stays sent. Codex nested code-mode calls only carry this boundary when
+the native record includes their arguments; otherwise the server's next marker
+stops capture from the following turn. `/clear` or a new conversation starts
+saving again.
+
 ### Turn identity and lineage
 
 Newly observed turns carry the additive `capture` envelope from

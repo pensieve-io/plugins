@@ -58,6 +58,23 @@ def block(db, state: dict, reason: str) -> None:
     )
 
 
+def withdraw_turn(db, state: dict) -> None:
+    """Drop the current turn's unsent events; exact-byte batches stay immutable.
+
+    The turn's prompt was attributed before its tools named a second context,
+    and may describe that company. Hooks checkpoint between turns, so the turn
+    is normally still unsent when the switch is seen.
+    """
+    sent = set()
+    for (ids,) in db.execute("SELECT event_ids FROM batches"):
+        sent.update(json.loads(ids))
+    rows = db.execute("SELECT id FROM events WHERE turn_group=?", (state.get("turn_group"),))
+    for (event_id,) in rows.fetchall():
+        if event_id not in sent:
+            db.execute("DELETE FROM anchors WHERE event_id=?", (event_id,))
+            db.execute("DELETE FROM events WHERE id=?", (event_id,))
+
+
 def migrate_state(db, state: dict) -> None:
     """Upgrade private state once without rewriting any queued event or batch."""
     if "phase" not in state:
@@ -117,6 +134,19 @@ def apply_item(
     host_timestamp,
     source_offset=0,
 ):
+    if item["kind"] == "context_use":
+        # A conversation is saved to one context. Once its tools name a second,
+        # earlier turns sit in the agent's window and could reach any later
+        # transcript, so saving stops for the rest of this host conversation.
+        used = state.setdefault("contexts_used", [])
+        if item["context_id"] not in used:
+            used.append(item["context_id"])
+        scope = state.get("scope")
+        if len(used) > 1 or (scope and scope[1] is not None and scope[1] != item["context_id"]):
+            state["capture_stopped"] = True
+            withdraw_turn(db, state)
+            block(db, state, "multiple_contexts")
+        return
     if item["kind"] == "user":
         state.pop("blocked_reason", None)
         if state.get("phase") == "awaiting_attribution":
@@ -155,6 +185,13 @@ def apply_item(
             return
         owner, context = marker["user_id"], marker["context_id"]
         generation = marker["capture_generation"]
+        used = state.get("contexts_used", [])
+        if state.get("capture_stopped") or (context is not None and used and used != [context]):
+            # The server cannot see a call through a connection the hook did
+            # not bind; a marker naming another context than the tools used is
+            # the same boundary seen late.
+            state["capture_stopped"] = True
+            context = None
         previous = (
             state.get("candidate_scope") if marker["kind"] == "prompt" else state.get("scope")
         )

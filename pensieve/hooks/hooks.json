@@ -62,7 +62,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^mcp__plugin_pensieve_pensieve__.*$",
+        "matcher": "^mcp__(plugin_pensieve_pensieve|claude_ai_Pensieve)__.*$",
         "hooks": [
           {
             "type": "command",

@@ -2525,3 +2525,135 @@ def test_other_session_remembers_disabled_scope_before_recovering_late_events(
     )
     run()
     assert events(calls)[-1]["content"] == "Fresh answer"
+
+
+def pensieve_call(client, call_id, context_id, tool="search"):
+    arguments = {"query": "plan", "context_id": context_id}
+    if client == "claude":
+        return {
+            "type": "assistant",
+            "sessionId": SESSION,
+            "isSidechain": False,
+            "uuid": str(uuid.uuid4()),
+            "timestamp": NOW,
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": "mcp__claude_ai_Pensieve__" + tool,
+                        "input": arguments,
+                    }
+                ],
+            },
+        }
+    return {
+        "type": "response_item",
+        "timestamp": NOW,
+        "payload": {
+            "type": "function_call",
+            "name": tool,
+            "namespace": "mcp__pensieve",
+            "call_id": call_id,
+            "arguments": json.dumps(arguments),
+        },
+    }
+
+
+def pensieve_result(client, call_id, text):
+    if client == "claude":
+        return {
+            "type": "user",
+            "sessionId": SESSION,
+            "isSidechain": False,
+            "uuid": str(uuid.uuid4()),
+            "timestamp": NOW,
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": call_id, "content": text}],
+            },
+        }
+    return {
+        "type": "response_item",
+        "timestamp": NOW,
+        "payload": {"type": "function_call_output", "call_id": call_id, "output": text},
+    }
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_a_second_context_stops_saving_for_the_rest_of_the_conversation(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client=client)
+    append(
+        path,
+        user("First company question", client),
+        hook_record(client=client),
+        pensieve_call(client, "a", 497),
+        pensieve_result(client, "a", "First company result"),
+        assistant("First company answer", client),
+        user("Now the other company", client),
+        hook_record(client=client),
+        pensieve_call(client, "b", 12),
+        pensieve_result(client, "b", "Second company secret"),
+        assistant("Second company answer", client),
+        # A stale marker naming the first context cannot restart saving, and
+        # neither can returning to it.
+        user("Back to the first", client),
+        hook_record(client=client),
+        pensieve_call(client, "c", 497),
+        assistant("Mixed answer", client),
+    )
+    run()
+    saved = [str(event["content"]) for event in events(calls)]
+    assert "First company question" in saved and "First company answer" in saved
+    assert "First company result" in " ".join(saved)
+    for leaked in (
+        "Second company secret",
+        "Second company answer",
+        "Back to the first",
+        "Mixed answer",
+        "Now the other company",
+    ):
+        assert all(leaked not in text for text in saved), leaked
+    assert {json.loads(batch["body"])["context_id"] for batch, _ in calls} == {497}
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_a_marker_after_tools_used_another_context_saves_nothing(tmp_path, monkeypatch, client):
+    """An unbound connection's call never reached the server, so its marker lags."""
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client=client)
+    append(
+        path,
+        user("Question", client),
+        hook_record(client=client, context=None),
+        pensieve_call(client, "a", 12),
+        pensieve_result(client, "a", "Unbound result"),
+        assistant("Answer", client),
+        user("Follow-up", client),
+        hook_record(client=client),
+        assistant("Follow-up answer", client),
+    )
+    run()
+    assert not calls and pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_the_one_context_a_conversation_uses_keeps_saving(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client=client)
+    append(
+        path,
+        user("Question", client),
+        hook_record(client=client),
+        pensieve_call(client, "a", 497),
+        pensieve_result(client, "a", "Result"),
+        assistant("Answer", client),
+        user("Follow-up", client),
+        hook_record(client=client),
+        pensieve_call(client, "b", 497),
+        assistant("Follow-up answer", client),
+    )
+    run()
+    saved = [str(event["content"]) for event in events(calls)]
+    assert "Follow-up" in saved and "Follow-up answer" in saved

@@ -164,9 +164,10 @@ company's overview, top-level topics, available source trees and guidance for
 further reading. The agent uses MCP tools to open the detail and its sources.
 
 The plugin checks for an updated briefing before subsequent prompts and
-restores it after the client compacts the conversation. Your last explicit
-context choice is remembered for new conversations; each existing conversation
-keeps its own selection.
+restores it after the client compacts the conversation. The briefing follows
+the context your agent's Pensieve tools last used, and a new conversation starts
+from that one. A saved conversation goes to one context and stops saving if the
+agent uses a second.
 
 A bundled script fetches briefings; agents see only ordinary company tools.
 The context hooks send delivery receipts for the briefing the client received.

@@ -21,6 +21,7 @@ class EventFields(TypedDict, total=False):
     tool_name: str
     completion: Literal["completed", "interrupted", "failed"]
     marker: dict
+    context_id: int
     truncated: bool
 
 
@@ -33,10 +34,13 @@ class CaptureEvent(EventFields):
         "turn_end",
         "attribution",
         "unknown_boundary",
+        "context_use",
     ]
 
 
 CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
+# The plugin's own server, the claude.ai Pensieve connector, and Codex's server.
+PENSIEVE_TOOL = re.compile(r"^mcp__(?:plugin_pensieve_pensieve|claude_ai_Pensieve|pensieve)__")
 SET_CONTEXT_NAMES = {
     "mcp__pensieve__set_context",
     "mcp__plugin_pensieve_pensieve__set_context",
@@ -148,6 +152,32 @@ def is_hook_tool(name: object, namespace: object = None) -> bool:
     )
 
 
+def is_pensieve_tool(name: object, namespace: object = None) -> bool:
+    return isinstance(name, str) and (
+        bool(PENSIEVE_TOOL.match(name)) or namespace == "mcp__pensieve"
+    )
+
+
+def context_use(name: object, namespace: object, arguments: object) -> list[CaptureEvent]:
+    """A Pensieve call that names its context, wherever the call was routed.
+
+    Tools route by an explicit context_id, so the transcript itself shows every
+    company a conversation touched, including through a connection the hook
+    did not bind. Capture state stops on a second one; nothing else is inferred.
+    """
+    if not is_pensieve_tool(name, namespace):
+        return []
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return []
+    context = arguments.get("context_id") if isinstance(arguments, dict) else None
+    if type(context) is not int or context <= 0:
+        return []
+    return [{"kind": "context_use", "context_id": context}]
+
+
 def capture_id(value: object) -> str | None:
     if isinstance(value, str) and 0 < len(value) <= 255 and not re.search(r"[\s\x00]", value):
         return value
@@ -244,11 +274,12 @@ def normalise(
                     return []
                 seen[item["id"]] = state.get("turn_id")
                 return [
+                    *context_use("mcp__pensieve__" + item["tool"], None, item.get("arguments")),
                     {
                         "kind": "tool_call",
                         "content": "mcp__pensieve__" + item["tool"],
                         "tool_call_id": item["id"],
-                    }
+                    },
                 ]
             if (
                 payload.get("thread_id") == session
@@ -305,11 +336,11 @@ def normalise(
             if internal:
                 return []
             name = payload.get("name")
+            field = "arguments" if kind == "function_call" else "input"
             return (
                 [
-                    tool_call(
-                        name, call, payload, "arguments" if kind == "function_call" else "input"
-                    )
+                    *context_use(name, payload.get("namespace"), payload.get(field)),
+                    tool_call(name, call, payload, field),
                 ]
                 if isinstance(name, str)
                 else []
@@ -378,6 +409,7 @@ def normalise(
                         "internal": internal,
                     }
                     if not internal:
+                        result.extend(context_use(name, None, item.get("input")))
                         result.append(tool_call(name, call, item, "input"))
         return result
     if kind != "user" or payload.get("role") != "user":

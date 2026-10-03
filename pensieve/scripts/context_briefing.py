@@ -124,6 +124,10 @@ def read_state(path: Path) -> dict:
     return value
 
 
+PLUGIN_TOOL_PREFIX = "mcp__plugin_pensieve_pensieve__"
+BOUND_TOOL_PREFIXES = (PLUGIN_TOOL_PREFIX, "mcp__claude_ai_Pensieve__")
+
+
 def failure(event: str, client: str, session: str | None, reason: str = "") -> dict:
     if event == "PreToolUse":
         return {
@@ -159,15 +163,18 @@ def run_hook(
     if session is None:
         return failure(event, client, None)
     if event == "PreToolUse":
-        if client != "claude" or not str(payload.get("tool_name", "")).startswith(
-            "mcp__plugin_pensieve_pensieve__"
-        ):
+        tool = str(payload.get("tool_name", ""))
+        if client != "claude" or not tool.startswith(BOUND_TOOL_PREFIXES):
             return {}
+        # The claude.ai connector is the common second Pensieve connection; bind
+        # it too so its calls carry this conversation. A binding is correlation
+        # only: the server still authenticates the call's own OAuth account.
         provenance = payload.get("mcp_server")
-        if provenance is not None and provenance != {
-            "name": "plugin:pensieve:pensieve",
-            "source": "plugin",
-        }:
+        if (
+            tool.startswith(PLUGIN_TOOL_PREFIX)
+            and provenance is not None
+            and provenance != {"name": "plugin:pensieve:pensieve", "source": "plugin"}
+        ):
             return failure(event, client, session)
         tool_id = payload.get("tool_use_id")
         if not isinstance(tool_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", tool_id):

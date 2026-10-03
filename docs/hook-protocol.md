@@ -29,11 +29,14 @@ keeps that flag, forcing the next successful briefing to replace the unavailable
 notice even when an older briefing was acknowledged. Success clears the flag.
 It acknowledges accepted receipts synchronously before requesting a refresh;
 other capture handlers may run concurrently. The server assembles company
-content, enforces current membership and permissions, and owns durable
-conversation selection. No company content is cached locally.
+content, enforces current membership and permissions, and owns each
+conversation's briefing context and capture destination. No company content is
+cached locally.
 
-Installation credentials are user/client scoped and follow the server's live
-context selection, subject to current membership and permissions. The helper
+Installation credentials are user/client scoped and follow the conversation's
+briefing context, subject to current membership and permissions. Tools route by
+an explicit `context_id` (optional for a member of one context); the briefing
+follows the context those tools last used. The helper
 stores no context content or token from the harness. Older contextual credentials
 never widen their scope; upgrading registers a fresh installation.
 
@@ -41,9 +44,11 @@ Claude ordinary calls provide a tool-use ID but no conversation ID. A synchronou
 `PreToolUse` command registers `{client: "claude", session_id, tool_use_id}` at
 `POST /hooks/tool-binding`. The following OAuth-authenticated MCP request
 resolves that exact ID from `_meta["claudecode/toolUseId"]`. Missing bindings
-never reuse another conversation's transport selection. The hook matches only
-`mcp__plugin_pensieve_pensieve__*` and checks native plugin provenance when the
-host supplies it. With a credential, expected failures deny the call; server
+never reuse another conversation's transport. The hook matches the plugin's own
+`mcp__plugin_pensieve_pensieve__*` tools, checking native plugin provenance when
+the host supplies it, and the claude.ai connector's `mcp__claude_ai_Pensieve__*`
+tools, the common second Pensieve connection. A binding is correlation only: the
+server still authenticates each call's OAuth account. With a credential, expected failures deny the call; server
 enforcement is also necessary because host command timeouts fail open. Codex
 supplies `_meta.threadId` directly and needs no per-tool binding request.
 
@@ -108,11 +113,15 @@ one terminal, non-secret marker in accepted hook context:
 <!-- pensieve-capture-context {"v":2,"capture_generation":"UUID-or-null","kind":"prompt","user_id":"UUID","client":"codex","conversation_id":"UUID","context_id":497,"turn_id":"UUID"} -->
 ```
 
-`context_id` is null when unselected; `capture_generation` is null when disabled
+`context_id` is the conversation's capture destination, never its briefing
+context: null before capture locks to the first context the conversation's tools
+use, and null for the rest of the conversation once they use a second.
+`capture_generation` is null when disabled
 or consent lookup is unavailable. False → true starts a new generation. `turn_id` is nullable; Codex supplies its
-native turn ID, while the Claude adapter currently uses null. Successful
-`set_context` results carry the same marker with `kind="selection"`. Markers
-reflect the authenticated selection snapshot of that exact call. They never
+native turn ID, while the Claude adapter currently uses null. Older servers also
+returned `kind="selection"` markers from `set_context`; the helper still honours
+them until that tool is gone everywhere. Markers reflect the authenticated
+snapshot of that exact call. They never
 contain credentials. The helper does not treat a quoted marker as authorization.
 
 Command capture hooks establish a baseline at `SessionStart`, checkpoint at
