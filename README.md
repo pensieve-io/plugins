@@ -164,10 +164,11 @@ company's overview, top-level topics, available source trees and guidance for
 further reading. The agent uses MCP tools to open the detail and its sources.
 
 The plugin checks for an updated briefing before subsequent prompts and
-restores it after the client compacts the conversation. The briefing follows
-the context your agent's Pensieve tools last used, and a new conversation starts
-from that one. A saved conversation goes to one context and stops saving if the
-agent uses a second.
+restores it after the client compacts the conversation. A conversation works in
+one context: the first one it reads or uses. With a single context, the briefing
+loads it from the start; with several, a new conversation's briefing lists them
+and names the most recently used, until the agent opens one. A saved
+conversation goes to that context and stops saving if the agent uses a second.
 
 A bundled script fetches briefings; agents see only ordinary company tools.
 The context hooks send delivery receipts for the briefing the client received.
@@ -176,7 +177,7 @@ approval per user, context and harness type. Each device connects its own privat
 credential through MCP sign-in. Once connected, the plugin asks once on a separate
 Approve/Deny page; **Data → Connectors in the context** manages sharing after either choice. No setup
 skill, credential download or terminal command is needed. New visible work
-belongs to the selected context for team handoffs. Previous chats are not imported.
+belongs to the conversation's context for team handoffs. Previous chats are not imported.
 
 ## Reset a connection
 

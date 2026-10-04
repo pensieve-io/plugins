@@ -240,13 +240,13 @@ client/version, operating system, install route and result for each tested host.
 Use a local package or the candidate Git branch until these checks pass.
 
 1. **Fresh install:** authenticate through the client's normal OAuth flow, enable
-   hooks, select a company and confirm grounding arrives before the first answer.
+   hooks, use a company and confirm grounding arrives before the next answer.
 2. **Existing install:** update the marketplace/plugin without uninstalling;
-   confirm sign-in, selected company, skills, branding and hook permissions.
+   confirm sign-in, company briefing, skills, branding and hook permissions.
 3. **Conversation isolation:** open two conversations on different companies,
-   alternate reads, and confirm each keeps its own selection, including when the
-   client shares one MCP connection. Start a third conversation and verify the
-   latest explicit default selection.
+   alternate reads, and confirm each briefing follows its own conversation's
+   tool calls, including when the client shares one MCP connection. Confirm a
+   second company in one conversation stops its saving.
 4. **Lifecycle:** resume, compact and clear; verify context returns where needed
    and a changed company briefing refreshes before the next answer.
 5. **Delivery failure:** interrupt a briefing request and confirm a later prompt

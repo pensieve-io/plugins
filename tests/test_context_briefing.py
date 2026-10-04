@@ -172,10 +172,13 @@ def test_claude_binding_registers_exact_call_before_tool_runs(setup):
         # must carry the conversation too, whatever provenance it reports.
         ("mcp__claude_ai_Pensieve__search", {"name": "claude.ai Pensieve"}, True),
         ("mcp__claude_ai_Pensieve__search", None, True),
+        # A server added by hand under the plugin's own name.
+        ("mcp__pensieve__read", {"name": "pensieve", "source": "user"}, True),
+        ("mcp__pensieve-dev__search", None, False),
         ("mcp__other_server__search", None, False),
     ],
 )
-def test_claude_binding_covers_the_claude_ai_connector(setup, tool_name, provenance, bound):
+def test_claude_binding_covers_other_pensieve_connections(setup, tool_name, provenance, bound):
     path, calls = setup
     key = profile()
     key["client"] = "claude"

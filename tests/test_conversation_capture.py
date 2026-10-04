@@ -35,7 +35,6 @@ def marker(
     client="codex",
     owner=OWNER,
     context=497,
-    kind="prompt",
     turn=None,
     session=SESSION,
     generation=GENERATION,
@@ -43,7 +42,7 @@ def marker(
     value = {
         "v": 2,
         "capture_generation": generation,
-        "kind": kind,
+        "kind": "prompt",
         "user_id": owner,
         "context_id": context,
         "client": client,
@@ -393,14 +392,19 @@ def test_legacy_turn_ids_are_distinct_and_malformed_native_ids_are_omitted(tmp_p
     )
 
 
-@pytest.mark.parametrize("boundary", ["context", "generation", "unmarked", "rollback"])
+@pytest.mark.parametrize("boundary", ["account", "generation", "unmarked", "rollback"])
 def test_lineage_stops_at_unproven_or_changed_scope(tmp_path, monkeypatch, boundary):
-    path, _, _, calls, run = setup(tmp_path, monkeypatch)
+    profiles = [
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
+    ]
+    path, _, _, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(path, user(), hook_record(), assistant())
     run()
     args = {}
-    if boundary == "context":
-        args["context"] = 12
+    if boundary == "account":
+        # A second context stops capture instead; see the one-context tests.
+        args["owner"] = OTHER_OWNER
     elif boundary == "generation":
         args["generation"] = OTHER_OWNER
     elif boundary == "unmarked":
@@ -410,6 +414,7 @@ def test_lineage_stops_at_unproven_or_changed_scope(tmp_path, monkeypatch, bound
     append(path, user("New"), hook_record(**args), assistant("New answer"))
     run()
     saved = events(calls)
+    assert [event["content"] for event in saved[-2:]] == ["New", "New answer"]
     assert "parent" not in saved[-2]["capture"]
     assert saved[-1]["capture"]["parent"]["event_id"] == saved[-2]["event_id"]
 
@@ -762,7 +767,7 @@ def test_briefing_company_boundary_survives_account_and_consent_changes(
     assert pending(state) == 0
 
 
-def test_unconfigured_account_and_null_selection_are_capture_off(tmp_path, monkeypatch):
+def test_unconfigured_account_and_null_context_are_capture_off(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     append(
         path,
@@ -771,39 +776,6 @@ def test_unconfigured_account_and_null_selection_are_capture_off(tmp_path, monke
         assistant("Other scope answer"),
     )
     append(path, user("No context"), hook_record(context=None), assistant("No context answer"))
-    run()
-    assert not calls and pending(state) == 0
-
-
-@pytest.mark.parametrize("generation", [GENERATION, "317e0b53-8178-4a3c-8d40-a07414144741"])
-def test_legacy_selection_of_second_company_stops_current_turn(tmp_path, monkeypatch, generation):
-    profiles = [{"user_id": OWNER, "upload_key": KEY}]
-    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
-    append(
-        path,
-        user(),
-        hook_record(),
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "set_context",
-                "namespace": "mcp__pensieve",
-                "call_id": "switch",
-                "arguments": "{}",
-            },
-        },
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "switch",
-                "output": "Second company overview\n"
-                + marker(context=12, kind="selection", generation=generation),
-            },
-        },
-        assistant("Second company answer"),
-    )
     run()
     assert not calls and pending(state) == 0
 
@@ -823,7 +795,7 @@ def test_quoted_markers_and_non_pensieve_tool_results_do_not_authorize(tmp_path,
             "payload": {
                 "type": "function_call_output",
                 "call_id": "other",
-                "output": marker(kind="selection"),
+                "output": marker(),
             },
         },
     )
@@ -1366,42 +1338,6 @@ def test_full_spool_still_retries_previously_committed_upload(tmp_path, monkeypa
     assert events(calls)[1]["content"] == "x" * 32000
 
 
-def test_selection_destination_never_inherits_previous_owner_title(tmp_path, monkeypatch):
-    prof = [
-        {"user_id": OWNER, "upload_key": KEY},
-        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
-    ]
-    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
-    append(
-        path,
-        user("Owner A confidential prompt"),
-        hook_record(),
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "namespace": "mcp__pensieve",
-                "name": "set_context",
-                "call_id": "switch",
-            },
-        },
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "switch",
-                "output": "Owner B overview "
-                + marker(owner=OTHER_OWNER, context=12, kind="selection"),
-            },
-        },
-        assistant("Owner B answer"),
-    )
-    run()
-    destination = [json.loads(batch["body"]) for batch, key in calls if key == OTHER_KEY]
-    assert not calls and pending(state) == 0
-    assert "Owner A confidential prompt" not in json.dumps(destination)
-
-
 @pytest.mark.parametrize("first_hook", ["SessionStart", "UserPromptSubmit"])
 def test_startup_missing_transcript_captures_first_turn_without_backfill(
     tmp_path, monkeypatch, first_hook
@@ -1576,9 +1512,7 @@ def test_internal_hook_tool_results_are_excluded_even_when_called_normally(
     assert [event["kind"] for event in events(calls)] == ["user", "assistant"]
 
 
-def native_selection(
-    context=12, turn="turn-one", call_id="nested-call", server="pensieve", generation=GENERATION
-):
+def native_call(context=12, turn="turn-one", call_id="nested-call", server="pensieve", tool="read"):
     return {
         "type": "event_msg",
         "timestamp": NOW,
@@ -1590,26 +1524,18 @@ def native_selection(
                 "type": "McpToolCall",
                 "id": call_id,
                 "server": server,
-                "tool": "set_context",
+                "tool": tool,
+                "arguments": {"context_id": context},
                 "status": "completed",
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Destination company result "
-                            + marker(context=context, kind="selection", generation=generation),
-                        }
-                    ]
-                },
+                "result": {"content": [{"type": "text", "text": "Destination company result"}]},
             },
         },
     }
 
 
 @pytest.mark.parametrize("wrapper", ["exec", "wait"])
-@pytest.mark.parametrize("generation", [GENERATION, "317e0b53-8178-4a3c-8d40-a07414144741"])
-def test_codex_native_selection_fences_combined_code_mode_output(
-    tmp_path, monkeypatch, wrapper, generation
+def test_codex_nested_call_to_another_company_fences_combined_output(
+    tmp_path, monkeypatch, wrapper
 ):
     prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
@@ -1627,7 +1553,7 @@ def test_codex_native_selection_fences_combined_code_mode_output(
                 "name": wrapper,
             },
         },
-        native_selection(generation=generation),
+        native_call(),
         {
             "type": "response_item",
             "payload": {
@@ -1643,26 +1569,32 @@ def test_codex_native_selection_fences_combined_code_mode_output(
 
 
 @pytest.mark.parametrize(
-    "field,value",
-    [("server", "other-server"), ("thread_id", "other-thread"), ("turn_id", "other-turn")],
+    "payload,item,stops",
+    [
+        # Any call in this thread is exposure, whatever its server or turn.
+        ({}, {"server": "pensieve-dev"}, True),
+        ({}, {"server": "acme"}, True),
+        ({"turn_id": "other-turn"}, {}, True),
+        ({"thread_id": "other-thread"}, {}, False),
+        ({}, {"server": "acme", "tool": "lookup"}, False),
+    ],
 )
-def test_native_selection_requires_host_and_pensieve_provenance(
-    tmp_path, monkeypatch, field, value
-):
+def test_nested_exposure_requires_only_this_thread(tmp_path, monkeypatch, payload, item, stops):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    selection = native_selection()
-    target = selection["payload"]["item"] if field == "server" else selection["payload"]
-    target[field] = value
+    nested = native_call()
+    nested["payload"].update(payload)
+    nested["payload"]["item"].update(item)
     append(
         path,
         {"type": "turn_context", "payload": {"turn_id": "turn-one"}},
         user(),
         hook_record(turn="turn-one"),
-        selection,
+        nested,
         assistant(),
     )
     run()
-    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+    saved = [event["content"] for event in events(calls)]
+    assert saved == ([] if stops else ["Visible question", "Visible answer"])
 
 
 def test_removing_one_profile_excludes_its_disabled_interval_and_keeps_old_backlog(
@@ -1860,37 +1792,6 @@ def test_server_opt_out_and_fresh_generation_never_backfill_old_work(tmp_path, m
     assert [event["content"] for event in events(calls)] == ["New prompt", "New answer"]
 
 
-def test_new_opt_in_generation_during_selection_waits_for_fresh_prompt(tmp_path, monkeypatch):
-    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    append(path, user(), hook_record(generation=None))
-    run()
-    db = capture.connect_state(state, "codex", SESSION)
-    state_value = capture.load_state(db)
-    boundary = json.loads(
-        marker(kind="selection").split("pensieve-capture-context ")[1].removesuffix(" -->")
-    )
-    capture.apply_item(
-        db,
-        state_value,
-        {"kind": "attribution", "marker": boundary},
-        "selection",
-        NOW,
-        "codex",
-        SESSION,
-        {OWNER: KEY},
-        True,
-    )
-    capture.save_state(db, state_value)
-    db.commit()
-    db.close()
-    append(path, assistant("Old turn must stay private"))
-    run()
-    assert not calls
-    append(path, user("Fresh prompt"), hook_record(), assistant("Fresh answer"))
-    run()
-    assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
-
-
 @pytest.mark.parametrize(
     "content,secret",
     [
@@ -1922,7 +1823,7 @@ def test_baseline_mid_turn_does_not_queue_orphan_outputs(tmp_path, monkeypatch, 
 
 def test_nested_write_keeps_native_identity_once_without_inputs_or_outputs(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    native = native_selection(call_id="exec-write")
+    native = native_call(call_id="exec-write")
     native["payload"]["item"].update(tool="edit_page", arguments={"secret": "PRIVATE"})
     append(
         path,
@@ -1958,8 +1859,8 @@ def test_nested_write_keeps_native_identity_once_without_inputs_or_outputs(tmp_p
 )
 def test_nested_write_requires_native_completed_call(tmp_path, monkeypatch, field, value):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    native = native_selection(call_id="exec-write")
-    native["payload"]["item"]["tool"] = "save_data"
+    native = native_call(call_id="exec-write")
+    native["payload"]["item"].update(tool="save_data", arguments={})
     target = native["payload"] if field in {"thread_id", "turn_id"} else native["payload"]["item"]
     target[field] = value
     append(
@@ -2452,36 +2353,6 @@ def test_opt_out_survives_failed_source_read_and_same_key_restoration(
     assert events(calls)[-1]["content"] == "Fresh answer"
 
 
-def test_legacy_state_upgrade_preserves_frozen_outbox(tmp_path, monkeypatch):
-    path, _, state, _, run = setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(capture, "upload", lambda *args: False)
-    append(path, user(), hook_record(), assistant())
-    run()
-    db = capture.connect_state(state, "codex", SESSION)
-    try:
-        before = [tuple(row) for row in db.execute("SELECT * FROM batches")]
-        saved = capture.load_state(db)
-        saved.pop("phase")
-        saved.update(saved.pop("adapter"))
-        saved.update(awaiting_marker=False, ambiguous=False, discard_until_prompt=False)
-        capture.save_state(db, saved)
-        db.commit()
-    finally:
-        db.close()
-    run()
-    db = capture.connect_state(state, "codex", SESSION)
-    try:
-        restored = capture.load_state(db)
-        assert restored["phase"] == "capturing" and "adapter" in restored
-        assert (
-            not {"awaiting_marker", "ambiguous", "discard_until_prompt", "turn_id", "calls"}
-            & restored.keys()
-        )
-        assert [tuple(row) for row in db.execute("SELECT * FROM batches")] == before
-    finally:
-        db.close()
-
-
 @pytest.mark.parametrize("client", ["codex", "claude"])
 @pytest.mark.parametrize("all_off", [True, False])
 def test_other_session_remembers_disabled_scope_before_recovering_late_events(
@@ -2511,7 +2382,7 @@ def test_other_session_remembers_disabled_scope_before_recovering_late_events(
     assert events(calls)[-1]["content"] == "Fresh answer"
 
 
-def pensieve_call(client, call_id, context_id, tool="search"):
+def pensieve_call(client, call_id, context_id, tool="search", server=None):
     arguments = {"query": "plan", "context_id": context_id}
     if client == "claude":
         return {
@@ -2526,7 +2397,7 @@ def pensieve_call(client, call_id, context_id, tool="search"):
                     {
                         "type": "tool_use",
                         "id": call_id,
-                        "name": "mcp__claude_ai_Pensieve__" + tool,
+                        "name": f"mcp__{server or 'claude_ai_Pensieve'}__{tool}",
                         "input": arguments,
                     }
                 ],
@@ -2538,7 +2409,7 @@ def pensieve_call(client, call_id, context_id, tool="search"):
         "payload": {
             "type": "function_call",
             "name": tool,
-            "namespace": "mcp__pensieve",
+            "namespace": "mcp__" + (server or "pensieve"),
             "call_id": call_id,
             "arguments": json.dumps(arguments),
         },
@@ -2649,8 +2520,7 @@ def test_the_one_context_a_conversation_uses_keeps_saving(tmp_path, monkeypatch,
 )
 def test_nested_company_reads_stop_the_switching_turn(tmp_path, monkeypatch, tool):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
-    native = native_selection(context=12)
-    native["payload"]["item"].update(tool=tool, arguments={"context_id": 12})
+    native = native_call(tool=tool)
     append(
         path,
         {"type": "turn_context", "payload": {"turn_id": "turn-one"}},
@@ -2692,6 +2562,30 @@ def test_sticky_briefing_exposure_stops_capture_on_the_first_other_company_tool(
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
+def test_an_unpaired_briefing_marker_still_counts_as_exposure(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("First company question", client),
+        hook_record(client),
+        assistant("First company answer", client),
+    )
+    run()
+    append(
+        path,
+        # Pairs with no user turn, so it authorises nothing, but its briefing
+        # still reached the agent's window.
+        hook_record(client, context=12),
+        user("Later question", client),
+        hook_record(client),
+        assistant("Later answer", client),
+    )
+    run()
+    saved = [event["content"] for event in events(calls)]
+    assert saved == ["First company question", "First company answer"]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
 def test_generic_help_never_counts_as_company_exposure(tmp_path, monkeypatch, client):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
     append(
@@ -2703,6 +2597,60 @@ def test_generic_help_never_counts_as_company_exposure(tmp_path, monkeypatch, cl
     )
     run()
     assert "Read the root Page" in [event["content"] for event in events(calls)]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize(
+    "server,tool",
+    [
+        # A connection the hook does not bind, under any Pensieve server name.
+        ("pensieve-dev", "search"),
+        ("Pensieve", "read"),
+        # A company tool naming a context counts under any server name.
+        ("acme", "get_tree"),
+    ],
+)
+def test_unbound_pensieve_connections_still_stop_capture(
+    tmp_path, monkeypatch, client, server, tool
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("First company question", client),
+        hook_record(client),
+        pensieve_call(client, "other", 12, tool=tool, server=server),
+        assistant("Second company answer", client),
+    )
+    run()
+    assert not calls and pending(state) == 0
+
+
+@pytest.mark.parametrize(
+    "name,namespace,arguments,context",
+    [
+        ("mcp__pensieve-dev__search", None, {"context_id": 12}, 12),
+        ("mcp__Pensieve__read", None, '{"context_id": 12}', 12),
+        ("mcp__plugin_pensieve_pensieve__set_lock", None, {"context_id": 12}, 12),
+        ("search", "mcp__Pensieve-Staging", {"context_id": 12}, 12),
+        ("mcp__acme__search", None, {"context_id": 12}, 12),
+        ("mcp__acme__info", None, {"inspect": "activity", "context_id": 12}, 12),
+        ("mcp__pensieve__lookup", None, {"context_id": 12}, 12),
+        # Discovery, foreign tools and malformed targets are not exposure.
+        ("mcp__pensieve__list_contexts", None, {"context_id": 12}, None),
+        ("mcp__pensieve__info", None, {"help": "transcripts", "context_id": 12}, None),
+        ("mcp__acme__lookup", None, {"context_id": 12}, None),
+        ("read", None, {"context_id": 12}, None),
+        ("read", "functions", {"context_id": 12}, None),
+        ("mcp__pensieve__search", None, {"context_id": "12"}, None),
+        ("mcp__pensieve__search", None, {"context_id": True}, None),
+        ("mcp__pensieve__search", None, {"context_id": 0}, None),
+        ("mcp__pensieve__search", None, {}, None),
+        ("mcp__pensieve__search", None, "not json", None),
+    ],
+)
+def test_context_use_recognises_company_calls(name, namespace, arguments, context):
+    expected = [{"kind": "context_use", "context_id": context}] if context else []
+    assert capture_adapters.context_use(name, namespace, arguments) == expected
 
 
 @pytest.mark.parametrize("reset_offset", [False, True])

@@ -1,7 +1,7 @@
 # Hook and server contract
 
 The client package calls the hosted Pensieve MCP service. The server owns
-authentication, context selection and company content; the client owns hook
+authentication, context routing and company content; the client owns hook
 registration and recognition of context the host actually accepted.
 
 ## Briefing request
@@ -46,11 +46,18 @@ Claude ordinary calls provide a tool-use ID but no conversation ID. A synchronou
 resolves that exact ID from `_meta["claudecode/toolUseId"]`. Missing bindings
 never reuse another conversation's transport. The hook matches the plugin's own
 `mcp__plugin_pensieve_pensieve__*` tools, checking native plugin provenance when
-the host supplies it, and the claude.ai connector's `mcp__claude_ai_Pensieve__*`
-tools, the common second Pensieve connection. A binding is correlation only: the
-server still authenticates each call's OAuth account. With a credential, expected failures deny the call; server
-enforcement is also necessary because host command timeouts fail open. Codex
-supplies `_meta.threadId` directly and needs no per-tool binding request.
+the host supplies it, the claude.ai connector's `mcp__claude_ai_Pensieve__*`
+tools and a server added by hand as `pensieve` (`mcp__pensieve__*`). A binding is
+correlation only: the server still authenticates each call's OAuth account. With
+a credential, expected failures deny the call. Codex supplies `_meta.threadId`
+directly and needs no per-tool binding request.
+
+The server records a conversation's company exposure only for calls it can tie
+to that conversation: Codex's `threadId` or a bound Claude tool-use ID. A host
+command timeout fails open, and other server names are never bound, so those
+calls reach the server unattributed. The capture helper's transcript check is
+the backstop: it reads every company call's `context_id` itself and stops saving
+locally at a second context.
 
 The plugin's dynamic-header helper creates its private proof before MCP connects
 and emits only `X-Pensieve-Plugin: <client> <proof>` as header JSON. Claude uses
@@ -94,7 +101,7 @@ be synchronous.
 
 Both repositories test their side of this contract. Client receipt/probe tests
 live here; the server repository tests forced recovery, receipt fencing,
-authentication and conversation selection without importing client code.
+authentication and per-conversation capture locking without importing client code.
 
 ## Optional conversation capture
 
@@ -118,11 +125,10 @@ context: null before capture locks to the first company briefing or tool
 exposure, and null for the rest of the conversation once they use a second.
 `capture_generation` is null when disabled
 or consent lookup is unavailable. False → true starts a new generation. `turn_id` is nullable; Codex supplies its
-native turn ID, while the Claude adapter currently uses null. Older servers also
-returned `kind="selection"` markers from `set_context`; the helper still honours
-them until that tool is gone everywhere. Markers reflect the authenticated
-snapshot of that exact call. They never
-contain credentials. The helper does not treat a quoted marker as authorization.
+native turn ID, while the Claude adapter currently uses null. `prompt` is the
+only marker kind; tool results never carry one. Markers reflect the
+authenticated snapshot of that exact call. They never contain credentials. The
+helper does not treat a quoted marker as authorization.
 
 Command capture hooks establish a baseline at `SessionStart`, checkpoint at
 `UserPromptSubmit` and `Stop`, and attempt a bounded flush at `SessionEnd`.

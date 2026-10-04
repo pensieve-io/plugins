@@ -25,9 +25,9 @@ Extraction requires the separately gated application worker.
 
 The header proof lives in `~/.config/pensieve/mcp-headers-{client}.json`, with the
 authenticated profile in `~/.config/pensieve/capture.json` (files `0600`, directory
-`0700`). It is client-bound and follows the member's selected context; context
-switches do not create keys. No secret enters model text, tool arguments or the
-consent page. The script resolves its owner through `/hooks/connection`, then
+`0700`). It is client-bound, not context-bound: tools name their context on each
+call, and a different context does not create a key. No secret enters model
+text, tool arguments or the consent page. The script resolves its owner through `/hooks/connection`, then
 uses the same proof for briefing, exact Claude call binding and opted-in upload.
 
 Native login never widens existing upload-only keys. After verified registration,
@@ -92,11 +92,11 @@ keep their original bytes and attribution.
 
 ## Attribution and reliability
 
-Authenticated version-2 prompt/selection markers carry account, client,
-conversation, context and current consent generation (or null when disabled).
-Only recognised native hook records and actual Pensieve MCP results supply
-attribution. Codex also matches its turn ID. Only an observed user prompt may
-wait provisionally for its own marker; ambiguous/unassignable work is discarded.
+Authenticated version-2 prompt markers carry account, client, conversation,
+context and current consent generation (or null when disabled). Only recognised
+native hook records supply attribution. Codex also matches its turn ID. Only an
+observed user prompt may wait provisionally for its own marker;
+ambiguous/unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
 
@@ -104,9 +104,13 @@ Codex code mode uses native completed MCP-call records and omits combined
 
 A conversation is saved to one context: the first company whose briefing or
 company tool content it receives. A sticky root briefing counts even when the
-first tool then targets another company. The helper also reads company tool
-calls' `context_id` from the transcript, whichever connection carried them;
-generic help and `list_contexts()` are discovery, not company exposure.
+first tool then targets another company. The server records exposure only for
+calls it can tie to the conversation (Codex's thread ID or a bound Claude
+tool-use ID), so the helper also reads company tool calls' `context_id` from the
+transcript, whichever connection carried them: any MCP server whose name contains
+"pensieve", and Pensieve's company tool names on any other server. This is the
+backstop when a binding hook fails open or a connection is never bound. Generic
+help and `list_contexts()` are discovery, not company exposure.
 Authenticated briefing contexts persist across account and consent changes;
 turning sharing off does not remove a briefing from the model's working memory.
 The local guard is conservative: an attempt to call another company may stop
@@ -117,8 +121,9 @@ The current turn's unsent events are withdrawn and later markers cannot restart
 saving, even for the first company, because both companies remain in the model's
 working memory. A batch already accepted before the switch stays accepted.
 
-Codex nested native MCP records are checked for reads as well as writes. If a
-native record omits arguments, the server still fences the conversation before
+Codex nested native MCP records are checked for reads as well as writes, on any
+server and in any turn of the thread. If a native record omits arguments, the
+server, which receives Codex's thread ID, still fences the conversation before
 returning the company result. Uploads check that live fence under a row lock, so
 a marker from the start of the switching turn cannot admit its later bytes.
 An exact accepted batch can replay its receipt, but no new batch can enter a
@@ -263,11 +268,10 @@ result bodies. It does not interpret a completed call as a successful write:
 Pensieve #977 matches server changeset/job receipts before creating provenance.
 Native records must match this thread and turn and identify the Pensieve server.
 
-Codex emits these records at completion. If concurrent work crosses a context
-switch, the backend's full identity match may leave a call unlinked; no combined
-output or timing heuristic assigns it to another context. Sequential writes on
-either side of a selection have native matching identities. Old captured events
-remain immutable; this adds no backfill and changes no existing retry bytes.
+Codex emits these records at completion. A call naming another context stops
+capture instead (see [one context per conversation](#one-context-per-conversation));
+no combined output or timing heuristic assigns a call to a context. Old captured
+events remain immutable; this adds no backfill and changes no existing retry bytes.
 
 ### Remembered harness preferences
 

@@ -35,7 +35,7 @@ from capture_config import (
     profiles,
 )
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
-from capture_state import apply_item, block, migrate_state, scope_revoked
+from capture_state import apply_item, block, discard_conversation, migrate_state, scope_revoked
 from context_receipt import conversation_id
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
@@ -90,7 +90,15 @@ def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
 
 def load_state(db: sqlite3.Connection) -> dict:
     row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
-    state = json.loads(row[0]) if row else {"offset": None, "sequence": 0, "calls": {}}
+    if row is None:
+        return {
+            "offset": None,
+            "sequence": 0,
+            "phase": "ready",
+            "adapter": {},
+            "context_boundary_version": 2,
+        }
+    state = json.loads(row[0])
     if not isinstance(state, dict):
         raise ValueError("Capture state must be an object")
     migrate_state(db, state)
@@ -281,7 +289,7 @@ def scan(
             scanned += len(line)
             if state.get("discarding_record") or len(line) > MAX_RECORD_BYTES:
                 if not state.get("discarding_record"):
-                    # The skipped record could contain a prompt or selection.
+                    # The skipped record could contain a prompt or a marker.
                     # Keep accepted/pending work, but trust no later attribution
                     # until a fresh user prompt receives its own marker.
                     block(db, state, "oversized_record")
@@ -563,20 +571,17 @@ def flush(db, configured, client, session, endpoint, deadline):
                 (segment["id"], status, now, now if status == "accepted" else None),
             )
             db.commit()
+            if isinstance(outcome, dict) and outcome.get("conversation_stopped"):
+                # The server stopped this host conversation, for a second
+                # company or an account change: nothing queued may follow.
+                db.execute("BEGIN IMMEDIATE")
+                state = load_state(db)
+                discard_conversation(db, state, "conversation_stopped")
+                save_state(db, state)
+                db.commit()
+                return
             if isinstance(outcome, dict) and outcome["status"] in {"capture_disabled", "deleted"}:
                 retire_segment(db, segment["id"])
-                if outcome.get("conversation_stopped"):
-                    db.execute("BEGIN IMMEDIATE")
-                    state = load_state(db)
-                    state["capture_stopped"] = True
-                    block(db, state, "multiple_contexts")
-                    db.execute("DELETE FROM events")
-                    db.execute("DELETE FROM batches")
-                    db.execute("DELETE FROM anchors")
-                    db.execute("UPDATE segments SET retired=1,title=''")
-                    save_state(db, state)
-                    db.commit()
-                    return
                 progressed = True
                 continue
             if outcome == "forbidden":

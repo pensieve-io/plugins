@@ -101,7 +101,7 @@ def test_host_adapters_use_command_briefing_and_preserve_capture(client, filenam
         assert all("context_receipt.py" not in command for command in scripts)
     if client == "claude":
         assert hooks["PreToolUse"][0]["matcher"] == (
-            "^mcp__(plugin_pensieve_pensieve|claude_ai_Pensieve)__.*$"
+            "^mcp__(plugin_pensieve_pensieve|claude_ai_Pensieve|pensieve)__.*$"
         )
     for script in ("context_briefing", "context_receipt", "conversation_capture"):
         assert (PLUGIN / "scripts" / (script + ".py")).is_file()
