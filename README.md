@@ -164,9 +164,11 @@ company's overview, top-level topics, available source trees and guidance for
 further reading. The agent uses MCP tools to open the detail and its sources.
 
 The plugin checks for an updated briefing before subsequent prompts and
-restores it after the client compacts the conversation. Your last explicit
-context choice is remembered for new conversations; each existing conversation
-keeps its own selection.
+restores it after the client compacts the conversation. A conversation works in
+one context: the first one it reads or uses. With a single context, the briefing
+loads it from the start; with several, a new conversation's briefing lists them
+and names the most recently used, until the agent opens one. A saved
+conversation goes to that context and stops saving if the agent uses a second.
 
 A bundled script fetches briefings; agents see only ordinary company tools.
 The context hooks send delivery receipts for the briefing the client received.
@@ -175,7 +177,7 @@ approval per user, context and harness type. Each device connects its own privat
 credential through MCP sign-in. Once connected, the plugin asks once on a separate
 Approve/Deny page; **Data → Connectors in the context** manages sharing after either choice. No setup
 skill, credential download or terminal command is needed. New visible work
-belongs to the selected context for team handoffs. Previous chats are not imported.
+belongs to the conversation's context for team handoffs. Previous chats are not imported.
 
 ## Reset a connection
 
@@ -250,7 +252,8 @@ conversations for your harness type in that context. Compatible apps of the same
 preference, while another context or harness has its own choice. Declining keeps MCP tools available
 and does not trigger repeated prompts. After either choice, change sharing directly in **Data → Connectors in the context**. Declining keeps the hook linked with saving off; no reconnect action is needed.
 Normal hooks complete pending setup and retry authorised uploads. V1 saves new
-work from setup onwards, with no history import. Saved transcripts remain until
+work in fresh conversations, with no history import. Forks and conversations
+whose earlier company exposure was not observed cannot save; start a fresh chat. Saved transcripts remain until
 explicitly deleted.
 
 The MCP manifest embeds the same private header helper for Codex, whose HTTP

@@ -42,7 +42,7 @@ def current_offer(path: object, client: str, session: str) -> dict | None:
         if compaction_boundary(record, session, codex_session, client):
             return None
         for content in reversed(accepted_contexts(record, session, codex_session, client)):
-            marker = parse_marker(content, client, session, "prompt")
+            marker = parse_marker(content, client, session)
             if marker is None:
                 continue
             # The newest native attribution wins, including a cleared context.

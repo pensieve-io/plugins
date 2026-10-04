@@ -165,6 +165,32 @@ def test_claude_binding_registers_exact_call_before_tool_runs(setup):
     assert all(c[0] != "receipt" for c in calls)
 
 
+@pytest.mark.parametrize(
+    "tool_name,provenance,bound",
+    [
+        # The claude.ai connector is a second Pensieve connection; its calls
+        # must carry the conversation too, whatever provenance it reports.
+        ("mcp__claude_ai_Pensieve__search", {"name": "claude.ai Pensieve"}, True),
+        ("mcp__claude_ai_Pensieve__search", None, True),
+        # A server added by hand under the plugin's own name.
+        ("mcp__pensieve__read", {"name": "pensieve", "source": "user"}, True),
+        ("mcp__pensieve-dev__search", None, False),
+        ("mcp__other_server__search", None, False),
+    ],
+)
+def test_claude_binding_covers_other_pensieve_connections(setup, tool_name, provenance, bound):
+    path, calls = setup
+    key = profile()
+    key["client"] = "claude"
+    config.install_profile(path, key)
+    event = dict(payload("PreToolUse"), tool_name=tool_name, tool_use_id="toolu_456")
+    if provenance is not None:
+        event["mcp_server"] = provenance
+    assert briefing.run_hook(event, "claude", path) == {}
+    bindings = [c[3] for c in calls if c[3] and c[3].get("tool_use_id") == "toolu_456"]
+    assert bool(bindings) is bound
+
+
 def test_claude_binding_failure_denies_without_exposing_error_or_secret(setup, monkeypatch):
     path, calls = setup
     key = profile()

@@ -1,7 +1,7 @@
 """Deliver briefings with a private installation authorized by native MCP OAuth.
 
 No model tool or access to the harness's credential store is needed. The server
-owns company selection and transcript consent; local state tracks delivery only.
+owns context routing and transcript consent; local state tracks delivery only.
 """
 
 from __future__ import annotations
@@ -124,6 +124,12 @@ def read_state(path: Path) -> dict:
     return value
 
 
+PLUGIN_TOOL_PREFIX = "mcp__plugin_pensieve_pensieve__"
+# The plugin's server, the claude.ai connector and a server added by hand as
+# `pensieve`. Only the plugin's tools are checked against native provenance.
+BOUND_TOOL_PREFIXES = (PLUGIN_TOOL_PREFIX, "mcp__claude_ai_Pensieve__", "mcp__pensieve__")
+
+
 def failure(event: str, client: str, session: str | None, reason: str = "") -> dict:
     if event == "PreToolUse":
         return {
@@ -159,15 +165,18 @@ def run_hook(
     if session is None:
         return failure(event, client, None)
     if event == "PreToolUse":
-        if client != "claude" or not str(payload.get("tool_name", "")).startswith(
-            "mcp__plugin_pensieve_pensieve__"
-        ):
+        tool = str(payload.get("tool_name", ""))
+        if client != "claude" or not tool.startswith(BOUND_TOOL_PREFIXES):
             return {}
+        # Other Pensieve connections are bound too, so their calls carry this
+        # conversation. A binding is correlation only: the server still
+        # authenticates the call's own OAuth account.
         provenance = payload.get("mcp_server")
-        if provenance is not None and provenance != {
-            "name": "plugin:pensieve:pensieve",
-            "source": "plugin",
-        }:
+        if (
+            tool.startswith(PLUGIN_TOOL_PREFIX)
+            and provenance is not None
+            and provenance != {"name": "plugin:pensieve:pensieve", "source": "plugin"}
+        ):
             return failure(event, client, session)
         tool_id = payload.get("tool_use_id")
         if not isinstance(tool_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", tool_id):

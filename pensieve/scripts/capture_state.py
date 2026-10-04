@@ -58,26 +58,52 @@ def block(db, state: dict, reason: str) -> None:
     )
 
 
+def withdraw_turn(db, state: dict) -> None:
+    """Drop the current turn's unsent events; exact-byte batches stay immutable.
+
+    The turn's prompt was attributed before its tools named a second context,
+    and may describe that company. Hooks checkpoint between turns, so the turn
+    is normally still unsent when the switch is seen.
+    """
+    sent = set()
+    for (ids,) in db.execute("SELECT event_ids FROM batches"):
+        sent.update(json.loads(ids))
+    rows = db.execute("SELECT id FROM events WHERE turn_group=?", (state.get("turn_group"),))
+    for (event_id,) in rows.fetchall():
+        if event_id not in sent:
+            db.execute("DELETE FROM anchors WHERE event_id=?", (event_id,))
+            db.execute("DELETE FROM events WHERE id=?", (event_id,))
+
+
+def stop_capture(db, state: dict) -> None:
+    """A second company stops saving for the rest of this host conversation.
+
+    Earlier turns sit in the agent's window and could reach any later
+    transcript, so nothing restarts it, not even a return to the first company.
+    """
+    state["capture_stopped"] = True
+    withdraw_turn(db, state)
+    block(db, state, "multiple_contexts")
+
+
+def discard_conversation(db, state: dict, reason: str) -> None:
+    """Stop for good and erase every unsent byte; accepted server rows remain."""
+    state["capture_stopped"] = True
+    for table in ("events", "anchors", "batches"):
+        db.execute(f"DELETE FROM {table}")
+    db.execute("UPDATE segments SET retired=1,title=''")
+    block(db, state, reason)
+
+
 def migrate_state(db, state: dict) -> None:
-    """Upgrade private state once without rewriting any queued event or batch."""
-    if "phase" not in state:
-        state["phase"] = (
-            "blocked"
-            if state.get("ambiguous") or state.get("discard_until_prompt")
-            else "awaiting_attribution"
-            if state.get("awaiting_marker")
-            else "capturing"
-            if state.get("segment")
-            else "ready"
-        )
-        if state["phase"] == "blocked":
-            block(db, state, "unproven_boundary")
-    for key in ("awaiting_marker", "ambiguous", "discard_until_prompt"):
-        state.pop(key, None)
-    adapter = state.setdefault("adapter", {})
-    for key in ("turn_id", "pending_turn_id", "calls", "nested_calls", "claude_end_turn"):
-        if key in state:
-            adapter[key] = state.pop(key)
+    """Fence a spool written before capture protocol 2.
+
+    Older helpers did not observe every company exposure, so their pending bytes
+    are never relabelled with the new protocol and the conversation never resumes.
+    """
+    if state.get("context_boundary_version") != 2:
+        discard_conversation(db, state, "capture_upgrade")
+        state.update(context_boundary_version=2, adapter={})
 
 
 def scope_revoked(cutover, owner, context):
@@ -117,6 +143,17 @@ def apply_item(
     host_timestamp,
     source_offset=0,
 ):
+    if state.get("capture_stopped"):
+        return
+    if item["kind"] == "context_use":
+        # A conversation is saved to one context: the first its tools or
+        # briefings expose. Marker contexts are recorded below.
+        used = state.setdefault("contexts_used", [])
+        if item["context_id"] not in used:
+            used.append(item["context_id"])
+        if len(used) > 1:
+            stop_capture(db, state)
+        return
     if item["kind"] == "user":
         state.pop("blocked_reason", None)
         if state.get("phase") == "awaiting_attribution":
@@ -141,64 +178,42 @@ def apply_item(
         return
     marker = item.get("marker") if item["kind"] == "attribution" else None
     if marker:
-        if marker["kind"] == "prompt":
-            if state.get("phase") != "awaiting_attribution":
-                # Never apply a late/unpaired hook marker to another user turn.
-                return
-            if marker["turn_id"] is not None and marker["turn_id"] != state.get("adapter", {}).get(
-                "turn_id"
-            ):
-                block(db, state, "native_turn_mismatch")
-                return
-            state["phase"] = "ready"
-        elif state.get("phase") not in {"ready", "capturing"}:
-            return
         owner, context = marker["user_id"], marker["context_id"]
         generation = marker["capture_generation"]
-        previous = (
-            state.get("candidate_scope") if marker["kind"] == "prompt" else state.get("scope")
-        )
-        previous_segment = (
-            state.get("candidate_segment") if marker["kind"] == "prompt" else state.get("segment")
-        )
-        state.update(candidate_segment=None, candidate_scope=None)
-        if (
-            marker["kind"] == "selection"
-            and previous is not None
-            and previous[:2] == [owner, context]
-            and previous[2] != generation
-        ):
-            # A changed opt-in period cannot authorise the rest of an old turn.
-            # Wait for the next user prompt and its matching receipt.
-            block(db, state, "consent_changed")
+        used = state.setdefault("contexts_used", [])
+        if context is not None and context not in used:
+            # A briefing is company exposure even without transcript consent or
+            # a pairing user turn. Retain it across account changes.
+            used.append(context)
+        if len(used) > 1:
+            stop_capture(db, state)
             return
-        if marker["kind"] == "selection" and previous != [owner, context, generation]:
-            # The preceding prompt belongs to the previous company/account.
-            # A destination reached by a tool has no destination user title yet.
-            state.update(title="", title_segment=None)
+        if state.get("phase") != "awaiting_attribution":
+            # Never apply a late/unpaired hook marker to another user turn.
+            return
+        if marker["turn_id"] is not None and marker["turn_id"] != state.get("adapter", {}).get(
+            "turn_id"
+        ):
+            block(db, state, "native_turn_mismatch")
+            return
+        previous = state.get("candidate_scope")
+        previous_segment = state.get("candidate_segment")
+        state.update(phase="ready", candidate_segment=None, candidate_scope=None)
         state["scope"] = [owner, context, generation]
-        authorised_offset = (
-            state.get("turn_source_offset", source_offset)
-            if marker["kind"] == "prompt"
-            else source_offset
-        )
         if (
             context is None
             or generation is None
-            or not scope_authorised(state, configured, owner, context, authorised_offset)
+            or not scope_authorised(
+                state, configured, owner, context, state.get("turn_source_offset", source_offset)
+            )
         ):
-            state["phase"] = "ready"
-            state["segment"] = None
-            state["tail"] = None
-            state["fork_parent"] = None
-            state.update(title="", title_segment=None)
+            state.update(segment=None, tail=None, fork_parent=None, title="", title_segment=None)
             # An explicit disabled scope is not an upload backlog. Only its
             # current provisional user row is removed, never acknowledged work.
-            if marker["kind"] == "prompt":
-                db.execute(
-                    "DELETE FROM events WHERE segment IS NULL AND turn_group=?",
-                    (state.get("turn_group"),),
-                )
+            db.execute(
+                "DELETE FROM events WHERE segment IS NULL AND turn_group=?",
+                (state.get("turn_group"),),
+            )
             return
         if previous == [owner, context, generation] and previous_segment:
             # A fresh marker restores the candidate; the prior scope alone
@@ -221,30 +236,24 @@ def apply_item(
             "INSERT OR IGNORE INTO segments(id,owner,context,generation,title) VALUES (?,?,?,?,?)",
             (segment, owner, context, generation, state.get("title", "")),
         )
-        if marker["kind"] == "prompt":
-            # Only a provisional, never-uploaded prompt can be completed here.
-            # Existing queued events and exact-byte batches are immutable.
-            rows = db.execute(
-                "SELECT id,body FROM events WHERE segment IS NULL AND turn_group=? ORDER BY sequence",
-                (state.get("turn_group"),),
-            ).fetchall()
-            for row in rows:
-                event = json.loads(row["body"])
-                if "capture" in event:
-                    fork = state.pop("fork_parent", None)
-                    if fork and fork["scope"] == state["scope"]:
-                        event["capture"]["parent"] = fork["reference"]
-                    link_event(state, event, segment, session)
-                    db.execute(
-                        "UPDATE events SET body=? WHERE id=?", (encoded(event).decode(), row["id"])
-                    )
-                    db.execute(
-                        "UPDATE anchors SET segment=? WHERE event_id=?", (segment, row["id"])
-                    )
-            db.execute(
-                "UPDATE events SET segment=? WHERE segment IS NULL AND turn_group=?",
-                (segment, state.get("turn_group")),
-            )
+        # Only a provisional, never-uploaded prompt can be completed here.
+        # Existing queued events and exact-byte batches are immutable.
+        rows = db.execute(
+            "SELECT id,body FROM events WHERE segment IS NULL AND turn_group=? ORDER BY sequence",
+            (state.get("turn_group"),),
+        ).fetchall()
+        for row in rows:
+            event = json.loads(row["body"])
+            if "capture" in event:
+                link_event(state, event, segment, session)
+                db.execute(
+                    "UPDATE events SET body=? WHERE id=?", (encoded(event).decode(), row["id"])
+                )
+                db.execute("UPDATE anchors SET segment=? WHERE event_id=?", (segment, row["id"]))
+        db.execute(
+            "UPDATE events SET segment=? WHERE segment IS NULL AND turn_group=?",
+            (segment, state.get("turn_group")),
+        )
         return
     scope = state.get("scope")
     if scope and not scope_authorised(state, configured, scope[0], scope[1], source_offset):

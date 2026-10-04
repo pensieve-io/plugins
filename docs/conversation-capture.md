@@ -25,9 +25,9 @@ Extraction requires the separately gated application worker.
 
 The header proof lives in `~/.config/pensieve/mcp-headers-{client}.json`, with the
 authenticated profile in `~/.config/pensieve/capture.json` (files `0600`, directory
-`0700`). It is client-bound and follows the member's selected context; context
-switches do not create keys. No secret enters model text, tool arguments or the
-consent page. The script resolves its owner through `/hooks/connection`, then
+`0700`). It is client-bound, not context-bound: tools name their context on each
+call, and a different context does not create a key. No secret enters model
+text, tool arguments or the consent page. The script resolves its owner through `/hooks/connection`, then
 uses the same proof for briefing, exact Claude call binding and opted-in upload.
 
 Native login never widens existing upload-only keys. After verified registration,
@@ -92,13 +92,42 @@ keep their original bytes and attribution.
 
 ## Attribution and reliability
 
-Authenticated version-2 prompt/selection markers carry account, client,
-conversation, context and current consent generation (or null when disabled).
-Only recognised native hook records and actual Pensieve MCP results supply
-attribution. Codex also matches its turn ID. Only an observed user prompt may
-wait provisionally for its own marker; ambiguous/unassignable work is discarded.
+Authenticated version-2 prompt markers carry account, client, conversation,
+context and current consent generation (or null when disabled). Only recognised
+native hook records supply attribution. Codex also matches its turn ID. Only an
+observed user prompt may wait provisionally for its own marker;
+ambiguous/unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
+
+### One context per conversation
+
+A conversation is saved to one context: the first company whose briefing or
+company tool content it receives. A sticky root briefing counts even when the
+first tool then targets another company. The server records exposure only for
+calls it can tie to the conversation (Codex's thread ID or a bound Claude
+tool-use ID), so the helper also reads company tool calls' `context_id` from the
+transcript, whichever connection carried them: any MCP server whose name contains
+"pensieve", and Pensieve's company tool names on any other server. This is the
+backstop when a binding hook fails open or a connection is never bound. Generic
+help and `list_contexts()` are discovery, not company exposure.
+Authenticated briefing contexts persist across account and consent changes;
+turning sharing off does not remove a briefing from the model's working memory.
+The local guard is conservative: an attempt to call another company may stop
+saving even if the server later rejects that call. It does not duplicate server
+validation or infer safety from arbitrary error text.
+When a second company appears, saving stops for the rest of the host conversation.
+The current turn's unsent events are withdrawn and later markers cannot restart
+saving, even for the first company, because both companies remain in the model's
+working memory. A batch already accepted before the switch stays accepted.
+
+Codex nested native MCP records are checked for reads as well as writes, on any
+server and in any turn of the thread. If a native record omits arguments, the
+server, which receives Codex's thread ID, still fences the conversation before
+returning the company result. Uploads check that live fence under a row lock, so
+a marker from the start of the switching turn cannot admit its later bytes.
+An exact accepted batch can replay its receipt, but no new batch can enter a
+stopped conversation. `/clear` or a new conversation starts saving again.
 
 ### Turn identity and lineage
 
@@ -118,31 +147,24 @@ The protocol guard requires a service accepting this field before any upload.
 Predecessors describe retained visible events, not every internal host record.
 They survive upload acknowledgement and resume. Account, context, consent,
 deletion and unknown attribution boundaries break the chain. A consent generation
-change within the same context waits for a fresh prompt. Switching contexts may
-change generation too; the selection result and subsequent work belong to the
-new context when its own current generation permits capture. A plugin upgrade
-preserves existing spool rows and exact queued batch bytes; it never enriches
-already captured events or reconstructs older turns. Metadata starts with the
+change within the same context waits for a fresh prompt. A second company stops
+capture for the conversation. Protocol-2 upgrades discard pending bytes from
+older helpers whose company exposure history cannot be verified; existing
+server transcripts and receipts remain. Metadata for new work starts with its
 next observed prompt. These references are client reports, not authorization
 or server-authenticated evidence of a successful tool write.
 
-Codex forks can link to the exact `forked_from_ordinal_exclusive` boundary when
-that native record has a captured endpoint in this device's source spool.
-A content-free ordinal index survives acknowledgement, stays within the
-existing 16 MiB spool bound and is removed when a segment is retired.
-The new prompt must confirm the same account, context and consent generation.
-Stored legacy expiry dates do not rotate segments or invalidate fork anchors. The adapter neither
-reads the source transcript nor substitutes its latest head. This supports
-forks at captured messages inside a turn as well as completed turns.
+Forks do not capture. An exact parent event proves ancestry but does not prove
+all company content inherited by the model. Codex's `forked_from_id` permanently
+stops the new conversation's capture. Claude can fork without SessionStart or a
+transcript file; a missing file at UserPromptSubmit therefore proves nothing.
+Only a fresh SessionStart can establish a new spool. A bounded initial scan
+refuses pre-existing visible history, even when copied records name a different
+session. Resumes continue only from already tracked spools. A fresh chat is the
+way to start saving again; skipping old transcript bytes is insufficient.
 
-Missing source spools, uncaptured/legacy boundaries and boundaries ending on
-unindexed internal records leave ancestry unknown. Claude's tested fork records
-retain message UUIDs but do not identify their source conversation, so its
-fork starts a new capture chain without re-uploading copied history. Claude
-may skip SessionStart for forks: an absent transcript at UserPromptSubmit also
-establishes an empty baseline so the first fork turn is captured. Rewinds
-reported as an in-place Codex rollback also break lineage. The application resolves retained references within the same author, client,
-context and consent generation.
+Stored predecessor references remain readable within the same author, client,
+context and consent generation. In-place Codex rollback breaks the local chain.
 
 Codex's native `task_complete` and `turn_aborted` records certify completed and
 interrupted turns respectively. Claude completion requires an `end_turn`
@@ -211,7 +233,7 @@ credentials and removal epochs so past revocations cannot discard its first turn
 No filesystem scan of host conversation history is introduced.
 
 Before upload requests, `capture_protocol.py` checks the public
-service `/capabilities` manifest: protocol 1, service type, native clients and
+service `/capabilities` manifest: protocol 2, service type, native clients and
 request bounds. No credentials are sent on this check. Absent/malformed/incompatible
 manifests or service/network failure preserve exact batches.
 Redirects and arbitrary service origins remain disallowed. Each process caches
@@ -240,11 +262,10 @@ result bodies. It does not interpret a completed call as a successful write:
 Pensieve #977 matches server changeset/job receipts before creating provenance.
 Native records must match this thread and turn and identify the Pensieve server.
 
-Codex emits these records at completion. If concurrent work crosses a context
-switch, the backend's full identity match may leave a call unlinked; no combined
-output or timing heuristic assigns it to another context. Sequential writes on
-either side of a selection have native matching identities. Old captured events
-remain immutable; this adds no backfill and changes no existing retry bytes.
+Codex emits these records at completion. A call naming another context stops
+capture instead (see [one context per conversation](#one-context-per-conversation));
+no combined output or timing heuristic assigns a call to a context. Old captured
+events remain immutable; this adds no backfill and changes no existing retry bytes.
 
 ### Remembered harness preferences
 
@@ -256,3 +277,10 @@ sharing preference never re-pairs it. Same-machine apps of one harness reuse
 `~/.config/pensieve/capture.json`. A new computer connects through its own MCP
 sign-in and applies the remembered choice; merely visiting the sharing page cannot
 authorise a helper. Cloud runtimes are not supported by this macOS-only sharing prompt.
+
+## Protocol 2 cutover
+
+Protocol 2 requires this helper. Version 1 and absent upload headers are refused.
+On helper upgrade, pre-boundary spools are discarded and cannot resume: start a
+new conversation to save again. Previously accepted server transcripts remain.
+A helper installed before the coordinated server deploy waits for protocol 2.

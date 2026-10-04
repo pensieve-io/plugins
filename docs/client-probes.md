@@ -172,11 +172,17 @@ Claude covers startup, resume, compaction, clear, fork, a visible ordinary tool,
 failed grounding and a stream-control interruption. Claude's report includes
 synthetic upload batches and a content-free native lifecycle inventory.
 
-Codex's fork fixture uses the source's exact ordinal, while a later resume keeps
-the source branch independent. A unit fixture additionally forks before a
-captured turn's terminal event, proving the suffix is excluded. Claude's fork
-fixture verifies new work is captured once with unknown parentage; no source
-conversation is inferred from matching text or UUIDs. Codex interruptions carry
+Protocol-2 review on 2026-10-04 used Codex CLI 0.160.0 and Claude Code 2.1.289
+with local synthetic HTTP/model fixtures. Claude's lifecycle and capture checks
+passed, including refused fork uploads. Codex fresh capture, exact-byte retry,
+and direct/code-mode second-company stops passed. Deployed native OAuth and
+consent acceptance remain release gates, recorded in the app release ledger.
+
+Both fork fixtures require zero uploads, including the first fork prompt and
+answer. A later resume of the tracked source remains independent. Codex's direct
+and code-mode switch fixtures call company tools with explicit context ids and
+require zero uploads for the switching turn. All capability fixtures advertise
+capture protocol 2. Codex interruptions carry
 `interrupted`; Claude's observed interruption has no trustworthy terminal
 record and remains incomplete. Neither is marked completed.
 
@@ -240,13 +246,13 @@ client/version, operating system, install route and result for each tested host.
 Use a local package or the candidate Git branch until these checks pass.
 
 1. **Fresh install:** authenticate through the client's normal OAuth flow, enable
-   hooks, select a company and confirm grounding arrives before the first answer.
+   hooks, use a company and confirm grounding arrives before the next answer.
 2. **Existing install:** update the marketplace/plugin without uninstalling;
-   confirm sign-in, selected company, skills, branding and hook permissions.
+   confirm sign-in, company briefing, skills, branding and hook permissions.
 3. **Conversation isolation:** open two conversations on different companies,
-   alternate reads, and confirm each keeps its own selection, including when the
-   client shares one MCP connection. Start a third conversation and verify the
-   latest explicit default selection.
+   alternate reads, and confirm each briefing follows its own conversation's
+   tool calls, including when the client shares one MCP connection. Confirm a
+   second company in one conversation stops its saving.
 4. **Lifecycle:** resume, compact and clear; verify context returns where needed
    and a changed company briefing refreshes before the next answer.
 5. **Delivery failure:** interrupt a briefing request and confirm a later prompt
