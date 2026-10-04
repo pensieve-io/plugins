@@ -552,7 +552,7 @@ def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch
         def do_GET(self):
             raw = json.dumps(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "service": "upload",
                     "clients": ["codex", "claude"],
                     "max_batch_bytes": 262144,
@@ -729,27 +729,37 @@ def test_codex_turn_identity_must_match_prompt_marker(tmp_path, monkeypatch):
     assert not calls and pending(state) == 0
 
 
-def test_account_and_context_switches_use_only_matching_configured_keys(tmp_path, monkeypatch):
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize("generation", [GENERATION, None])
+def test_briefing_company_boundary_survives_account_and_consent_changes(
+    tmp_path, monkeypatch, client, generation
+):
     profiles = [
         {"user_id": OWNER, "upload_key": KEY},
         {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
     ]
-    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
-    append(path, user("Owner one"), hook_record(), assistant("First answer"))
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client, profiles=profiles)
     append(
         path,
-        user("Owner two"),
-        hook_record(owner=OTHER_OWNER, context=12),
-        assistant("Second answer"),
+        user("Owner one", client),
+        hook_record(client, generation=generation),
+        assistant("First answer", client),
+    )
+    append(
+        path,
+        user("Owner two", client),
+        hook_record(client, owner=OTHER_OWNER, context=12),
+        assistant("Company A secrets quoted in company B answer", client),
+        user("Back to A", client),
+        hook_record(client),
+        assistant("Company B secrets quoted in company A answer", client),
     )
     run()
-    by_key = {key: json.loads(batch["body"]) for batch, key in calls}
-    assert [event["content"] for event in by_key[KEY]["events"]] == ["Owner one", "First answer"]
-    assert [event["content"] for event in by_key[OTHER_KEY]["events"]] == [
-        "Owner two",
-        "Second answer",
-    ]
-    assert by_key[KEY]["segment_id"] != by_key[OTHER_KEY]["segment_id"]
+    assert all(key == KEY for _, key in calls)
+    assert [event["content"] for event in events(calls)] == (
+        ["Owner one", "First answer"] if generation else []
+    )
+    assert pending(state) == 0
 
 
 def test_unconfigured_account_and_null_selection_are_capture_off(tmp_path, monkeypatch):
@@ -766,9 +776,7 @@ def test_unconfigured_account_and_null_selection_are_capture_off(tmp_path, monke
 
 
 @pytest.mark.parametrize("generation", [GENERATION, "317e0b53-8178-4a3c-8d40-a07414144741"])
-def test_set_context_output_is_assigned_to_new_context_before_result_capture(
-    tmp_path, monkeypatch, generation
-):
+def test_legacy_selection_of_second_company_stops_current_turn(tmp_path, monkeypatch, generation):
     profiles = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
     append(
@@ -797,13 +805,7 @@ def test_set_context_output_is_assigned_to_new_context_before_result_capture(
         assistant("Second company answer"),
     )
     run()
-    by_key = {
-        json.loads(batch["body"])["context_id"]: json.loads(batch["body"]) for batch, key in calls
-    }
-    assert [event["kind"] for event in by_key[497]["events"]] == ["user", "tool_call"]
-    assert [event["kind"] for event in by_key[12]["events"]] == ["tool_result", "assistant"]
-    assert "Second company overview" in by_key[12]["events"][0]["content"]
-    assert "pensieve-capture-context" not in str(events(calls))
+    assert not calls and pending(state) == 0
 
 
 def test_quoted_markers_and_non_pensieve_tool_results_do_not_authorize(tmp_path, monkeypatch):
@@ -911,7 +913,7 @@ def test_oversized_record_recovery_is_bounded_and_requires_fresh_attribution(
         assistant("Unmarked answer", client),
         hook_record(client),
         user("Fresh prompt", client),
-        hook_record(client, context=12),
+        hook_record(client),
         assistant("Fresh answer", client),
     )
     db = capture.connect_state(state, client, SESSION)
@@ -934,7 +936,7 @@ def test_oversized_record_recovery_is_bounded_and_requires_fresh_attribution(
         by_context.setdefault(body["context_id"], []).extend(
             event["content"] for event in body["events"]
         )
-    assert by_context == {497: ["Before", "Before answer"], 12: ["Fresh prompt", "Fresh answer"]}
+    assert by_context == {497: ["Before", "Before answer", "Fresh prompt", "Fresh answer"]}
     assert pending(state) == 0
     count = len(calls)
     run("SessionStart")
@@ -1233,7 +1235,7 @@ def test_server_erasure_retires_old_work_and_next_fresh_prompt_uses_new_segment(
     assert pending(state) == 0  # late text from the retired turn is not captured
 
 
-def test_revoked_scope_does_not_block_another_configured_context(tmp_path, monkeypatch):
+def test_revoked_scope_cannot_move_conversation_to_another_company(tmp_path, monkeypatch):
     prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
@@ -1254,7 +1256,7 @@ def test_revoked_scope_does_not_block_another_configured_context(tmp_path, monke
 
     monkeypatch.setattr(capture, "upload", send)
     run()
-    assert [event["content"] for event in events(calls)] == ["Allowed", "Allowed answer"]
+    assert not calls
     assert pending(state) == 2
 
 
@@ -1270,33 +1272,33 @@ def test_codex_nonvisible_assistant_channels_are_excluded(tmp_path, monkeypatch,
     assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
 
 
-def test_retiring_old_context_does_not_clear_new_context_attribution(tmp_path, monkeypatch):
+def test_retiring_old_consent_generation_does_not_clear_new_generation(tmp_path, monkeypatch):
     prof = [{"user_id": OWNER, "upload_key": KEY}]
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, profiles=prof)
     append(
         path,
-        user("Old company"),
+        user("Old consent"),
         hook_record(),
         assistant("Old answer"),
-        user("New company"),
-        hook_record(context=12),
+        user("New consent"),
+        hook_record(generation="317e0b53-8178-4a3c-8d40-a07414144741"),
         assistant("New answer"),
     )
 
     def send(batch, key, endpoint, timeout):
-        if json.loads(batch["body"])["context_id"] == 497:
+        if json.loads(batch["body"])["capture_generation"] == GENERATION:
             return DELETED
         calls.append((dict(batch), key))
         return ACCEPTED
 
     monkeypatch.setattr(capture, "upload", send)
     run()
-    append(path, assistant("More new-company work"))
+    append(path, assistant("More newly consented work"))
     run()
     assert [event["content"] for event in events(calls)] == [
-        "New company",
+        "New consent",
         "New answer",
-        "More new-company work",
+        "More newly consented work",
     ]
     assert pending(state) == 0
 
@@ -1396,7 +1398,7 @@ def test_selection_destination_never_inherits_previous_owner_title(tmp_path, mon
     )
     run()
     destination = [json.loads(batch["body"]) for batch, key in calls if key == OTHER_KEY]
-    assert destination and all(body["title"] == "" for body in destination)
+    assert not calls and pending(state) == 0
     assert "Owner A confidential prompt" not in json.dumps(destination)
 
 
@@ -1637,23 +1639,7 @@ def test_codex_native_selection_fences_combined_code_mode_output(
         assistant("Destination company answer"),
     )
     run()
-    original = [
-        event
-        for batch, key in calls
-        if json.loads(batch["body"])["context_id"] == 497
-        for event in json.loads(batch["body"])["events"]
-    ]
-    destination = [
-        event
-        for batch, key in calls
-        if json.loads(batch["body"])["context_id"] == 12
-        for event in json.loads(batch["body"])["events"]
-    ]
-    assert "Destination company" not in json.dumps(original)
-    assert "Original company" not in json.dumps(destination)
-    assert "company secret" not in json.dumps(events(calls))
-    assert any("tool output omitted" in event["content"] for event in destination)
-    assert destination[-1]["content"] == "Destination company answer"
+    assert not calls and pending(state) == 0
 
 
 @pytest.mark.parametrize(
@@ -2261,8 +2247,6 @@ def test_pairing_another_context_preserves_authorised_backlog(
     assert [e["content"] for e in events(calls)] == [
         "Existing context prompt",
         "Existing answer",
-        "New context prompt",
-        "New answer",
     ]
 
 
@@ -2657,3 +2641,101 @@ def test_the_one_context_a_conversation_uses_keeps_saving(tmp_path, monkeypatch,
     run()
     saved = [str(event["content"]) for event in events(calls)]
     assert "Follow-up" in saved and "Follow-up answer" in saved
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ["search", "read", "get_tree", "list_trees", "search_changes", "read_change", "set_lock"],
+)
+def test_nested_company_reads_stop_the_switching_turn(tmp_path, monkeypatch, tool):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    native = native_selection(context=12)
+    native["payload"]["item"].update(tool=tool, arguments={"context_id": 12})
+    append(
+        path,
+        {"type": "turn_context", "payload": {"turn_id": "turn-one"}},
+        user("Question for the first company"),
+        hook_record(turn="turn-one"),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "wrapper",
+                "namespace": "functions",
+                "name": "exec",
+            },
+        },
+        native,
+        assistant("Second company's confidential answer"),
+    )
+    run()
+    assert not calls and pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_sticky_briefing_exposure_stops_capture_on_the_first_other_company_tool(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("Start work", client),
+        hook_record(client, context=497, generation=None),
+        pensieve_call(client, "first", 12),
+        assistant("Company B answer", client),
+        user("Repeat earlier company details", client),
+        hook_record(client, context=12),
+        assistant("Company A details still in working memory", client),
+    )
+    run()
+    assert not calls and pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_generic_help_never_counts_as_company_exposure(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("How do I use Pensieve?", client),
+        hook_record(client),
+        pensieve_call(client, "help", 12, tool="info"),
+        assistant("Read the root Page", client),
+    )
+    run()
+    assert "Read the root Page" in [event["content"] for event in events(calls)]
+
+
+@pytest.mark.parametrize("reset_offset", [False, True])
+def test_upgraded_spool_cannot_upload_or_restart_unverified_old_history(
+    tmp_path, monkeypatch, reset_offset
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *a: False)
+    append(path, user(), hook_record(), assistant())
+    run()
+    db = capture.connect_state(state, "codex", SESSION)
+    saved = capture.load_state(db)
+    saved.pop("context_boundary_version")
+    if reset_offset:
+        saved["offset"] = None
+    capture.save_state(db, saved)
+    db.commit()
+    db.close()
+    monkeypatch.setattr(capture, "upload", lambda *a: calls.append(a) or ACCEPTED)
+    append(path, user("Later prompt"), hook_record(), assistant("Later answer"))
+    run()
+    assert not calls and pending(state) == 0
+
+
+def test_server_stop_discards_the_conversation_queue_and_later_markers(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        capture, "upload", lambda *a: {"status": "capture_disabled", "conversation_stopped": True}
+    )
+    append(path, user(), hook_record(), assistant())
+    run()
+    assert pending(state) == 0
+    monkeypatch.setattr(capture, "upload", lambda *a: calls.append(a) or ACCEPTED)
+    append(path, user("Follow-up"), hook_record(), assistant("Should remain private"))
+    run()
+    assert not calls and pending(state) == 0

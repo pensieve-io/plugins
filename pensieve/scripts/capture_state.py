@@ -76,7 +76,18 @@ def withdraw_turn(db, state: dict) -> None:
 
 
 def migrate_state(db, state: dict) -> None:
-    """Upgrade private state once without rewriting any queued event or batch."""
+    """Upgrade state once, fencing queues whose company history is unverified."""
+    if state.get("context_boundary_version") != 2:
+        # Old adapters did not observe every company exposure. Never relabel
+        # their pending bytes with the new upload protocol after an upgrade.
+        if db.execute("SELECT 1 FROM state WHERE id=1").fetchone():
+            state["capture_stopped"] = True
+            db.execute("DELETE FROM events")
+            db.execute("DELETE FROM anchors")
+            db.execute("DELETE FROM batches")
+            db.execute("UPDATE segments SET retired=1,title=''")
+            block(db, state, "capture_upgrade")
+        state["context_boundary_version"] = 2
     if "phase" not in state:
         state["phase"] = (
             "blocked"
@@ -185,13 +196,16 @@ def apply_item(
             return
         owner, context = marker["user_id"], marker["context_id"]
         generation = marker["capture_generation"]
-        used = state.get("contexts_used", [])
-        if state.get("capture_stopped") or (context is not None and used and used != [context]):
-            # The server cannot see a call through a connection the hook did
-            # not bind; a marker naming another context than the tools used is
-            # the same boundary seen late.
+        used = state.setdefault("contexts_used", [])
+        if context is not None and context not in used:
+            # A briefing is company exposure even without transcript consent.
+            # Retain it across account changes; server rows are per-user.
+            used.append(context)
+        if state.get("capture_stopped") or len(used) > 1:
             state["capture_stopped"] = True
-            context = None
+            withdraw_turn(db, state)
+            block(db, state, "multiple_contexts")
+            return
         previous = (
             state.get("candidate_scope") if marker["kind"] == "prompt" else state.get("scope")
         )

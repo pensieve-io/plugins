@@ -114,8 +114,8 @@ one terminal, non-secret marker in accepted hook context:
 ```
 
 `context_id` is the conversation's capture destination, never its briefing
-context: null before capture locks to the first context the conversation's tools
-use, and null for the rest of the conversation once they use a second.
+context: null before capture locks to the first company briefing or tool
+exposure, and null for the rest of the conversation once they use a second.
 `capture_generation` is null when disabled
 or consent lookup is unavailable. False → true starts a new generation. `turn_id` is nullable; Codex supplies its
 native turn ID, while the Claude adapter currently uses null. Older servers also

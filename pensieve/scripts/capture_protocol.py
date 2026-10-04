@@ -7,7 +7,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-VERSION = 1
+VERSION = 2
 HEADER = "X-Pensieve-Capture-Protocol"
 MAX_BATCH_BYTES = 262144
 MAX_BATCH_EVENTS = 100

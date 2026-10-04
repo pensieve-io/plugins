@@ -102,19 +102,27 @@ Codex code mode uses native completed MCP-call records and omits combined
 
 ### One context per conversation
 
-A conversation is saved to one context: the first one its Pensieve tools use.
-The helper also reads every Pensieve tool call's `context_id` from the transcript,
-whichever connection carried it. When a second context appears, saving stops for
-the rest of the host conversation: the current turn's unsent events are
-withdrawn (its prompt was attributed before the switch and may describe the
-other company), and later markers are ignored even if they name the first
-context again, because earlier turns stay in the agent's window. The server
-applies the same rule to the markers it emits; the client rule covers calls the
-server could not tie to this conversation. A batch already sent before the
-switch stays sent. Codex nested code-mode calls only carry this boundary when
-the native record includes their arguments; otherwise the server's next marker
-stops capture from the following turn. `/clear` or a new conversation starts
-saving again.
+A conversation is saved to one context: the first company whose briefing or
+company tool content it receives. A sticky root briefing counts even when the
+first tool then targets another company. The helper also reads company tool
+calls' `context_id` from the transcript, whichever connection carried them;
+generic help and `list_contexts()` are discovery, not company exposure.
+Authenticated briefing contexts persist across account and consent changes;
+turning sharing off does not remove a briefing from the model's working memory.
+The local guard is conservative: an attempt to call another company may stop
+saving even if the server later rejects that call. It does not duplicate server
+validation or infer safety from arbitrary error text.
+When a second company appears, saving stops for the rest of the host conversation.
+The current turn's unsent events are withdrawn and later markers cannot restart
+saving, even for the first company, because both companies remain in the model's
+working memory. A batch already accepted before the switch stays accepted.
+
+Codex nested native MCP records are checked for reads as well as writes. If a
+native record omits arguments, the server still fences the conversation before
+returning the company result. Uploads check that live fence under a row lock, so
+a marker from the start of the switching turn cannot admit its later bytes.
+An exact accepted batch can replay its receipt, but no new batch can enter a
+stopped conversation. `/clear` or a new conversation starts saving again.
 
 ### Turn identity and lineage
 
@@ -134,11 +142,10 @@ The protocol guard requires a service accepting this field before any upload.
 Predecessors describe retained visible events, not every internal host record.
 They survive upload acknowledgement and resume. Account, context, consent,
 deletion and unknown attribution boundaries break the chain. A consent generation
-change within the same context waits for a fresh prompt. Switching contexts may
-change generation too; the selection result and subsequent work belong to the
-new context when its own current generation permits capture. A plugin upgrade
-preserves existing spool rows and exact queued batch bytes; it never enriches
-already captured events or reconstructs older turns. Metadata starts with the
+change within the same context waits for a fresh prompt. A second company stops
+capture for the conversation. Protocol-2 upgrades discard pending bytes from
+older helpers whose company exposure history cannot be verified; existing
+server transcripts and receipts remain. Metadata for new work starts with its
 next observed prompt. These references are client reports, not authorization
 or server-authenticated evidence of a successful tool write.
 
@@ -227,7 +234,7 @@ credentials and removal epochs so past revocations cannot discard its first turn
 No filesystem scan of host conversation history is introduced.
 
 Before upload requests, `capture_protocol.py` checks the public
-service `/capabilities` manifest: protocol 1, service type, native clients and
+service `/capabilities` manifest: protocol 2, service type, native clients and
 request bounds. No credentials are sent on this check. Absent/malformed/incompatible
 manifests or service/network failure preserve exact batches.
 Redirects and arbitrary service origins remain disallowed. Each process caches
@@ -272,3 +279,10 @@ sharing preference never re-pairs it. Same-machine apps of one harness reuse
 `~/.config/pensieve/capture.json`. A new computer connects through its own MCP
 sign-in and applies the remembered choice; merely visiting the sharing page cannot
 authorise a helper. Cloud runtimes are not supported by this macOS-only sharing prompt.
+
+## Protocol 2 cutover
+
+Protocol 2 requires this helper. Version 1 and absent upload headers are refused.
+On helper upgrade, pre-boundary spools are discarded and cannot resume: start a
+new conversation to save again. Previously accepted server transcripts remain.
+A helper installed before the coordinated server deploy waits for protocol 2.

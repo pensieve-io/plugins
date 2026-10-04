@@ -172,6 +172,11 @@ def context_use(name: object, namespace: object, arguments: object) -> list[Capt
             arguments = json.loads(arguments)
         except ValueError:
             return []
+    tool = name.rsplit("__", 1)[-1]
+    if tool == "list_contexts" or (
+        tool == "info" and not (isinstance(arguments, dict) and arguments.get("inspect"))
+    ):
+        return []
     context = arguments.get("context_id") if isinstance(arguments, dict) else None
     if type(context) is not int or context <= 0:
         return []
@@ -251,6 +256,20 @@ def normalise(
                 and isinstance(item, dict)
                 and item.get("type") == "McpToolCall"
                 and item.get("server") == "pensieve"
+                and isinstance(item.get("tool"), str)
+                and item.get("status") in {"completed", "failed"}
+            ):
+                # Context exposure applies to reads as well as writes, even
+                # when a code-mode wrapper hid the ordinary invocation record.
+                result.extend(
+                    context_use("mcp__pensieve__" + item["tool"], None, item.get("arguments"))
+                )
+            if (
+                payload.get("thread_id") == session
+                and payload.get("turn_id") == state.get("turn_id")
+                and isinstance(item, dict)
+                and item.get("type") == "McpToolCall"
+                and item.get("server") == "pensieve"
                 and item.get("tool")
                 in {
                     "create_page",
@@ -274,7 +293,7 @@ def normalise(
                     return []
                 seen[item["id"]] = state.get("turn_id")
                 return [
-                    *context_use("mcp__pensieve__" + item["tool"], None, item.get("arguments")),
+                    *result,
                     {
                         "kind": "tool_call",
                         "content": "mcp__pensieve__" + item["tool"],
@@ -315,7 +334,7 @@ def normalise(
                 text = visible_text(item.get("content"))
                 return [prompt(state, text, payload["turn_id"])] if text else []
         if record.get("type") != "response_item":
-            return []
+            return result
         kind = payload.get("type")
         if kind == "message" and payload.get("role") == "assistant":
             if payload.get("channel") not in {None, "commentary", "final"} or payload.get(

@@ -492,7 +492,10 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
                 and result.get("segment_id") == batch["segment"]
                 and result.get("reason") in {"capture_disabled", "deleted"}
             ):
-                return {"status": result["reason"]}
+                return {
+                    "status": result["reason"],
+                    "conversation_stopped": result.get("conversation_stopped") is True,
+                }
             return False
         if exc.code in {401, 403}:
             return "forbidden"
@@ -562,6 +565,18 @@ def flush(db, configured, client, session, endpoint, deadline):
             db.commit()
             if isinstance(outcome, dict) and outcome["status"] in {"capture_disabled", "deleted"}:
                 retire_segment(db, segment["id"])
+                if outcome.get("conversation_stopped"):
+                    db.execute("BEGIN IMMEDIATE")
+                    state = load_state(db)
+                    state["capture_stopped"] = True
+                    block(db, state, "multiple_contexts")
+                    db.execute("DELETE FROM events")
+                    db.execute("DELETE FROM batches")
+                    db.execute("DELETE FROM anchors")
+                    db.execute("UPDATE segments SET retired=1,title=''")
+                    save_state(db, state)
+                    db.commit()
+                    return
                 progressed = True
                 continue
             if outcome == "forbidden":
