@@ -245,9 +245,6 @@ def apply_item(
         for row in rows:
             event = json.loads(row["body"])
             if "capture" in event:
-                fork = state.pop("fork_parent", None)
-                if fork and fork["scope"] == state["scope"]:
-                    event["capture"]["parent"] = fork["reference"]
                 link_event(state, event, segment, session)
                 db.execute(
                     "UPDATE events SET body=? WHERE id=?", (encoded(event).decode(), row["id"])

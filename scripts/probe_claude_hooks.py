@@ -58,7 +58,7 @@ class ModelStub(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.reply_json(
             {
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "service": "upload",
                 "clients": ["codex", "claude"],
                 "max_batch_bytes": 262144,
@@ -651,8 +651,16 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                             for event in captured
                             if event["kind"] in {"tool_call", "tool_result"}
                         ),
-                        "fork_starts_without_guessed_ancestry": len(fork_events) == 1
-                        and "parent" not in fork_events[0]["capture"],
+                        "fork_never_captured": not fork_events
+                        and all(
+                            body["host_conversation_id"]
+                            != next(
+                                case["briefings"][0]["session_id"]
+                                for case in report["cases"]
+                                if case["case"] == "fork"
+                            )
+                            for body in accepted.values()
+                        ),
                         "interruption_never_marked_complete": len(interrupted_turns) == 1
                         and not any(
                             event["kind"] == "turn_end"

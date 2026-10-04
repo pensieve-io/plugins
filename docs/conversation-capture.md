@@ -154,23 +154,17 @@ server transcripts and receipts remain. Metadata for new work starts with its
 next observed prompt. These references are client reports, not authorization
 or server-authenticated evidence of a successful tool write.
 
-Codex forks can link to the exact `forked_from_ordinal_exclusive` boundary when
-that native record has a captured endpoint in this device's source spool.
-A content-free ordinal index survives acknowledgement, stays within the
-existing 16 MiB spool bound and is removed when a segment is retired.
-The new prompt must confirm the same account, context and consent generation.
-Stored legacy expiry dates do not rotate segments or invalidate fork anchors. The adapter neither
-reads the source transcript nor substitutes its latest head. This supports
-forks at captured messages inside a turn as well as completed turns.
+Forks do not capture. An exact parent event proves ancestry but does not prove
+all company content inherited by the model. Codex's `forked_from_id` permanently
+stops the new conversation's capture. Claude can fork without SessionStart or a
+transcript file; a missing file at UserPromptSubmit therefore proves nothing.
+Only a fresh SessionStart can establish a new spool. A bounded initial scan
+refuses pre-existing visible history, even when copied records name a different
+session. Resumes continue only from already tracked spools. A fresh chat is the
+way to start saving again; skipping old transcript bytes is insufficient.
 
-Missing source spools, uncaptured/legacy boundaries and boundaries ending on
-unindexed internal records leave ancestry unknown. Claude's tested fork records
-retain message UUIDs but do not identify their source conversation, so its
-fork starts a new capture chain without re-uploading copied history. Claude
-may skip SessionStart for forks: an absent transcript at UserPromptSubmit also
-establishes an empty baseline so the first fork turn is captured. Rewinds
-reported as an in-place Codex rollback also break lineage. The application resolves retained references within the same author, client,
-context and consent generation.
+Stored predecessor references remain readable within the same author, client,
+context and consent generation. In-place Codex rollback breaks the local chain.
 
 Codex's native `task_complete` and `turn_aborted` records certify completed and
 interrupted turns respectively. Claude completion requires an `end_turn`

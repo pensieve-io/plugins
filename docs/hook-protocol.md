@@ -35,7 +35,7 @@ cached locally.
 
 Installation credentials are user/client scoped and follow the conversation's
 briefing context, subject to current membership and permissions. Tools route by
-an explicit `context_id` (optional for a member of one context); the briefing
+an explicit `context_id` (reads may omit it with one context; writes require it); the briefing
 follows the context those tools last used. The helper
 stores no context content or token from the harness. Older contextual credentials
 never widen their scope; upgrading registers a fresh installation.

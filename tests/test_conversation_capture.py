@@ -466,12 +466,9 @@ def test_upgrade_keeps_legacy_outbox_exact_and_does_not_enrich_old_turn(tmp_path
         ("same", 6),
         ("same", 5),
         ("other", 4),
-        ("legacy_deadline", 4),
-        ("deleted", 4),
-        ("missing", 4),
     ],
 )
-def test_codex_fork_uses_exact_captured_endpoint_only(tmp_path, monkeypatch, scope, endpoint):
+def test_codex_fork_never_captures_inherited_history(tmp_path, monkeypatch, scope, endpoint):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     answer = assistant()
     answer["ordinal"] = 3
@@ -485,16 +482,6 @@ def test_codex_fork_uses_exact_captured_endpoint_only(tmp_path, monkeypatch, sco
     )
     run()
     source_events = events(calls)
-    if scope in {"legacy_deadline", "deleted", "missing"}:
-        db = capture.connect_state(state, "codex", SESSION)
-        with db:
-            if scope == "legacy_deadline":
-                db.execute("UPDATE segments SET expires_at='2020-01-01T00:00:00Z'")
-            elif scope == "deleted":
-                db.execute("UPDATE segments SET retired=1")
-            else:
-                db.execute("DELETE FROM anchors")
-        db.close()
     fork = str(uuid.uuid4())
     fork_path = tmp_path / "fork.jsonl"
     append(
@@ -525,23 +512,15 @@ def test_codex_fork_uses_exact_captured_endpoint_only(tmp_path, monkeypatch, sco
         assistant("Fork answer"),
     )
     fork_run("Stop")
-    first = events(calls)[-2]
-    if scope in {"same", "legacy_deadline"} and endpoint in {4, 6}:
-        parent = source_events[1 if endpoint == 4 else 2]
-        assert first["capture"]["parent"] == {
-            "host_conversation_id": SESSION,
-            "event_id": parent["event_id"],
-        }
-    else:
-        assert "parent" not in first["capture"]
+    assert events(calls) == source_events
+    fork_db = capture.connect_state(state, "codex", fork)
+    assert capture.load_state(fork_db)["capture_stopped"] is True
+    fork_db.close()
     # The source remains independently resumable and is never relinked to the fork.
     append(path, user("Original continues"), hook_record(), assistant("Original answer"))
     run()
     resumed = events(calls)[-2]["capture"]
-    if scope == "deleted":
-        assert "parent" not in resumed
-    else:
-        assert resumed["parent"]["host_conversation_id"] == SESSION
+    assert resumed["parent"]["host_conversation_id"] == SESSION
 
 
 def test_hosted_receipt_latency_does_not_stall_later_turns(tmp_path, monkeypatch):
@@ -663,16 +642,7 @@ def test_config_and_transcript_symlinks_rejected(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
 def test_checkpoint_and_resume_do_not_duplicate_or_backfill(tmp_path, monkeypatch, client):
-    path, cfg, state, calls, run = setup(
-        tmp_path,
-        monkeypatch,
-        client,
-        prior=[
-            user("Old unconsented history", client),
-            hook_record(client),
-            assistant("Old answer", client),
-        ],
-    )
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
     append(path, user(client=client), hook_record(client), assistant(client=client))
     run()
     assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
@@ -1360,7 +1330,7 @@ def test_startup_missing_transcript_captures_first_turn_without_backfill(
     capture.run_hook(payload, "claude", cfg, state)
     assert [
         event["content"] for batch in calls for event in json.loads(batch["body"])["events"]
-    ] == ["Visible question", "Visible answer"]
+    ] == (["Visible question", "Visible answer"] if first_hook == "SessionStart" else [])
 
 
 def test_claude_compaction_and_local_commands_preserve_segment(tmp_path, monkeypatch):
@@ -1817,7 +1787,7 @@ def test_baseline_mid_turn_does_not_queue_orphan_outputs(tmp_path, monkeypatch, 
         path, user("Fresh prompt", client), hook_record(client), assistant("Fresh answer", client)
     )
     run()
-    assert [event["content"] for event in events(calls)] == ["Fresh prompt", "Fresh answer"]
+    assert events(calls) == []
     assert pending(state) == 0
 
 
@@ -2687,3 +2657,84 @@ def test_server_stop_discards_the_conversation_queue_and_later_markers(tmp_path,
     append(path, user("Follow-up"), hook_record(), assistant("Should remain private"))
     run()
     assert not calls and pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize("source", ["startup", "resume"])
+def test_inherited_baseline_cannot_upload_a_later_company(tmp_path, monkeypatch, client, source):
+    path = tmp_path / "inherited.jsonl"
+    if client == "codex":
+        append(path, {"type": "session_meta", "payload": {"id": SESSION}})
+    inherited = assistant("Company A private fact", client)
+    if client == "claude":
+        inherited["sessionId"] = str(uuid.uuid4())
+    append(path, inherited)
+    cfg = config(tmp_path)
+    state = tmp_path / "spool"
+    calls = []
+    monkeypatch.setattr(capture, "upload", lambda *args: calls.append(args) or ACCEPTED)
+    payload = {
+        "session_id": SESSION,
+        "hook_event_name": "SessionStart",
+        "source": source,
+        "transcript_path": str(path),
+    }
+    capture.run_hook(payload, client, cfg, state)
+    append(
+        path,
+        user("Save this for B", client),
+        hook_record(client, context=12),
+        assistant("Company A private fact", client),
+    )
+    payload["hook_event_name"] = "Stop"
+    capture.run_hook(payload, client, cfg, state)
+    assert not calls
+    db = capture.connect_state(state, client, SESSION)
+    assert capture.load_state(db)["capture_stopped"] is True
+    db.close()
+
+
+def test_codex_startup_can_precede_the_session_header(tmp_path, monkeypatch):
+    path = tmp_path / "new.jsonl"
+    path.touch()
+    cfg = config(tmp_path)
+    state = tmp_path / "spool"
+    calls = []
+    monkeypatch.setattr(
+        capture, "upload", lambda batch, *args: calls.append((batch, KEY)) or ACCEPTED
+    )
+    payload = {
+        "session_id": SESSION,
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "transcript_path": str(path),
+    }
+    capture.run_hook(payload, "codex", cfg, state)
+    append(
+        path,
+        {"type": "session_meta", "payload": {"id": SESSION}},
+        user(),
+        hook_record(),
+        assistant(),
+    )
+    payload["hook_event_name"] = "Stop"
+    capture.run_hook(payload, "codex", cfg, state)
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+
+
+def test_codex_native_startup_instructions_are_not_prior_turns(tmp_path, monkeypatch):
+    instructions = {
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Instructions"}],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["agents_md.instructions", "environments.environment_context"]
+            },
+        },
+    }
+    path, _, _, calls, run = setup(tmp_path, monkeypatch, prior=[instructions])
+    append(path, user(), hook_record(), assistant())
+    run()
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]

@@ -59,7 +59,7 @@ def mcp_result(output: Path, request: dict):
                     },
                     "annotations": {"readOnlyHint": True},
                 }
-                for name in ("ordinary", "set_context", "edit_page")
+                for name in ("ordinary", "read")
             ]
         }
     elif method == "tools/call":
@@ -72,24 +72,12 @@ def mcp_result(output: Path, request: dict):
         result = {"content": [{"type": "text", "text": marker}]}
         if params["name"] == "ordinary":
             result["content"][0]["text"] += " SOURCE_CONTEXT_SENTINEL"
-        if params["name"] == "set_context":
+        if params["name"] == "read":
             result["content"][0]["text"] = (
-                "DESTINATION_CONTEXT_SENTINEL\n<!-- pensieve-capture-context "
-                + json.dumps(
-                    {
-                        "v": 2,
-                        "capture_generation": CAPTURE_OWNER,
-                        "kind": "selection",
-                        "user_id": CAPTURE_OWNER,
-                        "client": "codex",
-                        "conversation_id": params["_meta"]["threadId"],
-                        "context_id": 12,
-                        "turn_id": None,
-                    }
-                )
-                + " -->"
+                "DESTINATION_CONTEXT_SENTINEL"
+                if params["arguments"]["context_id"] == 12
+                else "SOURCE_CONTEXT_SENTINEL"
             )
-
     else:
         result = {}
     return {"jsonrpc": "2.0", "id": request["id"], "result": result}
@@ -163,7 +151,7 @@ def run_probe(
                 return
             payload = json.dumps(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "service": "upload",
                     "clients": ["codex", "claude"],
                     "max_batch_bytes": 262144,
@@ -297,8 +285,8 @@ def run_probe(
                     "type": "function_call",
                     "call_id": "probe-ordinary-" + fixture_id,
                     "namespace": "mcp__pensieve",
-                    "name": "set_context" if context_switch else "ordinary",
-                    "arguments": "{}",
+                    "name": "read" if context_switch else "ordinary",
+                    "arguments": json.dumps({"context_id": 12}) if context_switch else "{}",
                 }
                 if context_switch == "code-mode":
                     item = {
@@ -306,7 +294,7 @@ def run_probe(
                         "call_id": "probe-wrapper-" + fixture_id,
                         "namespace": "functions",
                         "name": "exec",
-                        "input": "text(await tools.mcp__pensieve__edit_page({})); text(await tools.mcp__pensieve__set_context({})); text(await tools.mcp__pensieve__edit_page({}));",
+                        "input": "text(await tools.mcp__pensieve__read({context_id: 497})); text(await tools.mcp__pensieve__read({context_id: 12}));",
                     }
             else:
                 item = {
@@ -495,6 +483,13 @@ def run_probe(
         assert "ack" in operations
     capture_checks = {}
     if capture:
+        # A hook may also drain an older tracked spool. Judge only the native
+        # conversation exercised by this invocation, including refused forks.
+        capture_attempts = [
+            attempt
+            for attempt in capture_attempts
+            if attempt[0]["host_conversation_id"] in thread_ids
+        ]
         accepted = {body["batch_id"]: body for body, _ in capture_attempts[0 if interrupt else 1 :]}
         captured = [event for body in accepted.values() for event in body["events"]]
         capture_checks = {
@@ -566,64 +561,29 @@ def run_probe(
                 }
                 for previous, current in zip(ordered, ordered[1:])
             )
-        if fork:
-            first = min(captured, key=lambda event: event["sequence"])
-            capture_checks["exact_fork_parent"] = (
-                first["capture"].get("parent", {}).get("host_conversation_id") == fork
-                and next(iter(thread_ids)) != fork
-            )
+        if fork or context_switch:
+            for key in (
+                "prompt_and_answer_captured",
+                "retry_identical_bytes",
+                "explicit_completion",
+                "captured_visible_work",
+            ):
+                capture_checks.pop(key)
+            capture_checks["unsafe_conversation_never_uploaded"] = not capture_attempts
+            if fork:
+                capture_checks["distinct_fork_identity"] = next(iter(thread_ids)) != fork
+            if context_switch:
+                targets = [
+                    call["arguments"].get("context_id") for call in calls if call["name"] == "read"
+                ]
+                capture_checks["explicit_company_calls"] = targets == (
+                    [497, 12] if context_switch == "code-mode" else [12]
+                )
         elif resume:
             first = min(captured, key=lambda event: event["sequence"])
             capture_checks["resumed_parent"] = (
                 first["capture"].get("parent", {}).get("host_conversation_id") == resume
             )
-        if context_switch:
-            source_events = [
-                event
-                for batch in accepted.values()
-                if capture_batch_scopes[batch["batch_id"]] == 497
-                for event in batch["events"]
-            ]
-            destination_events = [
-                event
-                for batch in accepted.values()
-                if capture_batch_scopes[batch["batch_id"]] == 12
-                for event in batch["events"]
-            ]
-            capture_checks.pop("prompt_and_answer_captured")
-            capture_checks.update(
-                {
-                    "source_prompt_consent": any(
-                        event["kind"] == "user" for event in source_events
-                    ),
-                    "destination_answer_consent": any(
-                        event["content"] == "DESTINATION_ANSWER_SENTINEL"
-                        for event in destination_events
-                    ),
-                    "company_isolation": "DESTINATION_" not in json.dumps(source_events)
-                    and "SOURCE_CONTEXT_SENTINEL" not in json.dumps(destination_events),
-                    "selection_result_once": sum(
-                        "DESTINATION_CONTEXT_SENTINEL" in event["content"]
-                        for event in destination_events
-                    )
-                    == 1,
-                }
-            )
-            if context_switch == "code-mode":
-                writes = [call for call in calls if call["name"] == "edit_page"]
-                for scope, write in zip((source_events, destination_events), writes):
-                    native_id = write["_meta"]["callId"]
-                    capture_checks["native_write_" + native_id] = (
-                        sum(
-                            event.get("capture", {}).get("tool_call_id") == native_id
-                            for event in scope
-                        )
-                        == 1
-                    )
-                capture_checks["two_native_writes"] = len(writes) == 2
-                capture_checks["combined_output_omitted"] = (
-                    "SOURCE_CONTEXT_SENTINEL" not in json.dumps(captured)
-                )
         if not all(capture_checks.values()):
             raise RuntimeError("Codex capture probe failed: " + json.dumps(capture_checks))
     return {

@@ -109,44 +109,55 @@ def save_state(db: sqlite3.Connection, state: dict) -> None:
     db.execute("INSERT OR REPLACE INTO state(id,body) VALUES (1,?)", (encoded(state).decode(),))
 
 
-def fork_parent(db, metadata, session):
-    """Resolve an exact Codex boundary from this device's captured metadata.
+def has_prior_history(handle, size: int, client: str, session: str) -> bool:
+    """A bounded initial scan must prove there is no inherited company history.
 
-    Missing/deleted/legacy endpoints stay unknown. Never open the source
-    transcript, search other sessions, or substitute the source's latest head.
+    This is deliberately independent of transcript ownership: copied Claude
+    records can still name the parent session. Unknown or oversized baselines
+    cannot prove a fresh conversation and are refused.
     """
-    source = conversation_id(metadata.get("forked_from_id"))
-    end = metadata.get("forked_from_ordinal_exclusive")
-    if not source or source == session or type(end) is not int or end <= 0:
-        return None
-    root = Path(db.execute("PRAGMA database_list").fetchone()["file"]).parent
-    path = root / f"codex-{source}.sqlite3"
-    try:
-        info = path.lstat()
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_uid != os.getuid()
-        ):
-            return None
-        source_db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)
+    if size > MAX_RECORD_BYTES:
+        return True
+    handle.seek(0)
+    adapter = {}
+    for line in handle.read(size).splitlines():
         try:
-            row = source_db.execute(
-                "SELECT a.event_id,s.owner,s.context,s.generation "
-                "FROM anchors a JOIN segments s ON s.id=a.segment "
-                "WHERE a.ordinal=? AND s.retired=0",
-                (end - 1,),
-            ).fetchone()
-        finally:
-            source_db.close()
-        if row:
-            return {
-                "reference": {"host_conversation_id": source, "event_id": row[0]},
-                "scope": list(row[1:4]),
-            }
-    except (OSError, sqlite3.DatabaseError):
-        pass
-    return None
+            record = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            return True
+        if not isinstance(record, dict):
+            return True
+        if client == "claude":
+            if record.get("type") in {"user", "assistant", "attachment"}:
+                return True
+        else:
+            payload = record.get("payload", {})
+            if record.get("type") == "compacted":
+                return True
+            if record.get("type") == "response_item" and isinstance(payload, dict):
+                metadata = payload.get("internal_chat_message_metadata_passthrough") or {}
+                kinds = metadata.get("content_item_kinds", []) if isinstance(metadata, dict) else []
+                if (
+                    payload.get("type") == "message"
+                    and payload.get("role") == "user"
+                    and isinstance(kinds, list)
+                    and kinds
+                    and all(
+                        kind in {"agents_md.instructions", "environments.environment_context"}
+                        for kind in kinds
+                    )
+                ):
+                    # Codex labels startup instructions as user messages. They
+                    # are not prior turns; ordinary user text is still refused.
+                    continue
+                if payload.get("type") != "message" or payload.get("role") not in {
+                    "system",
+                    "developer",
+                }:
+                    return True
+        if normalise(record, client, session, adapter):
+            return True
+    return False
 
 
 def scan(
@@ -184,10 +195,9 @@ def scan(
         )
     except FileNotFoundError:
         if allow_new_file and state["offset"] is None:
-            # Claude can create a fork without SessionStart and only writes its
-            # transcript after UserPromptSubmit. Absence at either boundary
-            # proves there is no older content to import at this path. Remember
-            # that empty baseline so the first Stop captures the first turn.
+            # Only a proven fresh SessionStart may establish an absent-file
+            # baseline. A fork can first appear at UserPromptSubmit with no file,
+            # even though its model already holds the parent's conversation.
             state.update(
                 offset=0,
                 path=str(path),
@@ -203,6 +213,17 @@ def scan(
             raise ValueError("host transcript must be a regular file")
         header = handle.readline(MAX_RECORD_BYTES)
         if client == "codex":
+            if not header and allow_new_file and state["offset"] is None:
+                # Native startup can expose an empty file before session_meta.
+                # Validate its identity on the next scan, before retaining bytes.
+                state.update(
+                    offset=0,
+                    file_id=[details.st_dev, details.st_ino],
+                    path=str(path),
+                    profile_keys=fingerprints,
+                    observed_revocations=revocations,
+                )
+                return
             try:
                 metadata = json.loads(header)
             except ValueError:
@@ -212,6 +233,9 @@ def scan(
                 or conversation_id(metadata.get("payload", {}).get("id")) != session
             ):
                 raise ValueError("Codex transcript belongs to a different conversation")
+            if metadata["payload"].get("forked_from_id"):
+                discard_conversation(db, state, "inherited_history")
+                return
         file_id = [details.st_dev, details.st_ino]
         if state.get("awaiting_source_creation") and state.get("path") == str(path):
             state.pop("awaiting_source_creation")
@@ -254,8 +278,11 @@ def scan(
         if state["offset"] is None:
             state.pop("profile_cutovers", None)
             state.pop("revocation_cutovers", None)
-            # First invocation establishes a baseline; never import older work.
-            # SessionStart installs this before the first user prompt on both hosts.
+            # Skipping prior bytes does not remove them from the model's window.
+            # Without an observed history, no company is a safe upload target.
+            if has_prior_history(handle, details.st_size, client, session):
+                discard_conversation(db, state, "unproven_history")
+                return
             handle.seek(max(0, details.st_size - MAX_RECORD_BYTES))
             tail = handle.read(MAX_RECORD_BYTES)
             final_newline = tail.rfind(b"\n")
@@ -267,9 +294,6 @@ def scan(
                 segment=None,
                 tail=None,
                 capture_turn_id=None,
-            )
-            state["fork_parent"] = (
-                fork_parent(db, metadata["payload"], session) if client == "codex" else None
             )
             return
         if (
@@ -626,6 +650,13 @@ def capture_session(
     try:
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
+        if state["offset"] is None and not state.get("path") and not allow_new_file:
+            discard_conversation(db, state, "unproven_start")
+        if state.get("capture_stopped"):
+            save_state(db, state)
+            db.commit()
+            flush(db, configured, client, session, endpoint, deadline)
+            return None
         disabled = any(
             scope is not None and key_for(configured, scope[0], scope[1]) is None
             for scope in (state.get("scope"), state.get("candidate_scope"))
@@ -778,7 +809,8 @@ def run_hook(
         state_root,
         endpoint,
         deadline - (0.6 if ordinary else 0),
-        allow_new_file=event in {"SessionStart", "UserPromptSubmit"},
+        allow_new_file=event == "SessionStart"
+        and payload.get("source") in {None, "startup", "clear"},
     )
     if ordinary:
         recover_sessions(client, session, configured, state_root, endpoint, deadline)
