@@ -1,20 +1,23 @@
-"""First use offers consent, with bounded recovery for unanswered offers."""
+"""A connected helper asks once whether to share transcripts, then backs off."""
 
 import json
+import time
 from unittest.mock import Mock
 from uuid import uuid4
 
 import capture_config as credentials
 import capture_onboarding as onboarding
 import pytest
-from test_conversation_capture import OWNER, SESSION, append, hook_record, marker
+from test_conversation_capture import OTHER_OWNER, OWNER, SESSION, append, hook_record, marker
+
+CONNECTED = {f"{OWNER}:497": "synthetic-private-key"}
 
 
-def transcript(tmp_path, client="codex", consent="unknown", generation=None, session=SESSION):
-    path = tmp_path / "transcript.jsonl"
-    path.write_text("")
-    if client == "codex":
-        append(path, {"type": "session_meta", "payload": {"id": session}})
+def page(client):
+    return f"https://app.pensieve.uk/oauth/conversation-capture?client={client}&context_id=497&user_id={OWNER}"
+
+
+def consent_record(client="codex", consent="unknown", generation=None, session=SESSION):
     record = hook_record(client=client, generation=generation, session=session)
     if client == "claude":
         record["sessionId"] = session
@@ -35,61 +38,91 @@ def transcript(tmp_path, client="codex", consent="unknown", generation=None, ses
         record["payload"]["content"][0]["text"] = text
     else:
         record["attachment"]["content"] = [text]
-    append(path, record)
+    return record
+
+
+def transcript(tmp_path, client="codex", consent="unknown", generation=None, session=SESSION):
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("")
+    if client == "codex":
+        append(path, {"type": "session_meta", "payload": {"id": session}})
+    append(path, consent_record(client, consent, generation, session))
     return path
 
 
 def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(onboarding.sys, "platform", "darwin")
-    start = Mock(return_value={"status": "awaiting_approval", "verification_url": "fixture"})
     opened = Mock()
-    monkeypatch.setattr(onboarding, "start", start)
-    monkeypatch.setattr(onboarding, "open_approval", opened)
-    return tmp_path / "private" / "capture.json", start, opened
+    monkeypatch.setattr(onboarding, "open_page", opened)
+    return tmp_path / "private" / "capture.json", opened
+
+
+def onboarding_state(config):
+    path = config.with_name("capture-onboarding.json")
+    return path, json.loads(credentials.private_file(path, credentials.MAX_CONFIG_BYTES))
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
-def test_first_native_offer_is_bound_to_account_context_and_only_opens_once(
-    tmp_path, monkeypatch, client
-):
-    config, start, opened = setup(tmp_path, monkeypatch)
+def test_unknown_consent_opens_the_exact_page_once_per_conversation(tmp_path, monkeypatch, client):
+    config, opened = setup(tmp_path, monkeypatch)
     payload = {"transcript_path": str(transcript(tmp_path, client))}
     for _ in range(3):
-        onboarding.offer_connection(payload, client, SESSION, config, {})
-    assert start.call_count == opened.call_count == 1
-    assert start.call_args.kwargs["expected_user_id"] == OWNER
-    assert start.call_args.kwargs["expected_context_id"] == 497
-    assert start.call_args.kwargs["timeout"] <= 0.5
-    assert not config.exists()  # Offering approval cannot issue an upload credential.
+        onboarding.offer_connection(payload, client, SESSION, config, CONNECTED)
+    opened.assert_called_once_with(page(client))
+    # The page only records a choice: nothing is paired, issued or stored secretly.
+    assert not config.exists()
+    path, state = onboarding_state(config)
+    assert "synthetic-private-key" not in path.read_text()
+    [entry] = state.values()
+    assert entry["session"] == SESSION
+    assert 0 < entry["retry_at"] - time.time() <= onboarding.OFFER_INTERVAL_SECONDS == 600
 
 
-def test_linked_profile_does_not_reopen_approval_after_decline_or_settings_enable(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "configured",
+    [
+        {},
+        {f"{OWNER}:508": "synthetic-private-key"},
+        {f"{OTHER_OWNER}:497": "synthetic-private-key"},
+    ],
+    ids=["no_key", "other_context", "other_account"],
+)
+def test_without_a_key_for_this_context_connecting_is_left_to_mcp(
+    tmp_path, monkeypatch, configured
 ):
-    config, start, opened = setup(tmp_path, monkeypatch)
-    configured = {f"{OWNER}:497": "synthetic-private-key"}
+    config, opened = setup(tmp_path, monkeypatch)
+    payload = {"transcript_path": str(transcript(tmp_path))}
+    onboarding.offer_connection(payload, "codex", SESSION, config, configured)
+    opened.assert_not_called()
+    assert not config.with_name("capture-onboarding.json").exists()
+
+
+@pytest.mark.parametrize("configured", [{}, CONNECTED], ids=["new_installation", "connected"])
+def test_declined_or_approved_consent_never_opens_the_page(tmp_path, monkeypatch, configured):
+    config, opened = setup(tmp_path, monkeypatch)
     for consent, generation in [("declined", None), ("approved", str(uuid4()))]:
         path = transcript(tmp_path, consent=consent, generation=generation)
         onboarding.offer_connection(
             {"transcript_path": str(path)}, "codex", SESSION, config, configured
         )
-    start.assert_not_called()
     opened.assert_not_called()
 
 
-def test_quoted_or_wrong_session_marker_cannot_offer_browser_approval(tmp_path, monkeypatch):
-    config, start, _ = setup(tmp_path, monkeypatch)
+def test_quoted_or_wrong_session_marker_cannot_open_the_page(tmp_path, monkeypatch):
+    config, opened = setup(tmp_path, monkeypatch)
     path = tmp_path / "transcript.jsonl"
     path.write_text("")
     append(path, {"type": "session_meta", "payload": {"id": SESSION}})
-    record = hook_record()
+    record = consent_record()
     record["payload"]["role"] = "assistant"
     append(path, record)
-    onboarding.offer_connection({"transcript_path": str(path)}, "codex", SESSION, config, {})
-    start.assert_not_called()
+    onboarding.offer_connection({"transcript_path": str(path)}, "codex", SESSION, config, CONNECTED)
+    opened.assert_not_called()
     transcript(tmp_path)
-    onboarding.offer_connection({"transcript_path": str(path)}, "codex", str(uuid4()), config, {})
-    start.assert_not_called()
+    onboarding.offer_connection(
+        {"transcript_path": str(path)}, "codex", str(uuid4()), config, CONNECTED
+    )
+    opened.assert_not_called()
 
 
 def test_connecting_second_context_preserves_first_and_keys_do_not_cross_context(tmp_path):
@@ -114,108 +147,52 @@ def test_connecting_second_context_preserves_first_and_keys_do_not_cross_context
     assert credentials.profiles(config, "claude") == {}
 
 
-def test_offline_first_use_retries_with_backoff_without_marking_consent(tmp_path, monkeypatch):
-    config, start, opened = setup(tmp_path, monkeypatch)
-    start.return_value = {"status": "unavailable"}
-    payload = {"transcript_path": str(transcript(tmp_path))}
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    assert start.call_count == 1
-    opened.assert_not_called()
-    path = config.with_name("capture-onboarding.json")
-    state = json.loads(credentials.private_file(path, credentials.MAX_CONFIG_BYTES))
-    for entry in state.values():
-        assert entry["offered"] is False
-        entry["retry_at"] = 0
-    credentials.save_private_json(path, state)
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    assert start.call_count == 2
-    assert not config.exists()
-
-
 def test_compaction_requires_a_new_native_marker_before_onboarding(tmp_path, monkeypatch):
-    config, start, _ = setup(tmp_path, monkeypatch)
+    config, opened = setup(tmp_path, monkeypatch)
     path = transcript(tmp_path)
     append(path, {"type": "compacted"})
-    onboarding.offer_connection({"transcript_path": str(path)}, "codex", SESSION, config, {})
-    start.assert_not_called()
-
-
-def test_remembered_decline_never_opens_browser_even_on_new_installation(tmp_path, monkeypatch):
-    config, start, opened = setup(tmp_path, monkeypatch)
-    path = transcript(tmp_path, consent="declined")
-    onboarding.offer_connection({"transcript_path": str(path)}, "codex", SESSION, config, {})
-    start.assert_not_called()
-    opened.assert_not_called()
-
-
-def test_new_consent_generation_recovers_a_dismissed_offer(tmp_path, monkeypatch):
-    config, start, opened = setup(tmp_path, monkeypatch)
-    path = transcript(tmp_path)
     payload = {"transcript_path": str(path)}
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    transcript(tmp_path, consent="approved", generation=str(uuid4()))
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    assert start.call_count == opened.call_count == 2
+    onboarding.offer_connection(payload, "codex", SESSION, config, CONNECTED)
+    opened.assert_not_called()
+    append(path, consent_record())
+    onboarding.offer_connection(payload, "codex", SESSION, config, CONNECTED)
+    opened.assert_called_once_with(page("codex"))
+
+
+def test_non_macos_hosts_never_open_the_page(tmp_path, monkeypatch):
+    config, opened = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(onboarding.sys, "platform", "linux")
+    payload = {"transcript_path": str(transcript(tmp_path))}
+    onboarding.offer_connection(payload, "codex", SESSION, config, CONNECTED)
+    opened.assert_not_called()
+    assert not config.with_name("capture-onboarding.json").exists()
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
-def test_unanswered_offer_retries_only_in_a_later_conversation_after_server_expiry(
+def test_unanswered_page_is_offered_again_only_in_a_later_conversation_after_the_interval(
     tmp_path, monkeypatch, client
 ):
-    config, start, opened = setup(tmp_path, monkeypatch)
+    config, opened = setup(tmp_path, monkeypatch)
     path = transcript(tmp_path, client)
     payload = {"transcript_path": str(path)}
-    onboarding.offer_connection(payload, client, SESSION, config, {})
-    pending = onboarding.pairing_path(config, client)
-    credentials.save_private_json(
-        pending,
-        {
-            "expected_user_id": OWNER,
-            "expected_context_id": 497,
-            "expires_at": "2000-01-01T00:00:00Z",
-        },
-    )
-    # The browser deadline alone is insufficient: offline polling may still be
-    # recovering a registration. A new conversation must preserve that claim.
+    onboarding.offer_connection(payload, client, SESSION, config, CONNECTED)
+    assert opened.call_count == 1
+    # Closing the page without choosing never re-asks within the interval,
+    # even from another conversation.
     next_session = str(uuid4())
     transcript(tmp_path, client, session=next_session)
-    onboarding.offer_connection(payload, client, next_session, config, {})
-    assert start.call_count == 1
-    # Poll discards a server-confirmed expired unanswered offer. The original
-    # conversation still cannot repeatedly reopen it, even after backoff.
-    pending.unlink()
-    state_path = config.with_name("capture-onboarding.json")
-    state = json.loads(credentials.private_file(state_path, credentials.MAX_CONFIG_BYTES))
+    onboarding.offer_connection(payload, client, next_session, config, CONNECTED)
+    assert opened.call_count == 1
+    state_path, state = onboarding_state(config)
     for entry in state.values():
         entry["retry_at"] = 0
     credentials.save_private_json(state_path, state)
+    # The original conversation is never asked twice, even after the interval.
     transcript(tmp_path, client)
-    onboarding.offer_connection(payload, client, SESSION, config, {})
-    assert start.call_count == 1
+    onboarding.offer_connection(payload, client, SESSION, config, CONNECTED)
+    assert opened.call_count == 1
     transcript(tmp_path, client, session=next_session)
-    onboarding.offer_connection(payload, client, next_session, config, {})
-    onboarding.offer_connection(payload, client, next_session, config, {})
-    assert start.call_count == opened.call_count == 2
-
-
-@pytest.mark.parametrize("pending_context", [497, 508])
-def test_consent_change_cannot_replace_an_old_unclaimed_registration(
-    tmp_path, monkeypatch, pending_context
-):
-    config, start, opened = setup(tmp_path, monkeypatch)
-    path = transcript(tmp_path)
-    payload = {"transcript_path": str(path)}
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    credentials.save_private_json(
-        onboarding.pairing_path(config, "codex"),
-        {
-            "expected_user_id": OWNER,
-            "expected_context_id": pending_context,
-            "expires_at": "2000-01-01T00:00:00Z",
-        },
-    )
-    transcript(tmp_path, consent="approved", generation=str(uuid4()))
-    onboarding.offer_connection(payload, "codex", SESSION, config, {})
-    assert start.call_count == opened.call_count == 1
+    onboarding.offer_connection(payload, client, next_session, config, CONNECTED)
+    onboarding.offer_connection(payload, client, next_session, config, CONNECTED)
+    assert opened.call_count == 2
+    assert opened.call_args.args == (page(client),)

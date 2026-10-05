@@ -39,9 +39,13 @@ def test_manifests_resolve_the_installed_components():
 
 
 def test_plugin_bundles_the_hosted_mcp_without_credentials():
-    assert read_json(PLUGIN / ".mcp.json") == {
-        "mcpServers": {"pensieve": {"type": "http", "url": "https://mcp.pensieve.uk/mcp"}}
-    }
+    server = read_json(PLUGIN / ".mcp.json")["mcpServers"]["pensieve"]
+    assert server["type"] == "http"
+    assert server["url"] == "https://mcp.pensieve.uk/mcp"
+    for field, client in (("headersHelper", "claude"), ("http_headers_helper", "codex")):
+        assert client in server[field]
+        assert "Authorization" not in server[field]
+    assert not re.search(r"pcap_[A-Za-z0-9_-]{43}", json.dumps(server))
 
 
 def test_codex_presentation_assets_are_bundled_pngs():
@@ -96,7 +100,9 @@ def test_host_adapters_use_command_briefing_and_preserve_capture(client, filenam
         assert "conversation_capture.py" in scripts[1]
         assert all("context_receipt.py" not in command for command in scripts)
     if client == "claude":
-        assert hooks["PreToolUse"][0]["matcher"] == "^mcp__plugin_pensieve_pensieve__.*$"
+        assert hooks["PreToolUse"][0]["matcher"] == (
+            "^mcp__(plugin_pensieve_pensieve|claude_ai_Pensieve|pensieve)__.*$"
+        )
     for script in ("context_briefing", "context_receipt", "conversation_capture"):
         assert (PLUGIN / "scripts" / (script + ".py")).is_file()
     assert all(hook["timeout"] == 1 for group in hooks["SessionEnd"] for hook in group["hooks"])

@@ -18,10 +18,10 @@ CLIENTS = {"codex", "claude"}
 
 
 class ReconnectRequired(ValueError):
-    """An obsolete local setup must be replaced by browser-approved pairing."""
+    """An obsolete local setup must be replaced by native MCP authentication."""
 
     def __init__(self):
-        super().__init__("Reconnect through Data → Connectors to save work with this app.")
+        super().__init__("Authenticate the Pensieve plugin MCP server to connect this app.")
 
 
 def encoded(value: object) -> bytes:
@@ -210,12 +210,12 @@ def profiles(path: Path, client: str = "codex") -> dict[str, str]:
     }
 
 
-def install_profile(path: Path, profile: dict) -> None:
-    """Install a newly approved pairing, replacing obsolete credential entries only."""
+def install_profile(path: Path, profile: dict, *, replace_client: bool = False) -> None:
+    """Install an authenticated profile, replacing obsolete credential entries only."""
     validate_profile(profile)
     with config_lock(path):
         value = _read_config(path)
-        # This is reached only after the browser-approved exchange. Old account
+        # This is reached only after the server confirms the authenticated owner. Old account
         # keys are not reused or assigned to a client. Existing paired profiles
         # survive reconnects; transcript spools are not opened or changed here.
         value = _validate_config(
@@ -235,8 +235,11 @@ def install_profile(path: Path, profile: dict) -> None:
             item
             for item in value["profiles"]
             if not (
-                (item["user_id"], item["client"]) == identity[:2]
-                and item.get("context_id") in {None, profile.get("context_id")}
+                (replace_client and item["client"] == profile["client"])
+                or (
+                    (item["user_id"], item["client"]) == identity[:2]
+                    and item.get("context_id") in {None, profile.get("context_id")}
+                )
             )
         ] + [profile]
         save_private_json(path, value)

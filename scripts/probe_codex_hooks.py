@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -27,7 +28,7 @@ from typing import Any
 
 RECEIPT_TOKEN = "a" * 64 + "." + "b" * 32
 CAPTURE_OWNER = "353e0b53-8178-4a3c-8d40-a07414144741"
-CAPTURE_KEY = "synthetic-upload-only-key-not-a-real-credential"
+CAPTURE_KEY = "pcap_" + "a" * 43
 
 
 def append(path: Path, value: dict[str, Any]) -> None:
@@ -35,66 +36,58 @@ def append(path: Path, value: dict[str, Any]) -> None:
         handle.write(json.dumps(value) + "\n")
 
 
-def mcp_server(output: Path) -> None:
-    """Serve synthetic tools over stdio, retaining only fixture request data."""
-    for line in sys.stdin:
-        request = json.loads(line)
-        method = request.get("method")
-        if "id" not in request:
-            continue
-        if method == "initialize":
-            result = {
-                "protocolVersion": request["params"]["protocolVersion"],
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "pensieve-hook-probe", "version": "1"},
-            }
-        elif method == "tools/list":
-            result = {
-                "tools": [
-                    {
-                        "name": name,
-                        "description": "Synthetic hook probe; returns a fixture marker.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {},
-                            "additionalProperties": True,
-                        },
-                        "annotations": {"readOnlyHint": True},
-                    }
-                    for name in ("ordinary", "set_context", "edit_page")
-                ]
-            }
-        elif method == "tools/call":
-            params = request["params"]
-            append(output / "mcp.jsonl", {"pid": os.getpid(), **params})
-            event = params.get("arguments", {}).get("event", "ordinary")
-            marker = "HOOK_PROBE_" + event.upper()
-            if source := params.get("arguments", {}).get("source"):
-                marker += "_" + source.upper()
-            result = {"content": [{"type": "text", "text": marker}]}
-            if params["name"] == "ordinary":
-                result["content"][0]["text"] += " SOURCE_CONTEXT_SENTINEL"
-            if params["name"] == "set_context":
-                result["content"][0]["text"] = (
-                    "DESTINATION_CONTEXT_SENTINEL\n<!-- pensieve-capture-context "
-                    + json.dumps(
-                        {
-                            "v": 2,
-                            "capture_generation": CAPTURE_OWNER,
-                            "kind": "selection",
-                            "user_id": CAPTURE_OWNER,
-                            "client": "codex",
-                            "conversation_id": params["_meta"]["threadId"],
-                            "context_id": 12,
-                            "turn_id": None,
-                        }
-                    )
-                    + " -->"
-                )
+def mcp_result(output: Path, request: dict):
+    method = request.get("method")
+    if "id" not in request:
+        return None
+    if method == "initialize":
+        result = {
+            "protocolVersion": request["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "pensieve-hook-probe", "version": "1"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [
+                {
+                    "name": name,
+                    "description": "Synthetic hook probe; returns a fixture marker.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": True,
+                    },
+                    "annotations": {"readOnlyHint": True},
+                }
+                for name in ("ordinary", "read")
+            ]
+        }
+    elif method == "tools/call":
+        params = request["params"]
+        append(output / "mcp.jsonl", {"pid": os.getpid(), **params})
+        event = params.get("arguments", {}).get("event", "ordinary")
+        marker = "HOOK_PROBE_" + event.upper()
+        if source := params.get("arguments", {}).get("source"):
+            marker += "_" + source.upper()
+        result = {"content": [{"type": "text", "text": marker}]}
+        if params["name"] == "ordinary":
+            result["content"][0]["text"] += " SOURCE_CONTEXT_SENTINEL"
+        if params["name"] == "read":
+            result["content"][0]["text"] = (
+                "DESTINATION_CONTEXT_SENTINEL"
+                if params["arguments"]["context_id"] == 12
+                else "SOURCE_CONTEXT_SENTINEL"
+            )
+    else:
+        result = {}
+    return {"jsonrpc": "2.0", "id": request["id"], "result": result}
 
-        else:
-            result = {}
-        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+
+def mcp_server(output: Path) -> None:
+    for line in sys.stdin:
+        result = mcp_result(output, json.loads(line))
+        if result is not None:
+            print(json.dumps(result), flush=True)
 
 
 def run_probe(
@@ -120,7 +113,11 @@ def run_probe(
     model_waiting = threading.Event()
     release_model = threading.Event()
     capture_batch_scopes = {}
-    capture_config = output / "capture-config.json"
+    capture_config = output / ".config/pensieve/capture.json"
+    capture_config.parent.mkdir(mode=0o700, parents=True)
+    headers_path = capture_config.with_name("mcp-headers-codex.json")
+    headers_path.write_text(json.dumps({"X-Pensieve-Plugin": "codex " + CAPTURE_KEY}))
+    headers_path.chmod(0o600)
     if capture and not persist:
         raise ValueError("capture probe requires --persist for a real local transcript")
     capture_config.write_text(
@@ -148,9 +145,13 @@ def run_probe(
             pass
 
         def do_GET(self) -> None:
+            if self.path == "/mcp":
+                self.send_response(405)
+                self.end_headers()
+                return
             payload = json.dumps(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "service": "upload",
                     "clients": ["codex", "claude"],
                     "max_batch_bytes": 262144,
@@ -170,6 +171,21 @@ def run_probe(
             nonlocal sequence
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             request = json.loads(raw)
+            if self.path == "/mcp":
+                assert self.headers.get("X-Pensieve-Plugin") == "codex " + CAPTURE_KEY
+                assert self.headers.get("Authorization") == "Bearer synthetic-native-fixture"
+                append(
+                    output / "http-methods.jsonl",
+                    {"method": request.get("method"), "native_auth_and_private_proof": True},
+                )
+                result = mcp_result(output, request)
+                payload = json.dumps(result).encode() if result is not None else b""
+                self.send_response(200 if result is not None else 202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             if self.path == "/hooks/briefing":
                 assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
                 append(output / "briefings.jsonl", request)
@@ -269,8 +285,8 @@ def run_probe(
                     "type": "function_call",
                     "call_id": "probe-ordinary-" + fixture_id,
                     "namespace": "mcp__pensieve",
-                    "name": "set_context" if context_switch else "ordinary",
-                    "arguments": "{}",
+                    "name": "read" if context_switch else "ordinary",
+                    "arguments": json.dumps({"context_id": 12}) if context_switch else "{}",
                 }
                 if context_switch == "code-mode":
                     item = {
@@ -278,7 +294,7 @@ def run_probe(
                         "call_id": "probe-wrapper-" + fixture_id,
                         "namespace": "functions",
                         "name": "exec",
-                        "input": "text(await tools.mcp__pensieve__edit_page({})); text(await tools.mcp__pensieve__set_context({})); text(await tools.mcp__pensieve__edit_page({}));",
+                        "input": "text(await tools.mcp__pensieve__read({context_id: 497})); text(await tools.mcp__pensieve__read({context_id: 12}));",
                     }
             else:
                 item = {
@@ -360,8 +376,14 @@ def run_probe(
             "requires_openai_auth": False,
         },
         "mcp_servers.pensieve": {
-            "command": sys.executable,
-            "args": [str(Path(__file__).resolve()), "--mcp", str(output)],
+            "url": f"http://127.0.0.1:{server.server_port}/mcp",
+            "http_headers_helper": "HOME="
+            + shlex.quote(str(output))
+            + " "
+            + json.loads((plugin / ".mcp.json").read_text())["mcpServers"]["pensieve"][
+                "http_headers_helper"
+            ],
+            "http_headers": {"Authorization": "Bearer synthetic-native-fixture"},
         },
         "hooks": hooks,
         "features.hooks": True,
@@ -461,6 +483,13 @@ def run_probe(
         assert "ack" in operations
     capture_checks = {}
     if capture:
+        # A hook may also drain an older tracked spool. Judge only the native
+        # conversation exercised by this invocation, including refused forks.
+        capture_attempts = [
+            attempt
+            for attempt in capture_attempts
+            if attempt[0]["host_conversation_id"] in thread_ids
+        ]
         accepted = {body["batch_id"]: body for body, _ in capture_attempts[0 if interrupt else 1 :]}
         captured = [event for body in accepted.values() for event in body["events"]]
         capture_checks = {
@@ -532,64 +561,29 @@ def run_probe(
                 }
                 for previous, current in zip(ordered, ordered[1:])
             )
-        if fork:
-            first = min(captured, key=lambda event: event["sequence"])
-            capture_checks["exact_fork_parent"] = (
-                first["capture"].get("parent", {}).get("host_conversation_id") == fork
-                and next(iter(thread_ids)) != fork
-            )
+        if fork or context_switch:
+            for key in (
+                "prompt_and_answer_captured",
+                "retry_identical_bytes",
+                "explicit_completion",
+                "captured_visible_work",
+            ):
+                capture_checks.pop(key)
+            capture_checks["unsafe_conversation_never_uploaded"] = not capture_attempts
+            if fork:
+                capture_checks["distinct_fork_identity"] = next(iter(thread_ids)) != fork
+            if context_switch:
+                targets = [
+                    call["arguments"].get("context_id") for call in calls if call["name"] == "read"
+                ]
+                capture_checks["explicit_company_calls"] = targets == (
+                    [497, 12] if context_switch == "code-mode" else [12]
+                )
         elif resume:
             first = min(captured, key=lambda event: event["sequence"])
             capture_checks["resumed_parent"] = (
                 first["capture"].get("parent", {}).get("host_conversation_id") == resume
             )
-        if context_switch:
-            source_events = [
-                event
-                for batch in accepted.values()
-                if capture_batch_scopes[batch["batch_id"]] == 497
-                for event in batch["events"]
-            ]
-            destination_events = [
-                event
-                for batch in accepted.values()
-                if capture_batch_scopes[batch["batch_id"]] == 12
-                for event in batch["events"]
-            ]
-            capture_checks.pop("prompt_and_answer_captured")
-            capture_checks.update(
-                {
-                    "source_prompt_consent": any(
-                        event["kind"] == "user" for event in source_events
-                    ),
-                    "destination_answer_consent": any(
-                        event["content"] == "DESTINATION_ANSWER_SENTINEL"
-                        for event in destination_events
-                    ),
-                    "company_isolation": "DESTINATION_" not in json.dumps(source_events)
-                    and "SOURCE_CONTEXT_SENTINEL" not in json.dumps(destination_events),
-                    "selection_result_once": sum(
-                        "DESTINATION_CONTEXT_SENTINEL" in event["content"]
-                        for event in destination_events
-                    )
-                    == 1,
-                }
-            )
-            if context_switch == "code-mode":
-                writes = [call for call in calls if call["name"] == "edit_page"]
-                for scope, write in zip((source_events, destination_events), writes):
-                    native_id = write["_meta"]["callId"]
-                    capture_checks["native_write_" + native_id] = (
-                        sum(
-                            event.get("capture", {}).get("tool_call_id") == native_id
-                            for event in scope
-                        )
-                        == 1
-                    )
-                capture_checks["two_native_writes"] = len(writes) == 2
-                capture_checks["combined_output_omitted"] = (
-                    "SOURCE_CONTEXT_SENTINEL" not in json.dumps(captured)
-                )
         if not all(capture_checks.values()):
             raise RuntimeError("Codex capture probe failed: " + json.dumps(capture_checks))
     return {

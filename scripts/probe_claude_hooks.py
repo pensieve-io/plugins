@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import queue
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -26,7 +27,7 @@ from typing import Any, ClassVar
 MARKER = "PENSIEVE_SYNTHETIC_GROUNDING_"
 RECEIPT_TOKEN = "a" * 64 + "." + "b" * 32
 CAPTURE_OWNER = "353e0b53-8178-4a3c-8d40-a07414144741"
-CAPTURE_KEY = "synthetic-upload-only-key-not-a-real-credential"
+CAPTURE_KEY = "pcap_" + "a" * 43
 
 
 class ModelStub(BaseHTTPRequestHandler):
@@ -57,7 +58,7 @@ class ModelStub(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.reply_json(
             {
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "service": "upload",
                 "clients": ["codex", "claude"],
                 "max_batch_bytes": 262144,
@@ -130,6 +131,8 @@ class ModelStub(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if self.path == "/mcp":
+            assert self.headers.get("X-Pensieve-Plugin") == "claude " + CAPTURE_KEY
+            assert self.headers.get("Authorization") == "Bearer synthetic-native-fixture"
             session = self.headers.get("Mcp-Session-Id")
             method = body.get("method")
             if method == "initialize":
@@ -387,7 +390,11 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="pensieve-claude-hooks-") as directory:
         root = Path(directory)
         plugin = root / "plugin"
-        capture_config = root / "capture.json"
+        capture_config = root / ".config/pensieve/capture.json"
+        capture_config.parent.mkdir(mode=0o700, parents=True)
+        headers_path = capture_config.with_name("mcp-headers-claude.json")
+        headers_path.write_text(json.dumps({"X-Pensieve-Plugin": "claude " + CAPTURE_KEY}))
+        headers_path.chmod(0o600)
         capture_config.write_text(
             json.dumps(
                 {
@@ -436,6 +443,12 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
         mcp_path = plugin / ".mcp.json"
         mcp = json.loads(mcp_path.read_text())
         mcp["mcpServers"]["pensieve"]["url"] = f"http://127.0.0.1:{server.server_port}/mcp"
+        mcp["mcpServers"]["pensieve"]["headersHelper"] = (
+            "HOME=" + shlex.quote(str(root)) + " " + mcp["mcpServers"]["pensieve"]["headersHelper"]
+        )
+        mcp["mcpServers"]["pensieve"]["headers"] = {
+            "Authorization": "Bearer synthetic-native-fixture"
+        }
         mcp_path.write_text(json.dumps(mcp))
         env = {
             key: value
@@ -638,8 +651,16 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                             for event in captured
                             if event["kind"] in {"tool_call", "tool_result"}
                         ),
-                        "fork_starts_without_guessed_ancestry": len(fork_events) == 1
-                        and "parent" not in fork_events[0]["capture"],
+                        "fork_never_captured": not fork_events
+                        and all(
+                            body["host_conversation_id"]
+                            != next(
+                                case["briefings"][0]["session_id"]
+                                for case in report["cases"]
+                                if case["case"] == "fork"
+                            )
+                            for body in accepted.values()
+                        ),
                         "interruption_never_marked_complete": len(interrupted_turns) == 1
                         and not any(
                             event["kind"] == "turn_end"

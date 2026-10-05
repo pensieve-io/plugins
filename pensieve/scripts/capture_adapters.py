@@ -21,6 +21,7 @@ class EventFields(TypedDict, total=False):
     tool_name: str
     completion: Literal["completed", "interrupted", "failed"]
     marker: dict
+    context_id: int
     truncated: bool
 
 
@@ -33,18 +34,38 @@ class CaptureEvent(EventFields):
         "turn_end",
         "attribution",
         "unknown_boundary",
+        "context_use",
     ]
 
 
 CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
-SET_CONTEXT_NAMES = {
-    "mcp__pensieve__set_context",
-    "mcp__plugin_pensieve_pensieve__set_context",
-    "mcp__plugin:pensieve:pensieve__set_context",
+# The retired briefing tool, still excluded if an old server exposes it.
+HOOK_TOOL_NAMES = {
+    "mcp__pensieve__context_briefing",
+    "mcp__plugin_pensieve_pensieve__context_briefing",
+    "mcp__plugin:pensieve:pensieve__context_briefing",
+}
+# Pensieve's company tools. Under any server name they count as exposure when
+# they name a context: a false match only stops capture, the safe direction.
+COMPANY_TOOLS = {
+    "search",
+    "read",
+    "get_tree",
+    "list_trees",
+    "info",
+    "search_changes",
+    "read_change",
+    "save_data",
+    "create_page",
+    "edit_page",
+    "delete_page",
+    "move_page",
+    "merge_pages",
+    "set_lock",
 }
 
 
-def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None:
+def parse_marker(text: str, client: str, session: str) -> dict | None:
     matches = CONTEXT_MARKER.findall(text)
     if len(matches) != 1:
         return None
@@ -70,7 +91,7 @@ def parse_marker(text: str, client: str, session: str, kind: str) -> dict | None
             marker["capture_generation"] is not None
             and conversation_id(marker["capture_generation"]) is None
         )
-        or marker["kind"] != kind
+        or marker["kind"] != "prompt"
         or marker["client"] != client
         or conversation_id(marker["conversation_id"]) != session
         or conversation_id(marker["user_id"]) is None
@@ -135,17 +156,50 @@ def is_code_mode_tool(name: object, namespace: object) -> bool:
     return isinstance(name, str) and name in {"exec", "wait"} and namespace in {None, "functions"}
 
 
-def is_set_context(name: object, namespace: object = None) -> bool:
-    return isinstance(name, str) and (
-        name in SET_CONTEXT_NAMES or (name == "set_context" and namespace == "mcp__pensieve")
-    )
-
-
 def is_hook_tool(name: object, namespace: object = None) -> bool:
     return isinstance(name, str) and (
-        name in {name.replace("set_context", "context_briefing") for name in SET_CONTEXT_NAMES}
-        or (name == "context_briefing" and namespace == "mcp__pensieve")
+        name in HOOK_TOOL_NAMES or (name == "context_briefing" and namespace == "mcp__pensieve")
     )
+
+
+def mcp_tool(name: object, namespace: object) -> tuple[str, str] | None:
+    """Split `mcp__<server>__<tool>`, or a Codex `mcp__<server>` namespace and its tool."""
+    if not isinstance(name, str):
+        return None
+    if isinstance(namespace, str) and namespace.startswith("mcp__"):
+        return namespace.removeprefix("mcp__"), name.removeprefix(namespace + "__")
+    server, _, tool = name.removeprefix("mcp__").rpartition("__")
+    return (server, tool) if name.startswith("mcp__") and server else None
+
+
+def context_use(name: object, namespace: object, arguments: object) -> list[CaptureEvent]:
+    """A Pensieve call that names its context, wherever the call was routed.
+
+    Tools route by an explicit context_id, so the transcript itself shows every
+    company a conversation touched. The server records only calls it can tie to
+    this conversation; this also catches the rest: a hook that failed open, a
+    connection the hook does not bind, or Pensieve under another server name.
+    Capture state stops on a second context; nothing else is inferred.
+    """
+    call = mcp_tool(name, namespace)
+    if call is None:
+        return []
+    server, tool = call
+    if "pensieve" not in server.casefold() and tool not in COMPANY_TOOLS:
+        return []
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return []
+    if tool == "list_contexts" or (
+        tool == "info" and not (isinstance(arguments, dict) and arguments.get("inspect"))
+    ):
+        return []
+    context = arguments.get("context_id") if isinstance(arguments, dict) else None
+    if type(context) is not int or context <= 0:
+        return []
+    return [{"kind": "context_use", "context_id": context}]
 
 
 def capture_id(value: object) -> str | None:
@@ -185,7 +239,7 @@ def normalise(
     # Context receipts require accepted hook provenance, never text quoted by
     # a user, assistant, tool, hook error, or nested compaction history.
     for text in accepted_contexts(record, session, session, client):
-        marker = parse_marker(text, client, session, "prompt")
+        marker = parse_marker(text, client, session)
         if marker:
             result.append({"kind": "attribution", "marker": marker})
     if result:
@@ -217,6 +271,20 @@ def normalise(
             item = payload.get("item")
             if (
                 payload.get("thread_id") == session
+                and isinstance(item, dict)
+                and item.get("type") == "McpToolCall"
+                and isinstance(item.get("server"), str)
+                and isinstance(item.get("tool"), str)
+                and item.get("status") in {"completed", "failed"}
+            ):
+                # Context exposure applies to reads as well as writes, even
+                # when a code-mode wrapper hid the ordinary invocation record.
+                # It needs no turn match: any call in this thread is exposure.
+                result.extend(
+                    context_use(item["tool"], "mcp__" + item["server"], item.get("arguments"))
+                )
+            if (
+                payload.get("thread_id") == session
                 and payload.get("turn_id") == state.get("turn_id")
                 and isinstance(item, dict)
                 and item.get("type") == "McpToolCall"
@@ -244,36 +312,13 @@ def normalise(
                     return []
                 seen[item["id"]] = state.get("turn_id")
                 return [
+                    *result,
                     {
                         "kind": "tool_call",
                         "content": "mcp__pensieve__" + item["tool"],
                         "tool_call_id": item["id"],
-                    }
+                    },
                 ]
-            if (
-                payload.get("thread_id") == session
-                and payload.get("turn_id") == state.get("turn_id")
-                and isinstance(item, dict)
-                and item.get("type") == "McpToolCall"
-                and item.get("server") == "pensieve"
-                and item.get("tool") == "set_context"
-                and item.get("status") == "completed"
-                and not state.get("calls", {}).get(item.get("id"), {}).get("selection")
-            ):
-                # Nested code-mode calls have native MCP provenance even though
-                # the model-visible call is only exec/wait. Never infer a
-                # selection from JavaScript source or its combined output.
-                output = item.get("result")
-                if not isinstance(output, dict) or output.get("isError"):
-                    return []
-                text = visible_text(output.get("content"))
-                marker = parse_marker(text, client, session, "selection")
-                if marker:
-                    return [
-                        {"kind": "attribution", "marker": marker},
-                        {"kind": "tool_result", "content": text, "tool_call_id": item.get("id")},
-                    ]
-                return [{"kind": "unknown_boundary"}]
             if (
                 payload.get("thread_id") == session
                 and isinstance(item, dict)
@@ -284,7 +329,7 @@ def normalise(
                 text = visible_text(item.get("content"))
                 return [prompt(state, text, payload["turn_id"])] if text else []
         if record.get("type") != "response_item":
-            return []
+            return result
         kind = payload.get("type")
         if kind == "message" and payload.get("role") == "assistant":
             if payload.get("channel") not in {None, "commentary", "final"} or payload.get(
@@ -298,18 +343,17 @@ def normalise(
             internal = is_hook_tool(payload.get("name"), payload.get("namespace"))
             if isinstance(call, str):
                 state.setdefault("calls", {})[call] = {
-                    "selection": is_set_context(payload.get("name"), payload.get("namespace")),
                     "internal": internal,
                     "aggregate": is_code_mode_tool(payload.get("name"), payload.get("namespace")),
                 }
             if internal:
                 return []
             name = payload.get("name")
+            field = "arguments" if kind == "function_call" else "input"
             return (
                 [
-                    tool_call(
-                        name, call, payload, "arguments" if kind == "function_call" else "input"
-                    )
+                    *context_use(name, payload.get("namespace"), payload.get(field)),
+                    tool_call(name, call, payload, field),
                 ]
                 if isinstance(name, str)
                 else []
@@ -321,9 +365,9 @@ def normalise(
             if call.get("internal"):
                 return []
             if call.get("aggregate"):
-                # One exec/wait result can combine calls made before and after
-                # a selection, including concurrent or yielded work. Its text
-                # has no single proven company; retain only an omission notice.
+                # One exec/wait result can combine calls to several companies,
+                # including concurrent or yielded work. Its text has no single
+                # proven company; retain only an omission notice.
                 return [
                     {
                         "kind": "tool_result",
@@ -331,14 +375,6 @@ def normalise(
                         "content": "[Combined code-mode tool output omitted; original remains in the host conversation]",
                     }
                 ]
-            if call.get("selection"):
-                marker = parse_marker(text, client, session, "selection")
-                if marker:
-                    result.append({"kind": "attribution", "marker": marker})
-                else:
-                    # A selection result with no valid receipt could change
-                    # account/context; stop attributing later text to the old one.
-                    result.append({"kind": "unknown_boundary"})
             if text:
                 result.append(
                     {"kind": "tool_result", "content": text, "tool_call_id": payload.get("call_id")}
@@ -373,11 +409,9 @@ def normalise(
                 call, name = item.get("id"), item.get("name")
                 if isinstance(call, str) and isinstance(name, str):
                     internal = is_hook_tool(name)
-                    state.setdefault("calls", {})[call] = {
-                        "selection": is_set_context(name),
-                        "internal": internal,
-                    }
+                    state.setdefault("calls", {})[call] = {"internal": internal}
                     if not internal:
+                        result.extend(context_use(name, None, item.get("input")))
                         result.append(tool_call(name, call, item, "input"))
         return result
     if kind != "user" or payload.get("role") != "user":
@@ -414,14 +448,6 @@ def normalise(
         call = state.setdefault("calls", {}).pop(item.get("tool_use_id"), {})
         if call.get("internal"):
             continue
-        if call.get("selection"):
-            marker = (
-                None if item.get("is_error") else parse_marker(text, client, session, "selection")
-            )
-            if marker:
-                result.append({"kind": "attribution", "marker": marker})
-            elif not item.get("is_error"):
-                result.append({"kind": "unknown_boundary"})
         if text:
             result.append(
                 {"kind": "tool_result", "content": text, "tool_call_id": item.get("tool_use_id")}

@@ -11,7 +11,7 @@ import pytest
 from test_conversation_capture import SESSION, append, assistant, hook_record, pending, setup, user
 
 MANIFEST = {
-    "protocol_version": 1,
+    "protocol_version": 2,
     "service": "upload",
     "clients": ["codex", "claude"],
     "max_batch_bytes": 262144,
@@ -61,7 +61,7 @@ def test_incompatible_service_preserves_exact_outbox_then_recovers(tmp_path, mon
             self.wfile.write(raw)
 
         def do_POST(self):
-            assert self.headers[protocol.HEADER] == "1"
+            assert self.headers[protocol.HEADER] == "2"
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             state["uploads"].append(raw)
             batch = json.loads(raw)
