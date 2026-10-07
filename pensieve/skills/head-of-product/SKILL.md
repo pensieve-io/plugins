@@ -83,10 +83,15 @@ when the shift turns up something the company should keep and does not have:
 
 - customer evidence worth keeping that lives only in a tool Pensieve does not
   ingest → `save_data`, so it is cited like any other source.
-- a product or customer Page you have verified is wrong → `edit_page`, citing
-  what proves it.
+- a product or customer Page you have verified is wrong and existing Data
+  supports the fix → offer a cited `edit_page`, and apply it with the member's
+  agreement; do not save that evidence again.
 - a product decision a member has taken with you and wants kept as the record →
   `create_page` or `save_data` as fits, then offer a lock; never apply one they
   did not agree to.
 
+Announce new evidence or testimony in one line and save it with `save_data`
+through the harness's normal tool permissions. If you cannot tell which
+account is current, cite the discrepancy and ask. When updating a saved source,
+read it in full and preserve unaffected facts: a keyed save replaces it.
 Your own memos are not saved unless a member asks for that.
