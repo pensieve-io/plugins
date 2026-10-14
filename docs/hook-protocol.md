@@ -57,16 +57,24 @@ that conversation: Codex's `threadId` or a bound Claude tool-use ID. A host
 command timeout fails open, and other server names are never bound, so those
 calls reach the server unattributed. Claude desktop is the standing case: its
 connectors are named by an opaque id and relayed through claude.ai, which drops
-`_meta["claudecode/toolUseId"]`, so no binding can ever resolve. Claude briefing
-requests therefore also send `observed_context_ids`: up to eight companies, oldest
-first, that the conversation's own Pensieve calls named in the transcript tail,
-read with the capture parser. The server records one as exposure only when this
-account's own unbound call reached that company within the binding lifetime, and
-only for a live, unheld membership, so a look-alike tool, a development server or
-another account's call never starts saving. The briefing and saving then follow
-the company there too. The field is omitted when nothing was observed. The
-capture helper's transcript check remains the backstop: it reads every company
-call's `context_id` itself and stops saving locally at a second context.
+`_meta["claudecode/toolUseId"]`, so no binding can ever resolve.
+
+What every host keeps is the result. Pensieve opens each successful company
+result with a call stamp, as its own first content block:
+`<!-- pensieve-call context_id=497 sig=… -->`. Only the server can make or verify
+`sig`; it proves this account's call reached that company and grants nothing.
+Claude briefing requests send the distinct stamps that open tool results in the
+transcript tail as `call_stamps` (up to eight, oldest first), subagent records
+in the main transcript included. The server records each verified one as
+exposure, exactly as it would a bound call, so the briefing and saving follow
+the company there too. The field is omitted when there are none. Uploads keep
+stamps in tool results, because upload admission reads them as well. Only a
+result's first line counts: a stamp quoted inside company content proves
+nothing to the server, and locally it can only stop saving.
+
+The capture helper's transcript check remains the backstop: it reads every
+company call's `context_id`, and every stamped result's company, itself and
+stops saving locally at a second context.
 
 The plugin's dynamic-header helper creates its private proof before MCP connects
 and emits only `X-Pensieve-Plugin: <client> <proof>` as header JSON. Claude uses

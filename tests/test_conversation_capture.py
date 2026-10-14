@@ -2445,6 +2445,51 @@ def test_a_second_context_stops_saving_for_the_rest_of_the_conversation(
     assert {json.loads(batch["body"])["context_id"] for batch, _ in calls} == {497}
 
 
+def stamp(context_id):
+    return f"<!-- pensieve-call context_id={context_id} sig={'A' * 22} -->"
+
+
+def unnamed_call(client, call_id):
+    """A company call that names no context, such as a `read` of a Pensieve link."""
+    call = pensieve_call(client, call_id, 1, tool="read", server="dab7369f")
+    if client == "claude":
+        call["message"]["content"][0]["input"] = {"identifier": "page:1"}
+    else:
+        call["payload"]["arguments"] = json.dumps({"identifier": "page:1"})
+    return call
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_a_stamped_result_is_exposure_even_when_its_call_names_no_context(
+    tmp_path, monkeypatch, client
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client=client)
+    append(
+        path,
+        user("First company question", client),
+        hook_record(client=client),
+        pensieve_call(client, "a", 497),
+        pensieve_result(client, "a", f"{stamp(497)}\nFirst company result"),
+        # Company content quoting a stamp proves nothing.
+        pensieve_result(client, "q", f"Quoted page\n{stamp(12)}"),
+        assistant("First company answer", client),
+        user("Open this link", client),
+        hook_record(client=client),
+        unnamed_call(client, "b"),
+        pensieve_result(client, "b", f"{stamp(12)}\nSecond company secret"),
+        assistant("Second company answer", client),
+    )
+    run()
+    saved = [str(event["content"]) for event in events(calls)]
+    # The server reads the stamp from the uploaded result, so it is kept.
+    assert f"{stamp(497)}\nFirst company result" in saved
+    assert "First company answer" in saved
+    assert all("Second company" not in text for text in saved)
+    db = capture.connect_state(state, client, SESSION)
+    assert capture.load_state(db)["capture_stopped"] is True
+    db.close()
+
+
 def subagent_transcript(path, *lines):
     """A Claude subagent's transcript, stored beside its parent conversation's."""
     subagent = path.with_suffix("") / "subagents" / "agent-a1.jsonl"
@@ -2481,6 +2526,21 @@ def test_a_subagents_second_company_stops_saving_before_its_result_uploads(tmp_p
     )
     run()
     assert calls == [] and pending(state) == 0
+
+
+def test_a_subagents_stamped_result_stops_saving(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    append(path, user("Question", "claude"), hook_record(client="claude"))
+    run()
+    result = pensieve_result("claude", "s", f"{stamp(12)}\nSecond company page")
+    subagent_transcript(path, result | {"isSidechain": True})
+    append(
+        path,
+        pensieve_call("claude", "a", 497),
+        assistant("Relayed answer", "claude"),
+    )
+    run()
+    assert "Relayed answer" not in [event["content"] for event in events(calls)]
 
 
 def test_a_call_after_an_oversized_subagent_result_is_still_seen(tmp_path, monkeypatch):

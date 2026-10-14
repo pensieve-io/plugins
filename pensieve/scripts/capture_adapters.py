@@ -39,6 +39,12 @@ class CaptureEvent(EventFields):
 
 
 CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
+# Pensieve opens every company result with this stamp: proof, to the server
+# alone, that this account's call reached the company. Only the result's first
+# line counts, which company content can never occupy.
+CALL_STAMP = re.compile(
+    r"<!-- pensieve-call context_id=([1-9][0-9]{0,9}) sig=[A-Za-z0-9_-]{22} -->"
+)
 # The retired briefing tool, still excluded if an old server exposes it.
 HOOK_TOOL_NAMES = {
     "mcp__pensieve__context_briefing",
@@ -47,8 +53,6 @@ HOOK_TOOL_NAMES = {
 }
 # Pensieve's company tools. Under any server name they count as exposure when
 # they name a context: a false match only stops capture, the safe direction.
-# Briefings report these too, but the server records one only after this
-# account's own call reached that company, so a false match never starts saving.
 COMPANY_TOOLS = {
     "search",
     "read",
@@ -181,8 +185,7 @@ def context_use(name: object, namespace: object, arguments: object) -> list[Capt
     company a conversation touched. The server records only calls it can tie to
     this conversation; this also catches the rest: a hook that failed open, a
     connection the hook does not bind, or Pensieve under another server name.
-    Capture state stops on a second context; briefings report the rest for the
-    server to verify against its own calls.
+    Capture state stops on a second context; nothing else is inferred.
     """
     call = mcp_tool(name, namespace)
     if call is None:
@@ -205,8 +208,26 @@ def context_use(name: object, namespace: object, arguments: object) -> list[Capt
     return [{"kind": "context_use", "context_id": context}]
 
 
-def claude_call_contexts(record: dict, session: str) -> list[int]:
-    """Companies one Claude record's Pensieve calls name, a subagent's included.
+def leading_stamp(text: object) -> tuple[str, int] | None:
+    """A result's call stamp and the company it names, unverified."""
+    first = text.split("\n", 1)[0] if isinstance(text, str) else ""
+    match = CALL_STAMP.fullmatch(first)
+    return (first, int(match[1])) if match else None
+
+
+def stamp_use(text: object) -> list[CaptureEvent]:
+    """A stamped result is company exposure, whatever named the call.
+
+    It also catches calls that name no context: a `read` of Pensieve links, or
+    any tool for a member of one context. Unverified here, so a false stamp only
+    stops capture, the safe direction.
+    """
+    stamp = leading_stamp(text)
+    return [{"kind": "context_use", "context_id": stamp[1]}] if stamp else []
+
+
+def claude_blocks(record: dict, session: str, kind: str) -> list[dict]:
+    """A Claude record's content blocks, a subagent's included.
 
     Subagent records carry their parent conversation's session id. They are never
     captured, but their results return to it, so their company use counts too.
@@ -214,18 +235,33 @@ def claude_call_contexts(record: dict, session: str) -> list[int]:
     message = record.get("message")
     if (
         record.get("sessionId") != session
-        or record.get("type") != "assistant"
+        or record.get("type") != kind
         or not isinstance(message, dict)
         or not isinstance(message.get("content"), list)
     ):
         return []
+    return [item for item in message["content"] if isinstance(item, dict)]
+
+
+def claude_call_stamps(record: dict, session: str) -> list[tuple[str, int]]:
+    """The stamps one Claude record's tool results open with."""
     return [
+        stamp
+        for item in claude_blocks(record, session, "user")
+        if item.get("type") == "tool_result"
+        if (stamp := leading_stamp(visible_text(item.get("content"))))
+    ]
+
+
+def claude_call_contexts(record: dict, session: str) -> list[int]:
+    """Companies one Claude record's Pensieve calls name or results prove."""
+    named = [
         event["context_id"]
-        for item in message["content"]
-        if isinstance(item, dict) and item.get("type") == "tool_use"
-        if not is_hook_tool(item.get("name"))
+        for item in claude_blocks(record, session, "assistant")
+        if item.get("type") == "tool_use" and not is_hook_tool(item.get("name"))
         for event in context_use(item.get("name"), None, item.get("input"))
     ]
+    return named + [context for _, context in claude_call_stamps(record, session)]
 
 
 def capture_id(value: object) -> str | None:
@@ -401,6 +437,7 @@ def normalise(
                         "content": "[Combined code-mode tool output omitted; original remains in the host conversation]",
                     }
                 ]
+            result.extend(stamp_use(text))
             if text:
                 result.append(
                     {"kind": "tool_result", "content": text, "tool_call_id": payload.get("call_id")}
@@ -474,6 +511,7 @@ def normalise(
         call = state.setdefault("calls", {}).pop(item.get("tool_use_id"), {})
         if call.get("internal"):
             continue
+        result.extend(stamp_use(text))
         if text:
             result.append(
                 {"kind": "tool_result", "content": text, "tool_call_id": item.get("tool_use_id")}

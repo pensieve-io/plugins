@@ -149,35 +149,36 @@ def test_session_start_resets_receipt_and_delivery_scope(setup):
     assert calls[-1][3]["force_refresh"] is True
 
 
-DESKTOP_READ = "mcp__dab7369f-3bca-40e0-904e-73ba7cad3f0e__read"
-
-
 def use_claude(path):
     key = profile()
     key["client"] = "claude"
     config.install_profile(path, key)
 
 
-def transcript(tmp_path, *calls, session=SESSION, sidechain=False):
-    """A Claude transcript whose assistant turns make the given (tool, input) calls."""
+def stamp(context_id):
+    return f"<!-- pensieve-call context_id={context_id} sig={'A' * 22} -->"
+
+
+def transcript(tmp_path, *results, session=SESSION, sidechain=False):
+    """A Claude transcript whose tool results carry the given texts."""
     records = [
         {
-            "type": "assistant",
+            "type": "user",
             "sessionId": session,
             "isSidechain": sidechain,
             "message": {
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": f"toolu_{n}", "name": name, "input": args}],
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": f"toolu_{n}", "content": text}],
             },
         }
-        for n, (name, args) in enumerate(calls)
+        for n, text in enumerate(results)
     ]
     path = tmp_path / "transcript.jsonl"
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
     return str(path)
 
 
-def test_claude_briefing_reports_the_companies_its_transcript_used(setup, tmp_path):
+def test_claude_briefing_reports_the_stamps_its_results_carry(setup, tmp_path):
     """Claude desktop relays connector calls without their tool-use id, so none bind."""
     path, calls = setup
     use_claude(path)
@@ -185,17 +186,16 @@ def test_claude_briefing_reports_the_companies_its_transcript_used(setup, tmp_pa
         payload(),
         transcript_path=transcript(
             tmp_path,
-            (DESKTOP_READ, {"identifier": "page:1", "context_id": 529}),
-            ("mcp__other__search", {"query": "plan"}),
-            (DESKTOP_READ, {"identifier": "page:2", "context_id": 529}),
-            ("mcp__claude_ai_Pensieve__search", {"query": "plan", "context_id": 497}),
-            (DESKTOP_READ, {"identifier": "page:3", "context_id": 10**2000}),
-            (DESKTOP_READ, {"identifier": "page:4", "context_id": 601}),
+            f"{stamp(529)}\nPage one",
+            "An unrelated tool result",
+            [{"type": "text", "text": stamp(529)}, {"type": "text", "text": "Page two"}],
+            f"Quoted from a page\n{stamp(601)}",
+            f"{stamp(497)}\nSearch result",
         ),
     )
     briefing.run_hook(event, "claude", path)
-    # Oldest first, distinct, and only ids a context can have.
-    assert calls[-1][3]["observed_context_ids"] == [529, 497, 601]
+    # Distinct, oldest first, and only a result's first line.
+    assert calls[-1][3]["call_stamps"] == [stamp(529), stamp(497)]
 
 
 @pytest.mark.parametrize(
@@ -206,18 +206,19 @@ def test_claude_briefing_reports_the_companies_its_transcript_used(setup, tmp_pa
         ("codex", SESSION, False, False),
     ],
 )
-def test_only_a_claude_conversations_own_calls_are_reported(
+def test_only_a_claude_conversations_own_stamps_are_reported(
     setup, tmp_path, client, session, sidechain, reported
 ):
     path, calls = setup
     if client == "claude":
         use_claude(path)
-    read = (DESKTOP_READ, {"identifier": "page:1", "context_id": 529})
+    result = f"{stamp(529)}\nPage one"
     event = dict(
-        payload(), transcript_path=transcript(tmp_path, read, session=session, sidechain=sidechain)
+        payload(),
+        transcript_path=transcript(tmp_path, result, session=session, sidechain=sidechain),
     )
     briefing.run_hook(event, client, path)
-    assert ("observed_context_ids" in calls[-1][3]) is reported
+    assert ("call_stamps" in calls[-1][3]) is reported
 
 
 def test_claude_binding_registers_exact_call_before_tool_runs(setup):
