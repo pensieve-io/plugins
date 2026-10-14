@@ -51,6 +51,9 @@ STATE_PATH = Path.home() / ".local/state/pensieve/capture"
 MAX_INPUT_BYTES = 65536
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_SCAN_BYTES = 4 * 1024 * 1024
+# A subagent transcript opens with its own uuids and timestamps, so this many
+# bytes tell a replacement from the file already read.
+SUBAGENT_IDENTITY_BYTES = 4096
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
 
@@ -438,11 +441,13 @@ def observe_subagents(db, state, path: Path, session: str, deadline: float) -> b
             details = os.fstat(handle.fileno())
             if not stat.S_ISREG(details.st_mode):
                 continue
-            file_id = [details.st_dev, details.st_ino]
+            # Identify the file by its opening bytes: an inode can be reused at
+            # once. A replaced or truncated file is reread whole, which only adds
+            # companies.
+            opening = hashlib.sha256(handle.read(SUBAGENT_IDENTITY_BYTES)).hexdigest()
             known = offsets.get(transcript.name)
-            # A replaced or truncated file is reread whole: that only adds companies.
-            if known and known[:2] == file_id and known[2] <= details.st_size:
-                handle.seek(known[2])
+            fresh = not known or known[0] != opening or known[1] > details.st_size
+            handle.seek(0 if fresh else known[1])
             while True:
                 line = handle.readline(MAX_RECORD_BYTES + 1)
                 if line and (len(line) > budget or time.monotonic() >= deadline):
@@ -455,7 +460,7 @@ def observe_subagents(db, state, path: Path, session: str, deadline: float) -> b
                 if record := json_object(line):
                     for context in claude_call_contexts(record, session):
                         record_context_use(db, state, context)
-                offsets[transcript.name] = [*file_id, handle.tell()]
+                offsets[transcript.name] = [opening, handle.tell()]
                 if state.get("capture_stopped"):
                     return True
     return True
