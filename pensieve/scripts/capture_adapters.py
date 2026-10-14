@@ -47,6 +47,8 @@ HOOK_TOOL_NAMES = {
 }
 # Pensieve's company tools. Under any server name they count as exposure when
 # they name a context: a false match only stops capture, the safe direction.
+# Briefings report these too, but the server records one only after this
+# account's own call reached that company, so a false match never starts saving.
 COMPANY_TOOLS = {
     "search",
     "read",
@@ -179,7 +181,8 @@ def context_use(name: object, namespace: object, arguments: object) -> list[Capt
     company a conversation touched. The server records only calls it can tie to
     this conversation; this also catches the rest: a hook that failed open, a
     connection the hook does not bind, or Pensieve under another server name.
-    Capture state stops on a second context; nothing else is inferred.
+    Capture state stops on a second context; briefings report the rest for the
+    server to verify against its own calls.
     """
     call = mcp_tool(name, namespace)
     if call is None:
