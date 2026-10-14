@@ -52,12 +52,20 @@ correlation only: the server still authenticates each call's OAuth account. With
 a credential, expected failures deny the call. Codex supplies `_meta.threadId`
 directly and needs no per-tool binding request.
 
-The server records a conversation's company exposure only for calls it can tie
-to that conversation: Codex's `threadId` or a bound Claude tool-use ID. A host
+The server records a conversation's company exposure for calls it can tie to
+that conversation: Codex's `threadId` or a bound Claude tool-use ID. A host
 command timeout fails open, and other server names are never bound, so those
-calls reach the server unattributed. The capture helper's transcript check is
-the backstop: it reads every company call's `context_id` itself and stops saving
-locally at a second context.
+calls reach the server unattributed. Claude desktop is the standing case: its
+connectors are named by an opaque id and relayed through claude.ai, which drops
+`_meta["claudecode/toolUseId"]`, so no binding can ever resolve. Claude briefing
+requests therefore also send `observed_context_ids`: the first two companies the
+conversation's own Pensieve calls named in the transcript tail, read with the
+capture parser. The server records them as exposure exactly as it would bound
+calls, limited to the user's live, unheld memberships, so the briefing and
+saving follow the company there too. The field is omitted when nothing was
+observed. The capture helper's transcript check remains the backstop: it reads
+every company call's `context_id` itself and stops saving locally at a second
+context.
 
 The plugin's dynamic-header helper creates its private proof before MCP connects
 and emits only `X-Pensieve-Plugin: <client> <proof>` as header JSON. Claude uses

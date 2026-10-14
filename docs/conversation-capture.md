@@ -109,7 +109,12 @@ calls it can tie to the conversation (Codex's thread ID or a bound Claude
 tool-use ID), so the helper also reads company tool calls' `context_id` from the
 transcript, whichever connection carried them: any MCP server whose name contains
 "pensieve", and Pensieve's company tool names on any other server. This is the
-backstop when a binding hook fails open or a connection is never bound. Generic
+backstop when a binding hook fails open or a connection is never bound, which
+is every call through Claude desktop's connectors. Claude subagents' transcripts
+(`<session>/subagents/agent-*.jsonl`) are read for company calls too: they are
+never captured, but their results return to the conversation. Nothing uploads
+while unread subagent bytes remain, and a subagent record too large to inspect
+withdraws the turn in progress, since it may hide a call. Generic
 help and `list_contexts()` are discovery, not company exposure.
 Authenticated briefing contexts persist across account and consent changes;
 turning sharing off does not remove a briefing from the model's working memory.
