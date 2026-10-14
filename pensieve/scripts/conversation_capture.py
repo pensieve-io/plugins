@@ -25,7 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_adapters import aware_time, normalise
+from capture_adapters import aware_time, claude_call_contexts, normalise
 from capture_config import (
     credential_revocations,
     encoded,
@@ -35,8 +35,16 @@ from capture_config import (
     profiles,
 )
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
-from capture_state import apply_item, block, discard_conversation, migrate_state, scope_revoked
-from context_receipt import conversation_id
+from capture_state import (
+    apply_item,
+    block,
+    discard_conversation,
+    migrate_state,
+    record_context_use,
+    scope_revoked,
+    withdraw_turn,
+)
+from context_receipt import conversation_id, json_object
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
 CONFIG_PATH = Path.home() / ".config/pensieve/capture.json"
@@ -409,6 +417,53 @@ def scan(
             ]
 
 
+def observe_subagents(db, state, path: Path, session: str, deadline: float) -> bool:
+    """Count company calls made inside this Claude conversation's subagents.
+
+    Their transcripts sit beside the conversation's and are never captured, but
+    their results return to it. A second company there must stop saving before
+    this hook uploads the turn that relayed it, since Claude desktop's relayed
+    connector calls never reach the server with this conversation's identity.
+    Returns False while unread subagent bytes remain, so nothing uploads past them.
+    """
+    offsets = state.setdefault("subagent_offsets", {})
+    budget = MAX_SCAN_BYTES
+    for transcript in sorted(path.with_suffix("").glob("subagents/agent-*.jsonl")):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            handle = os.fdopen(os.open(transcript, flags), "rb")
+        except OSError:
+            continue
+        with handle:
+            details = os.fstat(handle.fileno())
+            if not stat.S_ISREG(details.st_mode):
+                continue
+            offset = offsets.get(transcript.name, 0)
+            # A replaced file is reread whole: rereading can only add companies.
+            handle.seek(offset if offset <= details.st_size else 0)
+            while True:
+                if budget <= 0 or time.monotonic() >= deadline:
+                    return False
+                line = handle.readline(MAX_RECORD_BYTES + 1)
+                budget -= len(line)
+                if not line.endswith(b"\n") and len(line) <= MAX_RECORD_BYTES:
+                    break  # End of file, or a record the host has yet to finish.
+                if len(line) > MAX_RECORD_BYTES:
+                    # Too large to inspect, so it may hide a call: the turn in
+                    # progress is withdrawn rather than uploaded.
+                    while line and not line.endswith(b"\n"):
+                        line = handle.readline(MAX_RECORD_BYTES)
+                    withdraw_turn(db, state)
+                    block(db, state, "oversized_record")
+                elif record := json_object(line):
+                    for context in claude_call_contexts(record, session):
+                        record_context_use(db, state, context)
+                offsets[transcript.name] = handle.tell()
+                if state.get("capture_stopped"):
+                    return True
+    return True
+
+
 def next_batch(db, segment, client, session):
     existing = db.execute("SELECT * FROM batches WHERE segment=?", (segment["id"],)).fetchone()
     if existing:
@@ -702,9 +757,15 @@ def capture_session(
                     )
                     state.pop("capture_paused", None)
                 source_error = exc
+        observed = (
+            client != "claude"
+            or not isinstance(path, str)
+            or observe_subagents(db, state, Path(path), session, deadline)
+        )
         save_state(db, state)
         db.commit()
-        flush(db, configured, client, session, endpoint, deadline)
+        if observed:
+            flush(db, configured, client, session, endpoint, deadline)
     finally:
         db.close()
     return source_error

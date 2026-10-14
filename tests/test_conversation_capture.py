@@ -2445,6 +2445,82 @@ def test_a_second_context_stops_saving_for_the_rest_of_the_conversation(
     assert {json.loads(batch["body"])["context_id"] for batch, _ in calls} == {497}
 
 
+def subagent_transcript(path, *lines):
+    """A Claude subagent's transcript, stored beside its parent conversation's."""
+    subagent = path.with_suffix("") / "subagents" / "agent-a1.jsonl"
+    subagent.parent.mkdir(parents=True, exist_ok=True)
+    with subagent.open("ab") as handle:
+        for line in lines:
+            handle.write(line if isinstance(line, bytes) else json.dumps(line).encode() + b"\n")
+
+
+def subagent_call(call_id, context_id):
+    return {**pensieve_call("claude", call_id, context_id, server="dab7369f"), "isSidechain": True}
+
+
+def test_a_subagents_second_company_stops_saving_before_its_result_uploads(tmp_path, monkeypatch):
+    """Claude desktop's relayed calls never reach the server with this conversation."""
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    append(
+        path,
+        user("First company question", "claude"),
+        hook_record(client="claude"),
+        pensieve_call("claude", "a", 497),
+        assistant("First company answer", "claude"),
+    )
+    run()
+    assert "First company answer" in [event["content"] for event in events(calls)]
+    calls.clear()
+    subagent_transcript(path, subagent_call("s", 12))
+    append(
+        path,
+        user("Research the other company", "claude"),
+        hook_record(client="claude"),
+        pensieve_result("claude", "task", "Subagent found the second company secret"),
+        assistant("Relayed answer", "claude"),
+    )
+    run()
+    assert calls == [] and pending(state) == 0
+
+
+def test_an_uninspectable_subagent_record_withholds_the_turn(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    subagent_transcript(path, b"x" * (capture.MAX_RECORD_BYTES + 1) + b"\n")
+    append(
+        path,
+        user("Question", "claude"),
+        hook_record(client="claude"),
+        assistant("Answer that may relay anything", "claude"),
+    )
+    run()
+    assert calls == []
+    # Later turns save again once a fresh prompt is attributed.
+    append(
+        path,
+        user("Next question", "claude"),
+        hook_record(client="claude"),
+        assistant("Next answer", "claude"),
+    )
+    run()
+    assert [event["content"] for event in events(calls)][-1] == "Next answer"
+
+
+def test_unread_subagent_bytes_hold_uploads_until_they_are_read(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    filler = assistant("Subagent working " + "x" * 4000, "claude") | {"isSidechain": True}
+    subagent_transcript(path, *[filler] * (capture.MAX_SCAN_BYTES // 4000 + 10))
+    append(
+        path,
+        user("Question", "claude"),
+        hook_record(client="claude"),
+        assistant("Answer", "claude"),
+    )
+    run()
+    assert calls == []
+    run()
+    assert [event["content"] for event in events(calls)][-1] == "Answer"
+
+
 @pytest.mark.parametrize("client", ["codex", "claude"])
 def test_a_marker_after_tools_used_another_context_saves_nothing(tmp_path, monkeypatch, client):
     """An unbound connection's call never reached the server, so its marker lags."""
