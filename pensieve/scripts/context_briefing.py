@@ -55,8 +55,10 @@ class NoRedirects(HTTPRedirectHandler):
 
 MAX_RESPONSE_BYTES = 32 * 1024
 HTTP_TIMEOUT_SECONDS = 3
-# A second company stops saving for good, so the server needs no more than two.
-MAX_OBSERVED_CONTEXTS = 2
+# The server records only companies it can prove, so a few spares let a second
+# real company through after unproven ones. Context ids are Postgres integers.
+MAX_OBSERVED_CONTEXTS = 8
+MAX_CONTEXT_ID = 2**31 - 1
 
 
 def checked_endpoint(value: str) -> str:
@@ -122,7 +124,7 @@ def observed_contexts(transcript_path: object, session: str) -> list[int]:
     for line in tail[0] if tail else []:
         record = json_object(line)
         for context in claude_call_contexts(record, session) if record else []:
-            if context not in seen:
+            if context <= MAX_CONTEXT_ID and context not in seen:
                 seen.append(context)
                 if len(seen) == MAX_OBSERVED_CONTEXTS:
                     return seen

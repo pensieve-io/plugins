@@ -58,14 +58,15 @@ command timeout fails open, and other server names are never bound, so those
 calls reach the server unattributed. Claude desktop is the standing case: its
 connectors are named by an opaque id and relayed through claude.ai, which drops
 `_meta["claudecode/toolUseId"]`, so no binding can ever resolve. Claude briefing
-requests therefore also send `observed_context_ids`: the first two companies the
-conversation's own Pensieve calls named in the transcript tail, read with the
-capture parser. The server records them as exposure exactly as it would bound
-calls, limited to the user's live, unheld memberships, so the briefing and
-saving follow the company there too. The field is omitted when nothing was
-observed. The capture helper's transcript check remains the backstop: it reads
-every company call's `context_id` itself and stops saving locally at a second
-context.
+requests therefore also send `observed_context_ids`: up to eight companies, oldest
+first, that the conversation's own Pensieve calls named in the transcript tail,
+read with the capture parser. The server records one as exposure only when this
+account's own unbound call reached that company within the binding lifetime, and
+only for a live, unheld membership, so a look-alike tool, a development server or
+another account's call never starts saving. The briefing and saving then follow
+the company there too. The field is omitted when nothing was observed. The
+capture helper's transcript check remains the backstop: it reads every company
+call's `context_id` itself and stops saving locally at a second context.
 
 The plugin's dynamic-header helper creates its private proof before MCP connects
 and emits only `X-Pensieve-Plugin: <client> <proof>` as header JSON. Claude uses

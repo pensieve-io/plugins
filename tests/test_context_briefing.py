@@ -189,12 +189,13 @@ def test_claude_briefing_reports_the_companies_its_transcript_used(setup, tmp_pa
             ("mcp__other__search", {"query": "plan"}),
             (DESKTOP_READ, {"identifier": "page:2", "context_id": 529}),
             ("mcp__claude_ai_Pensieve__search", {"query": "plan", "context_id": 497}),
-            (DESKTOP_READ, {"identifier": "page:3", "context_id": 601}),
+            (DESKTOP_READ, {"identifier": "page:3", "context_id": 10**2000}),
+            (DESKTOP_READ, {"identifier": "page:4", "context_id": 601}),
         ),
     )
     briefing.run_hook(event, "claude", path)
-    # Oldest first and only two: the second company already stops saving.
-    assert calls[-1][3]["observed_context_ids"] == [529, 497]
+    # Oldest first, distinct, and only ids a context can have.
+    assert calls[-1][3]["observed_context_ids"] == [529, 497, 601]
 
 
 @pytest.mark.parametrize(
