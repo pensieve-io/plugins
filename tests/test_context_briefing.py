@@ -158,66 +158,106 @@ def use_claude(path):
     config.install_profile(path, key)
 
 
-def transcript(tmp_path, *calls, session=SESSION, sidechain=False):
-    """A Claude transcript whose assistant turns make the given (tool, input) calls."""
-    records = [
-        {
-            "type": "assistant",
-            "sessionId": session,
-            "isSidechain": sidechain,
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": f"toolu_{n}", "name": name, "input": args}],
-            },
-        }
-        for n, (name, args) in enumerate(calls)
-    ]
+def receipt_response(token="c" * 64, context=529):
+    return [{"type": "text", "text": f"<!-- pensieve-call token={token} context_id={context} -->"}]
+
+
+def transcript(tmp_path, *, session=SESSION):
+    records = []
+    for index, context in enumerate([529, 497, 529]):
+        tool_id = f"toolu_{index}"
+        records.extend(
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": session,
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": DESKTOP_READ,
+                                "input": {"context_id": context},
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "sessionId": session,
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_id,
+                                "content": receipt_response(str(index) * 64, context),
+                            }
+                        ]
+                    },
+                },
+            ]
+        )
     path = tmp_path / "transcript.jsonl"
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
     return str(path)
 
 
-def test_claude_briefing_reports_the_companies_its_transcript_used(setup, tmp_path):
-    """Claude desktop relays connector calls without their tool-use id, so none bind."""
+def test_claude_briefing_retries_exact_results_and_preserves_latest_use(setup, tmp_path):
     path, calls = setup
     use_claude(path)
-    event = dict(
-        payload(),
-        transcript_path=transcript(
-            tmp_path,
-            (DESKTOP_READ, {"identifier": "page:1", "context_id": 529}),
-            ("mcp__other__search", {"query": "plan"}),
-            (DESKTOP_READ, {"identifier": "page:2", "context_id": 529}),
-            ("mcp__claude_ai_Pensieve__search", {"query": "plan", "context_id": 497}),
-            (DESKTOP_READ, {"identifier": "page:3", "context_id": 10**2000}),
-            (DESKTOP_READ, {"identifier": "page:4", "context_id": 601}),
-        ),
-    )
-    briefing.run_hook(event, "claude", path)
-    # Oldest first, distinct, and only ids a context can have.
-    assert calls[-1][3]["observed_context_ids"] == [529, 497, 601]
+    briefing.run_hook(dict(payload(), transcript_path=transcript(tmp_path)), "claude", path)
+    assert calls[-1][3]["call_receipts"] == ["0" * 64, "1" * 64, "2" * 64]
 
 
-@pytest.mark.parametrize(
-    "client,session,sidechain,reported",
-    [
-        ("claude", SESSION, True, True),  # A subagent's result returns to this conversation.
-        ("claude", OTHER, False, False),
-        ("codex", SESSION, False, False),
-    ],
-)
-def test_only_a_claude_conversations_own_calls_are_reported(
-    setup, tmp_path, client, session, sidechain, reported
-):
+@pytest.mark.parametrize("client,session", [("claude", OTHER), ("codex", SESSION)])
+def test_other_sessions_and_codex_do_not_report_claude_results(setup, tmp_path, client, session):
     path, calls = setup
     if client == "claude":
         use_claude(path)
-    read = (DESKTOP_READ, {"identifier": "page:1", "context_id": 529})
-    event = dict(
-        payload(), transcript_path=transcript(tmp_path, read, session=session, sidechain=sidechain)
+    briefing.run_hook(
+        dict(payload(), transcript_path=transcript(tmp_path, session=session)), client, path
     )
-    briefing.run_hook(event, client, path)
-    assert ("observed_context_ids" in calls[-1][3]) is reported
+    assert "call_receipts" not in calls[-1][3]
+
+
+def test_native_post_tool_hook_claims_the_actual_result_without_injecting_text(setup):
+    path, calls = setup
+    use_claude(path)
+    event = dict(
+        payload("PostToolUse"),
+        tool_name=DESKTOP_READ,
+        tool_use_id="native-call",
+        tool_response=receipt_response(),
+    )
+    assert briefing.run_hook(event, "claude", path) == {}
+    assert calls[-1][3] == {"client": "claude", "session_id": SESSION, "call_receipt": "c" * 64}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "<!-- pensieve-call token=" + "c" * 64 + " context_id=529 -->",
+        [
+            {
+                "type": "text",
+                "text": "quoted <!-- pensieve-call token=" + "c" * 64 + " context_id=529 -->",
+            }
+        ],
+        {"isError": True, "content": receipt_response()},
+        {"content": [{"type": "text", "text": "ordinary company result"}]},
+    ],
+)
+def test_unproven_or_failed_results_do_not_observe_context(setup, response):
+    path, calls = setup
+    use_claude(path)
+    event = dict(
+        payload("PostToolUse"),
+        tool_name=DESKTOP_READ,
+        tool_use_id="native-call",
+        tool_response=response,
+    )
+    assert briefing.run_hook(event, "claude", path) == {}
+    assert calls == []
 
 
 def test_claude_binding_registers_exact_call_before_tool_runs(setup):
@@ -391,3 +431,12 @@ def test_parallel_claude_calls_bind_independently_of_lifecycle_lock(setup, monke
         results = list(executor.map(call, ["toolu_one", "toolu_two"]))
     assert results == [{}, {}]
     assert set(bound) == {"toolu_one", "toolu_two"}
+
+
+def test_call_receipt_is_not_saved_as_company_transcript_content():
+    from capture_adapters import visible_text
+
+    assert (
+        visible_text([{"type": "text", "text": "company result"}] + receipt_response())
+        == "company result"
+    )

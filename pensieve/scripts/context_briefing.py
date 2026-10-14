@@ -18,7 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_adapters import claude_call_contexts
+from call_receipts import BOUND_TOOL_PREFIXES, result_receipt, transcript_receipts
 from capture_config import (
     CONFIG_PATH,
     MAX_CONFIG_BYTES,
@@ -35,7 +35,6 @@ from context_receipt import (
     json_object,
     latest_receipt,
     send_receipt,
-    transcript_tail,
 )
 from plugin_connection import (
     CONNECTION_ENDPOINT,
@@ -55,10 +54,6 @@ class NoRedirects(HTTPRedirectHandler):
 
 MAX_RESPONSE_BYTES = 32 * 1024
 HTTP_TIMEOUT_SECONDS = 3
-# The server records only companies it can prove, so a few spares let a second
-# real company through after unproven ones. Context ids are Postgres integers.
-MAX_OBSERVED_CONTEXTS = 8
-MAX_CONTEXT_ID = 2**31 - 1
 
 
 def checked_endpoint(value: str) -> str:
@@ -111,26 +106,6 @@ def request(
         return "unavailable", None
 
 
-def observed_contexts(transcript_path: object, session: str) -> list[int]:
-    """Companies this Claude conversation's own Pensieve calls named, oldest first.
-
-    Claude desktop relays connector calls without their tool-use id, so no
-    `PreToolUse` binding can tie them to this conversation on the server. The
-    transcript still shows each call's explicit `context_id`, read as capture reads
-    it. A bounded tail suffices: every prompt reports the turns before it.
-    """
-    tail = transcript_tail(transcript_path)
-    seen: list[int] = []
-    for line in tail[0] if tail else []:
-        record = json_object(line)
-        for context in claude_call_contexts(record, session) if record else []:
-            if context <= MAX_CONTEXT_ID and context not in seen:
-                seen.append(context)
-                if len(seen) == MAX_OBSERVED_CONTEXTS:
-                    return seen
-    return seen
-
-
 def state_path(config: Path, client: str, session: str) -> Path:
     return config.parent / "briefing" / f"{client}-{session}.json"
 
@@ -151,12 +126,12 @@ def read_state(path: Path) -> dict:
 
 
 PLUGIN_TOOL_PREFIX = "mcp__plugin_pensieve_pensieve__"
-# The plugin's server, the claude.ai connector and a server added by hand as
-# `pensieve`. Only the plugin's tools are checked against native provenance.
-BOUND_TOOL_PREFIXES = (PLUGIN_TOOL_PREFIX, "mcp__claude_ai_Pensieve__", "mcp__pensieve__")
+# Only the plugin's tools carry a known native provenance to verify.
 
 
 def failure(event: str, client: str, session: str | None, reason: str = "") -> dict:
+    if event == "PostToolUse":
+        return {}
     if event == "PreToolUse":
         return {
             "hookSpecificOutput": {
@@ -185,14 +160,16 @@ def run_hook(
     connection_endpoint: str = CONNECTION_ENDPOINT,
 ) -> dict:
     event = payload.get("hook_event_name")
-    if event not in {"SessionStart", "UserPromptSubmit", "PreToolUse"}:
+    if event not in {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}:
         return {}
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return failure(event, client, None)
-    if event == "PreToolUse":
+    if event in {"PreToolUse", "PostToolUse"}:
         tool = str(payload.get("tool_name", ""))
-        if client != "claude" or not tool.startswith(BOUND_TOOL_PREFIXES):
+        if client != "claude" or not tool.startswith(
+            "mcp__" if event == "PostToolUse" else BOUND_TOOL_PREFIXES
+        ):
             return {}
         # Other Pensieve connections are bound too, so their calls carry this
         # conversation. A binding is correlation only: the server still
@@ -207,6 +184,10 @@ def run_hook(
         tool_id = payload.get("tool_use_id")
         if not isinstance(tool_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", tool_id):
             return failure(event, client, session)
+        if event == "PostToolUse":
+            receipt = result_receipt(payload.get("tool_response"))
+            if receipt is None:
+                return {}
     # The native MCP header helper reads this same private proof on connect.
     # Missing registration never launches another authentication flow or leaks
     # a secret through hook output. The member uses the harness's normal login.
@@ -215,9 +196,21 @@ def run_hook(
     if profile is None:
         return (
             {}
-            if event == "PreToolUse"
+            if event in {"PreToolUse", "PostToolUse"}
             else failure(event, client, session, connect_message(client))
         )
+    if event == "PostToolUse":
+        code, _ = request(
+            binding_endpoint,
+            key,
+            {"client": client, "session_id": session, "call_receipt": receipt[0]},
+        )
+        if code != 204:
+            print(
+                "Pensieve call observation unavailable; the next prompt retries from the transcript.",
+                file=sys.stderr,
+            )
+        return {}
     if event == "PreToolUse":
         code, _ = request(
             binding_endpoint, key, {"client": client, "session_id": session, "tool_use_id": tool_id}
@@ -250,9 +243,9 @@ def run_hook(
         # Codex names its thread on every call, so only Claude needs this. Sent
         # only when present, so a conversation with no company call is unchanged.
         if client == "claude":
-            observed = observed_contexts(payload.get("transcript_path"), session)
+            observed = transcript_receipts(payload.get("transcript_path"), session)
             if observed:
-                body["observed_context_ids"] = observed
+                body["call_receipts"] = observed
         source = payload.get("source")
         if isinstance(source, str) and len(source) <= 100:
             body["source"] = source

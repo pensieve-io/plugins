@@ -52,21 +52,39 @@ correlation only: the server still authenticates each call's OAuth account. With
 a credential, expected failures deny the call. Codex supplies `_meta.threadId`
 directly and needs no per-tool binding request.
 
-The server records a conversation's company exposure for calls it can tie to
-that conversation: Codex's `threadId` or a bound Claude tool-use ID. A host
-command timeout fails open, and other server names are never bound, so those
-calls reach the server unattributed. Claude desktop is the standing case: its
-connectors are named by an opaque id and relayed through claude.ai, which drops
-`_meta["claudecode/toolUseId"]`, so no binding can ever resolve. Claude briefing
-requests therefore also send `observed_context_ids`: up to eight companies, oldest
-first, that the conversation's own Pensieve calls named in the transcript tail,
-read with the capture parser. The server records one as exposure only when this
-account's own unbound call reached that company within the binding lifetime, and
-only for a live, unheld membership, so a look-alike tool, a development server or
-another account's call never starts saving. The briefing and saving then follow
-the company there too. The field is omitted when nothing was observed. The
-capture helper's transcript check remains the backstop: it reads every company
-call's `context_id` itself and stops saving locally at a second context.
+Codex's `threadId` and bound Claude tool-use IDs attribute exposure before the
+company operation. Relays can omit those IDs. A successful unbound company
+result therefore ends with a dedicated text block:
+`<!-- pensieve-call token=<64 hex characters> context_id=<id> -->`.
+The token is an opaque, one-hour receipt for that authenticated call; it grants
+no access. The context id is only a local deduplication hint: the server obtains
+the authoritative company from its receipt record.
+
+Claude `PostToolUse` matches MCP results (including opaque desktop connector
+names), reads only the final complete receipt block and sends
+`{client: "claude", session_id, call_receipt}` to `/hooks/tool-binding`.
+No briefing is injected after each tool. The next prompt loads the updated
+focus. If delivery fails, SessionStart/UserPromptSubmit retries up to eight
+`call_receipts` from native tool-result records in the bounded transcript tail,
+retaining the first receipt per distinct company plus the latest result. Calls
+without results, ordinary user/assistant text and error results prove nothing.
+The server checks account ownership, live membership and service hold; each
+receipt can be claimed by only one conversation. Retries in that conversation
+retain the original server timestamp, so they cannot rewind its focus.
+
+The latest verified company drives briefings and the new-conversation suggestion.
+The first company remains capture's sole destination; a second permanently
+stops capture while briefings continue to follow use. New multi-company chats
+get a roster and suggestion, not a guessed root. The capture helper continues
+its full transcript/subagent audit before upload; bounded briefing recovery
+never substitutes for that audit.
+
+Native Claude Code 2.1.299 verified PostToolUse's conversation and text content
+but drops result `_meta`, hence the text receipt. Desktop relay acceptance still
+needs a real host check: UI automation on 14 October failed with
+`noWindowsAvailable` and screen-capture errors. Deploy backend PR #1243 and its
+additive focus schema before releasing this plugin; older backends reject
+`call_receipt` and `call_receipts`.
 
 The plugin's dynamic-header helper creates its private proof before MCP connects
 and emits only `X-Pensieve-Plugin: <client> <proof>` as header JSON. Claude uses

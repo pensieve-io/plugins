@@ -37,6 +37,7 @@ class ModelStub(BaseHTTPRequestHandler):
     capture_requests: ClassVar[list[dict[str, Any]]] = []
     briefing_requests: ClassVar[list[dict[str, Any]]] = []
     binding_requests: ClassVar[list[dict[str, Any]]] = []
+    tool_results: ClassVar[list[dict[str, Any]]] = []
     capture_enabled = False
     fail_hook: bool = False
     interrupt_waiting = threading.Event()
@@ -70,6 +71,10 @@ class ModelStub(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         body = json.loads(raw)
+        if self.path == "/probe/tool-result":
+            self.tool_results.append(body)
+            self.reply_json({})
+            return
         if self.path == "/hooks/briefing":
             assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
             self.briefing_requests.append(body)
@@ -104,7 +109,8 @@ class ModelStub(BaseHTTPRequestHandler):
         if self.path == "/hooks/tool-binding":
             assert self.headers.get("Authorization") == "Bearer " + CAPTURE_KEY
             self.binding_requests.append(body)
-            self.send_response(204)
+            # Exercise transcript recovery after a native PostToolUse outage.
+            self.send_response(503 if body.get("call_receipt") else 204)
             self.end_headers()
             return
         if self.path == "/hooks/conversations":
@@ -156,10 +162,19 @@ class ModelStub(BaseHTTPRequestHandler):
             elif method == "tools/call":
                 meta = body.get("params", {}).get("_meta", {})
                 assert any(
-                    binding["tool_use_id"] == meta.get("claudecode/toolUseId")
+                    binding.get("tool_use_id") == meta.get("claudecode/toolUseId")
                     for binding in self.binding_requests
                 ), "ordinary call preceded binding"
-                result = {"content": [{"type": "text", "text": "Synthetic ordinary result."}]}
+                result = {
+                    "content": [
+                        {"type": "text", "text": "Synthetic ordinary result."},
+                        {
+                            "type": "text",
+                            "text": "<!-- pensieve-call token=" + "c" * 64 + " context_id=497 -->",
+                        },
+                    ],
+                    "_meta": {"pensieve_probe": "metadata"},
+                }
             else:
                 result = {}
             self.mcp_requests.append(
@@ -439,6 +454,19 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                         hook["command"] += (
                             f' --config "{capture_config}" --state "{root / "capture-spool"}" --endpoint http://127.0.0.1:{server.server_port}/hooks/conversations'
                         )
+        observer = root / "observe_result.py"
+        observer.write_text(
+            "import json,sys,urllib.request\n"
+            "payload=json.load(sys.stdin)\n"
+            f"urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:{server.server_port}/probe/tool-result', data=json.dumps(payload).encode(), headers={{'Content-Type':'application/json'}})).read()\n"
+            "print('{}')\n"
+        )
+        hooks["hooks"].setdefault("PostToolUse", []).append(
+            {
+                "matcher": "^mcp__plugin_pensieve_pensieve__.*$",
+                "hooks": [{"type": "command", "command": f"python3 {observer}", "timeout": 5}],
+            }
+        )
         hook_path.write_text(json.dumps(hooks))
         mcp_path = plugin / ".mcp.json"
         mcp = json.loads(mcp_path.read_text())
@@ -477,6 +505,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
         )
         session = str(uuid.uuid4())
         failed_session = str(uuid.uuid4())
+        ordinary_session = str(uuid.uuid4())
         common = [
             claude,
             "-p",
@@ -509,7 +538,12 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                 ("compact", ["--resume", session], "/compact"),
                 ("after_compact", ["--resume", session], "Synthetic post-compaction prompt."),
                 ("fork", ["--resume", session, "--fork-session"], "Synthetic fork prompt."),
-                ("ordinary_tool", [], "Synthetic ordinary tool probe."),
+                (
+                    "ordinary_tool",
+                    ["--session-id", ordinary_session],
+                    "Synthetic ordinary tool probe.",
+                ),
+                ("after_ordinary", ["--resume", ordinary_session], "Synthetic recovery prompt."),
                 ("hook_failure", ["--session-id", failed_session], "Synthetic failed hook."),
                 ("retry_after_failure", ["--resume", failed_session], "Synthetic retry hook."),
             ]:
@@ -564,6 +598,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                     }
                 )
             report["stream_cases"] = stream_probe(common, env, root)
+            report["tool_result_observations"] = ModelStub.tool_results
             report["mcp_events"] = ModelStub.mcp_requests
             report["briefing_requests"] = ModelStub.briefing_requests
             report["binding_requests"] = ModelStub.binding_requests
@@ -609,6 +644,7 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                     "no_hook_or_reasoning_payload": all(
                         "pensieve-capture-context" not in event["content"]
                         and "pensieve-delivery" not in event["content"]
+                        and "pensieve-call" not in event["content"]
                         and "hookSpecificOutput" not in event["content"]
                         and "<command-name>" not in event["content"]
                         and "This session is being continued" not in event["content"]
@@ -783,8 +819,21 @@ def verify_report(report: dict[str, Any]) -> dict[str, bool]:
         "compaction_restores_context": cases["after_compact"]["grounding_delivered"],
         "clear_changes_conversation": clear_call["session_id"] != stream_call["session_id"],
         "ordinary_call_bound_before_execution": any(
-            binding["tool_use_id"] == ordinary["params"]["_meta"]["claudecode/toolUseId"]
+            binding.get("tool_use_id") == ordinary["params"]["_meta"]["claudecode/toolUseId"]
             for binding in report["binding_requests"]
+        ),
+        "post_tool_result_identifies_conversation": any(
+            event.get("session_id")
+            and event.get("tool_use_id") == "probe_tool_call"
+            and event.get("hook_event_name") == "PostToolUse"
+            for event in report["tool_result_observations"]
+        ),
+        "post_tool_result_receipt_sent": any(
+            request.get("call_receipt") == "c" * 64 for request in report["binding_requests"]
+        ),
+        "missed_post_tool_recovers_from_native_transcript": any(
+            "c" * 64 in request.get("call_receipts", [])
+            for request in cases["after_ordinary"]["briefings"]
         ),
         "briefing_tool_absent": all(
             entry.get("params", {}).get("name") != "context_briefing"

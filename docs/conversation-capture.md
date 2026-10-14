@@ -103,7 +103,7 @@ Codex code mode uses native completed MCP-call records and omits combined
 ### One context per conversation
 
 A conversation is saved to one context: the first company whose briefing or
-company tool content it receives. A sticky root briefing counts even when the
+company tool content it receives. An injected root briefing counts even when the
 first tool then targets another company. The server records exposure only for
 calls it can tie to the conversation (Codex's thread ID or a bound Claude
 tool-use ID), so the helper also reads company tool calls' `context_id` from the
@@ -290,3 +290,11 @@ Protocol 2 requires this helper. Version 1 and absent upload headers are refused
 On helper upgrade, pre-boundary spools are discarded and cannot resume: start a
 new conversation to save again. Previously accepted server transcripts remain.
 A helper installed before the coordinated server deploy waits for protocol 2.
+
+
+Briefing focus is independent of capture's destination: after a second company,
+briefings follow subsequent verified calls but no later marker restarts saving.
+For relay calls without conversation metadata, native PostToolUse submits the
+opaque receipt from the actual result; prompt-time transcript scanning retries
+missed receipts. This is distinct from the full exposure audit above. See
+[hook-protocol.md](hook-protocol.md) for account isolation and deployment order.

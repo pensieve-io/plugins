@@ -71,6 +71,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__.*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_briefing.py\" --client claude",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

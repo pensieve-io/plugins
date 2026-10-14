@@ -1,5 +1,24 @@
 # Client hook probes
 
+## Exact-call observation — 14 October 2026
+
+Claude Code 2.1.299 passed all 17 lifecycle/binding/receipt assertions and all
+capture checks with `probe_claude_hooks.py --capture`. Native PostToolUse retains
+`session_id`, `tool_use_id` and the complete text content blocks, while result
+`_meta` is absent. The fixture deliberately rejects PostToolUse receipt delivery;
+the resumed prompt recovers the exact receipt from the native transcript.
+Capture omits the receipt block and retains the actual company result.
+
+Codex CLI 0.162.1 passed `probe_codex_hooks.py --persist --capture
+--context-switch code-mode`: both explicit company calls were observed and the
+mixed conversation was never uploaded. All seven capture assertions passed.
+
+Package tests passed on Python 3.9 and 3.12 (373 each). The real Claude desktop
+relay probe remains unverified: native UI control repeatedly failed with
+`noWindowsAvailable` and screen-capture errors before a test conversation could
+run. These CLI fixtures establish the hook contract, not desktop acceptance or
+a deployed backend/plugin pair.
+
 ## Native authentication and private-header validation
 
 `python3 scripts/probe_native_oauth.py` runs installed Claude against a disposable

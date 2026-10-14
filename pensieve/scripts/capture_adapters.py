@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 from typing import Literal, TypedDict
 
+from call_receipts import CALL_RECEIPT
 from context_receipt import accepted_contexts, conversation_id
 
 
@@ -47,8 +48,8 @@ HOOK_TOOL_NAMES = {
 }
 # Pensieve's company tools. Under any server name they count as exposure when
 # they name a context: a false match only stops capture, the safe direction.
-# Briefings report these too, but the server records one only after this
-# account's own call reached that company, so a false match never starts saving.
+# Briefing focus instead requires an authenticated call receipt. A false match
+# here can stop saving but can never establish a capture destination.
 COMPANY_TOOLS = {
     "search",
     "read",
@@ -116,7 +117,8 @@ def visible_text(content: object) -> str:
         if item.get("type") in {"text", "input_text", "output_text"} and isinstance(
             item.get("text"), str
         ):
-            parts.append(item["text"])
+            if not CALL_RECEIPT.fullmatch(item["text"]):
+                parts.append(item["text"])
         elif item.get("type") in {"image", "input_image", "image_url", "document", "audio"}:
             parts.append("[Attachment omitted; original remains in the host conversation]")
     return "\n".join(parts)
