@@ -2483,26 +2483,32 @@ def test_a_subagents_second_company_stops_saving_before_its_result_uploads(tmp_p
     assert calls == [] and pending(state) == 0
 
 
-def test_an_uninspectable_subagent_record_withholds_the_turn(tmp_path, monkeypatch):
+def test_a_call_after_an_oversized_subagent_result_is_still_seen(tmp_path, monkeypatch):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
-    subagent_transcript(path, b"x" * (capture.MAX_RECORD_BYTES + 1) + b"\n")
+    subagent_transcript(path, b'{"type":"user","x":"' + b"x" * capture.MAX_RECORD_BYTES + b'"}\n')
+    subagent_transcript(path, subagent_call("s", 12))
     append(
         path,
         user("Question", "claude"),
         hook_record(client="claude"),
-        assistant("Answer that may relay anything", "claude"),
+        assistant("Relayed answer", "claude"),
     )
     run()
     assert calls == []
-    # Later turns save again once a fresh prompt is attributed.
-    append(
-        path,
-        user("Next question", "claude"),
-        hook_record(client="claude"),
-        assistant("Next answer", "claude"),
-    )
+
+
+def test_a_replaced_subagent_transcript_is_reread_from_its_start(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    filler = assistant("Subagent working", "claude") | {"isSidechain": True}
+    subagent_transcript(path, subagent_call("s", 497), filler)
+    append(path, user("Question", "claude"), hook_record(client="claude"))
     run()
-    assert [event["content"] for event in events(calls)][-1] == "Next answer"
+    replaced = path.with_suffix("") / "subagents" / "agent-a1.jsonl"
+    replaced.unlink()
+    subagent_transcript(path, subagent_call("t", 12), filler, filler)
+    append(path, assistant("Relayed answer", "claude"))
+    run()
+    assert "Relayed answer" not in [event["content"] for event in events(calls)]
 
 
 def test_unread_subagent_bytes_hold_uploads_until_they_are_read(tmp_path, monkeypatch):

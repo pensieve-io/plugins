@@ -42,7 +42,6 @@ from capture_state import (
     migrate_state,
     record_context_use,
     scope_revoked,
-    withdraw_turn,
 )
 from context_receipt import conversation_id, json_object
 
@@ -424,7 +423,8 @@ def observe_subagents(db, state, path: Path, session: str, deadline: float) -> b
     their results return to it. A second company there must stop saving before
     this hook uploads the turn that relayed it, since Claude desktop's relayed
     connector calls never reach the server with this conversation's identity.
-    Returns False while unread subagent bytes remain, so nothing uploads past them.
+    Returns False when the budget or deadline ends the read early, so nothing
+    uploads past an unread call.
     """
     offsets = state.setdefault("subagent_offsets", {})
     budget = MAX_SCAN_BYTES
@@ -438,27 +438,24 @@ def observe_subagents(db, state, path: Path, session: str, deadline: float) -> b
             details = os.fstat(handle.fileno())
             if not stat.S_ISREG(details.st_mode):
                 continue
-            offset = offsets.get(transcript.name, 0)
-            # A replaced file is reread whole: rereading can only add companies.
-            handle.seek(offset if offset <= details.st_size else 0)
+            file_id = [details.st_dev, details.st_ino]
+            known = offsets.get(transcript.name)
+            # A replaced or truncated file is reread whole: that only adds companies.
+            if known and known[:2] == file_id and known[2] <= details.st_size:
+                handle.seek(known[2])
             while True:
-                if budget <= 0 or time.monotonic() >= deadline:
-                    return False
                 line = handle.readline(MAX_RECORD_BYTES + 1)
+                if line and (len(line) > budget or time.monotonic() >= deadline):
+                    return False  # Left unread for the next hook's fresh budget.
                 budget -= len(line)
-                if not line.endswith(b"\n") and len(line) <= MAX_RECORD_BYTES:
+                if len(line) <= MAX_RECORD_BYTES and not line.endswith(b"\n"):
                     break  # End of file, or a record the host has yet to finish.
-                if len(line) > MAX_RECORD_BYTES:
-                    # Too large to inspect, so it may hide a call: the turn in
-                    # progress is withdrawn rather than uploaded.
-                    while line and not line.endswith(b"\n"):
-                        line = handle.readline(MAX_RECORD_BYTES)
-                    withdraw_turn(db, state)
-                    block(db, state, "oversized_record")
-                elif record := json_object(line):
+                # A record too large to decode is a tool result, since a model's
+                # own call is far smaller. Its chunks do not parse as records.
+                if record := json_object(line):
                     for context in claude_call_contexts(record, session):
                         record_context_use(db, state, context)
-                offsets[transcript.name] = handle.tell()
+                offsets[transcript.name] = [*file_id, handle.tell()]
                 if state.get("capture_stopped"):
                     return True
     return True
