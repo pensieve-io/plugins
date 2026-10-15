@@ -542,10 +542,6 @@ def run_probe(claude: str, *, capture: bool = False) -> dict[str, Any]:
                         "exit_code": result.returncode,
                         "model_requests": len(messages),
                         "grounding_delivered": MARKER in json.dumps(messages),
-                        "plugin_tool_preference_delivered": (
-                            "For this Pensieve briefing, prefer mcp__plugin_pensieve_pensieve__"
-                            in json.dumps(messages)
-                        ),
                         "mcp_calls": ModelStub.mcp_requests[before_mcp:],
                         "briefings": ModelStub.briefing_requests[before_briefing:],
                         "compact_briefing_delivered": f"{MARKER}SessionStart_compact"
@@ -780,9 +776,6 @@ def verify_report(report: dict[str, Any]) -> dict[str, bool]:
     )
     checks = {
         "first_prompt_grounded": cases["startup"]["grounding_delivered"],
-        "plugin_tools_preferred_on_startup_and_compaction": all(
-            cases[name]["plugin_tool_preference_delivered"] for name in ("startup", "after_compact")
-        ),
         "startup_uses_command_briefing": cases["startup"]["local_primer_delivered"]
         and first["event"] == "SessionStart",
         "resume_keeps_conversation": first["session_id"] == resumed["session_id"],

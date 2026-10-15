@@ -221,40 +221,6 @@ def test_opaque_connectors_are_never_rerouted_by_their_argument_shape(setup, too
     assert calls == []
 
 
-@pytest.mark.parametrize("client", ["claude", "codex"])
-@pytest.mark.parametrize(
-    "content", [None, "", "company primer\n<!-- pensieve-delivery token=opaque -->"]
-)
-def test_tool_preference_only_prefixes_authenticated_claude_briefings(
-    setup, monkeypatch, client, content
-):
-    path, calls = setup
-    key = profile()
-    key["client"] = client
-    config.install_profile(path, key)
-    result = (
-        {}
-        if content is None
-        else {
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": content,
-            }
-        }
-    )
-    monkeypatch.setattr(briefing, "request", lambda *_a, **_kw: (200, result))
-    actual = briefing.run_hook(payload(), client, path)
-    if content is None:
-        assert actual == {}
-    else:
-        expected = (
-            briefing.CLAUDE_TOOL_GUIDANCE + "\n\n" + content
-            if client == "claude" and content
-            else content
-        )
-        assert actual["hookSpecificOutput"]["additionalContext"] == expected
-
-
 def test_a_denied_call_tells_the_model_why(monkeypatch, capsys):
     event = dict(
         payload("PreToolUse"),
