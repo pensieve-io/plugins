@@ -90,6 +90,15 @@ def stop_capture(db, state: dict) -> None:
     block(db, state, "multiple_contexts")
 
 
+def record_context_use(db, state: dict, context_id: int) -> None:
+    """A conversation is saved to one context: the first its tools or briefings expose."""
+    used = state.setdefault("contexts_used", [])
+    if context_id not in used:
+        used.append(context_id)
+    if len(used) > 1:
+        stop_capture(db, state)
+
+
 def discard_conversation(db, state: dict, reason: str) -> None:
     """Stop for good and erase every unsent byte; accepted server rows remain."""
     state["capture_stopped"] = True
@@ -103,7 +112,7 @@ def migrate_state(db, state: dict) -> None:
     """Fence a spool whose history was consumed with older exposure detection.
 
     Older helpers did not observe every company exposure, so their pending bytes
-    are never relabelled with the new protocol and the conversation never resumes.
+    are never treated as verified by the new parser and the conversation never resumes.
     """
     if state.get("context_boundary_version") != CONTEXT_BOUNDARY_VERSION:
         discard_conversation(db, state, "capture_upgrade")
@@ -150,13 +159,8 @@ def apply_item(
     if state.get("capture_stopped"):
         return
     if item["kind"] == "context_use":
-        # A conversation is saved to one context: the first its tools or
-        # briefings expose. Marker contexts are recorded below.
-        used = state.setdefault("contexts_used", [])
-        if item["context_id"] not in used:
-            used.append(item["context_id"])
-        if len(used) > 1:
-            stop_capture(db, state)
+        # Marker contexts are recorded below.
+        record_context_use(db, state, item["context_id"])
         return
     if item["kind"] == "user":
         state.pop("blocked_reason", None)
@@ -184,13 +188,11 @@ def apply_item(
     if marker:
         owner, context = marker["user_id"], marker["context_id"]
         generation = marker["capture_generation"]
-        used = state.setdefault("contexts_used", [])
-        if context is not None and context not in used:
+        if context is not None:
             # A briefing is company exposure even without transcript consent or
             # a pairing user turn. Retain it across account changes.
-            used.append(context)
-        if len(used) > 1:
-            stop_capture(db, state)
+            record_context_use(db, state, context)
+        if state.get("capture_stopped"):
             return
         if state.get("phase") != "awaiting_attribution":
             # Never apply a late/unpaired hook marker to another user turn.

@@ -247,6 +247,29 @@ def context_use(name: object, namespace: object, arguments: object) -> list[Capt
     return [{"kind": "context_use", "context_id": context}]
 
 
+def claude_call_contexts(record: dict, session: str) -> list[int]:
+    """Companies one Claude record's Pensieve calls name, a subagent's included.
+
+    Subagent records carry their parent conversation's session id. They are never
+    captured, but their results return to it, so their company use counts too.
+    """
+    message = record.get("message")
+    if (
+        record.get("sessionId") != session
+        or record.get("type") != "assistant"
+        or not isinstance(message, dict)
+        or not isinstance(message.get("content"), list)
+    ):
+        return []
+    return [
+        event["context_id"]
+        for item in message["content"]
+        if isinstance(item, dict) and item.get("type") == "tool_use"
+        if not is_hook_tool(item.get("name"))
+        for event in context_use(item.get("name"), None, item.get("input"))
+    ]
+
+
 def capture_id(value: object) -> str | None:
     if isinstance(value, str) and 0 < len(value) <= 255 and not re.search(r"[\s\x00]", value):
         return value

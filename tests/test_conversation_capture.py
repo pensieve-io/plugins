@@ -2445,6 +2445,207 @@ def test_a_second_context_stops_saving_for_the_rest_of_the_conversation(
     assert {json.loads(batch["body"])["context_id"] for batch, _ in calls} == {497}
 
 
+def subagent_transcript(path, *lines):
+    """A Claude subagent's transcript, stored beside its parent conversation's."""
+    subagent = path.with_suffix("") / "subagents" / "agent-a1.jsonl"
+    subagent.parent.mkdir(parents=True, exist_ok=True)
+    with subagent.open("ab") as handle:
+        for line in lines:
+            handle.write(line if isinstance(line, bytes) else json.dumps(line).encode() + b"\n")
+
+
+def subagent_call(call_id, context_id):
+    return {**pensieve_call("claude", call_id, context_id, server="dab7369f"), "isSidechain": True}
+
+
+@pytest.mark.parametrize("citation_only", [False, True])
+def test_a_subagents_second_company_stops_saving_before_its_result_uploads(
+    tmp_path, monkeypatch, citation_only
+):
+    """Claude desktop's relayed calls never reach the server with this conversation."""
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    append(
+        path,
+        user("First company question", "claude"),
+        hook_record(client="claude"),
+        pensieve_call("claude", "a", 497),
+        assistant("First company answer", "claude"),
+    )
+    run()
+    assert "First company answer" in [event["content"] for event in events(calls)]
+    calls.clear()
+    call = subagent_call("s", 12)
+    if citation_only:
+        call["message"]["content"][0].update(
+            name="mcp__opaque__read", input={"identifier": "https://app.pensieve.uk/r/12/page/1"}
+        )
+    subagent_transcript(path, call)
+    append(
+        path,
+        user("Research the other company", "claude"),
+        hook_record(client="claude"),
+        pensieve_result("claude", "task", "Subagent found the second company secret"),
+        assistant("Relayed answer", "claude"),
+    )
+    run()
+    assert calls == [] and pending(state) == 0
+
+
+def test_a_call_after_an_oversized_subagent_result_is_still_seen(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    subagent_transcript(path, b'{"type":"user","x":"' + b"x" * capture.MAX_RECORD_BYTES + b'"}\n')
+    subagent_transcript(path, subagent_call("s", 12))
+    append(
+        path,
+        user("Question", "claude"),
+        hook_record(client="claude"),
+        assistant("Relayed answer", "claude"),
+    )
+    run()
+    assert calls == []
+
+
+def test_a_replaced_subagent_transcript_is_reread_from_its_start(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    filler = assistant("Subagent working", "claude") | {"isSidechain": True}
+    subagent_transcript(path, subagent_call("s", 497), filler)
+    append(path, user("Question", "claude"), hook_record(client="claude"))
+    run()
+    replaced = path.with_suffix("") / "subagents" / "agent-a1.jsonl"
+    replaced.unlink()
+    subagent_transcript(path, subagent_call("t", 12), filler, filler)
+    append(path, assistant("Relayed answer", "claude"))
+    run()
+    assert "Relayed answer" not in [event["content"] for event in events(calls)]
+
+
+def test_unread_subagent_bytes_hold_uploads_until_they_are_read(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    filler = assistant("Subagent working " + "x" * 4000, "claude") | {"isSidechain": True}
+    subagent_transcript(path, *[filler] * (capture.MAX_SCAN_BYTES // 4000 + 10))
+    append(
+        path,
+        user("Question", "claude"),
+        hook_record(client="claude"),
+        assistant("Answer", "claude"),
+    )
+    run()
+    assert calls == []
+    run()
+    assert [event["content"] for event in events(calls)][-1] == "Answer"
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("next_hook", ["prompt", "pathless", "stopped"])
+def test_late_subagent_exposure_discards_every_pending_parent_turn(
+    tmp_path, monkeypatch, deferred, next_hook
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    append(path, user("First company", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    calls.clear()
+    if deferred:
+        filler = assistant("x" * 4000, "claude") | {"isSidechain": True}
+        subagent_transcript(path, *[filler] * (capture.MAX_SCAN_BYTES // 4000 + 10))
+    subagent_transcript(path, subagent_call("other-company", 12))
+    append(
+        path,
+        user("Research the other company", "claude"),
+        hook_record("claude"),
+        pensieve_result("claude", "task", "Second company secret"),
+        assistant("Relayed second company secret", "claude"),
+    )
+    if deferred:
+        run()
+        assert calls == [] and pending(state) > 0
+    # A normal next prompt advances the parent turn before the observer finds
+    # the second company. Both the held answer and this prompt must be dropped.
+    if next_hook == "pathless":
+        capture.run_hook(
+            {"session_id": SESSION, "hook_event_name": "SessionEnd"}, "claude", cfg, state
+        )
+    else:
+        append(
+            path,
+            user("Continue", "claude"),
+            hook_record("claude", context=12 if next_hook == "stopped" else 497),
+        )
+        run("UserPromptSubmit")
+    # A short exit hook may need another observation slice before clearing.
+    run("SessionEnd")
+    assert calls == [] and pending(state) == 0
+    run("SessionEnd")
+    assert calls == []
+
+
+def test_subagent_exposure_discards_unacknowledged_batches(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(client="claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    db = capture.connect_state(state, "claude", SESSION)
+    assert db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] > 0
+    db.close()
+    subagent_transcript(path, subagent_call("other-company", 12))
+    monkeypatch.setattr(capture, "upload", lambda *args: calls.append(args) or ACCEPTED)
+    run()
+    assert calls == [] and pending(state) == 0
+    db = capture.connect_state(state, "claude", SESSION)
+    assert db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+    db.close()
+
+
+def test_partial_subagent_call_holds_upload_until_the_host_finishes_it(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    subagent_transcript(path, json.dumps(subagent_call("other-company", 12)).encode())
+    append(path, user(client="claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    assert calls == [] and pending(state) > 0
+    subagent_transcript(path, b"\n")
+    run()
+    assert calls == [] and pending(state) == 0
+
+
+def test_overlapping_hooks_cannot_append_unverified_turns_to_an_observed_flush(
+    tmp_path, monkeypatch
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    append(
+        path,
+        user("Safe prompt", "claude"),
+        hook_record("claude"),
+        assistant("Safe answer", "claude"),
+    )
+    next_batch = capture.next_batch
+    interleaved = False
+
+    def another_hook_before_batch_selection(*args):
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            filler = assistant("x" * 4000, "claude") | {"isSidechain": True}
+            subagent_transcript(
+                path, *[filler] * (capture.MAX_SCAN_BYTES // 4000 + 10), subagent_call("other", 12)
+            )
+            append(
+                path,
+                user("Other company", "claude"),
+                hook_record("claude"),
+                assistant("Second company secret", "claude"),
+            )
+            with pytest.raises(BlockingIOError):
+                run()
+        return next_batch(*args)
+
+    monkeypatch.setattr(capture, "next_batch", another_hook_before_batch_selection)
+    run()
+    assert [event["content"] for event in events(calls)] == ["Safe prompt", "Safe answer"]
+    calls.clear()
+    run()  # The competing hook retries with its own complete observation budget.
+    run()
+    assert calls == [] and pending(state) == 0
+
+
 @pytest.mark.parametrize("client", ["codex", "claude"])
 def test_a_marker_after_tools_used_another_context_saves_nothing(tmp_path, monkeypatch, client):
     """An unbound connection's call never reached the server, so its marker lags."""
