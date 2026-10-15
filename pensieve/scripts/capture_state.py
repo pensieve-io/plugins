@@ -11,6 +11,10 @@ from capture_adapters import CaptureEvent, capture_id
 from capture_config import encoded, key_for
 from capture_protocol import MAX_EVENT_CHARS
 
+# Local exposure coverage, independent of the upload protocol. Increment when
+# previously consumed parent records could contain newly recognised exposure.
+CONTEXT_BOUNDARY_VERSION = 3
+
 INTERNAL_MARKER = re.compile(
     r"<!-- pensieve-(?:capture-context|capture-consent|capture-setup|delivery)\b.*?-->", re.DOTALL
 )
@@ -96,14 +100,14 @@ def discard_conversation(db, state: dict, reason: str) -> None:
 
 
 def migrate_state(db, state: dict) -> None:
-    """Fence a spool written before capture protocol 2.
+    """Fence a spool whose history was consumed with older exposure detection.
 
     Older helpers did not observe every company exposure, so their pending bytes
     are never relabelled with the new protocol and the conversation never resumes.
     """
-    if state.get("context_boundary_version") != 2:
+    if state.get("context_boundary_version") != CONTEXT_BOUNDARY_VERSION:
         discard_conversation(db, state, "capture_upgrade")
-        state.update(context_boundary_version=2, adapter={})
+        state.update(context_boundary_version=CONTEXT_BOUNDARY_VERSION, adapter={})
 
 
 def scope_revoked(cutover, owner, context):

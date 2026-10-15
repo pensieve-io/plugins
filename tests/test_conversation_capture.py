@@ -2605,6 +2605,36 @@ def test_unbound_pensieve_connections_still_stop_capture(
         ("mcp__acme__search", None, {"context_id": 12}, 12),
         ("mcp__acme__info", None, {"inspect": "activity", "context_id": 12}, 12),
         ("mcp__pensieve__lookup", None, {"context_id": 12}, 12),
+        ("mcp__opaque__read", None, {"identifier": "https://app.pensieve.uk/r/12/page/1"}, 12),
+        (
+            "read",
+            "mcp__pensieve",
+            '{"identifier":"https://app.pensieve.uk/r/12/data/1?anchor=slide-1"}',
+            12,
+        ),
+        (
+            "mcp__opaque__read",
+            None,
+            {
+                "identifier": [
+                    "https://app.pensieve.uk/r/12/page/1",
+                    "https://app.pensieve.uk/r/12/transcript/2?anchor=through-3",
+                ]
+            },
+            12,
+        ),
+        (
+            "mcp__opaque__read",
+            None,
+            {"context_id": 497, "identifier": "https://app.pensieve.uk/r/12/page/1"},
+            497,
+        ),
+        (
+            "mcp__opaque__read",
+            None,
+            {"context_id": None, "identifier": "https://app.pensieve.uk/r/12/page/1"},
+            12,
+        ),
         # Discovery, foreign tools and malformed targets are not exposure.
         ("mcp__pensieve__list_contexts", None, {"context_id": 12}, None),
         ("mcp__pensieve__info", None, {"help": "transcripts", "context_id": 12}, None),
@@ -2616,6 +2646,30 @@ def test_unbound_pensieve_connections_still_stop_capture(
         ("mcp__pensieve__search", None, {"context_id": 0}, None),
         ("mcp__pensieve__search", None, {}, None),
         ("mcp__pensieve__search", None, "not json", None),
+        (
+            "mcp__opaque__read",
+            None,
+            {"context_id": True, "identifier": "https://app.pensieve.uk/r/12/page/1"},
+            None,
+        ),
+        (
+            "mcp__opaque__read",
+            None,
+            {"identifier": ["https://app.pensieve.uk/r/12/page/1", "page:2"]},
+            None,
+        ),
+        (
+            "mcp__opaque__read",
+            None,
+            {
+                "identifier": [
+                    "https://app.pensieve.uk/r/12/page/1",
+                    "https://app.pensieve.uk/r/497/page/2",
+                ]
+            },
+            None,
+        ),
+        ("mcp__opaque__search", None, {"query": "https://app.pensieve.uk/r/12/page/1"}, None),
     ],
 )
 def test_context_use_recognises_company_calls(name, namespace, arguments, context):
@@ -2623,9 +2677,47 @@ def test_context_use_recognises_company_calls(name, namespace, arguments, contex
     assert capture_adapters.context_use(name, namespace, arguments) == expected
 
 
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "https://evil.test/r/12/page/1",
+        "https://app.pensieve.uk.evil.test/r/12/page/1",
+        "https://user@app.pensieve.uk/r/12/page/1",
+        "https://app.pensieve.uk:invalid/r/12/page/1",
+        "https://app.pensieve.uk/r/12/page/1/extra",
+        "https://app.pensieve.uk/r/0/page/1",
+        "https://app.pensieve.uk/r/12/page/1?anchor=slide-1",
+        "https://app.pensieve.uk/r/12/data/1?anchor=slide-1&anchor=slide-2",
+        "https://app.pensieve.uk/r/12/data/1?unknown=value",
+        "https://app.pensieve.uk/r/12/page/1#fragment",
+        [],
+        None,
+    ],
+)
+def test_reference_context_rejects_noncanonical_routing(identifier):
+    assert capture_adapters.reference_context(identifier) is None
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+def test_citation_only_second_company_reads_stop_capture(tmp_path, monkeypatch, client):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client)
+    call = pensieve_call(client, "citation", None, tool="read", server="opaque")
+    arguments = {"identifier": "https://app.pensieve.uk/r/12/page/1"}
+    if client == "claude":
+        call["message"]["content"][0]["input"] = arguments
+    else:
+        call["payload"]["arguments"] = json.dumps(arguments)
+    append(
+        path, user(client=client), hook_record(client), call, assistant("Second company", client)
+    )
+    run()
+    assert calls == [] and pending(state) == 0
+
+
 @pytest.mark.parametrize("reset_offset", [False, True])
+@pytest.mark.parametrize("old_version", [None, 2])
 def test_upgraded_spool_cannot_upload_or_restart_unverified_old_history(
-    tmp_path, monkeypatch, reset_offset
+    tmp_path, monkeypatch, reset_offset, old_version
 ):
     path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
     monkeypatch.setattr(capture, "upload", lambda *a: False)
@@ -2634,6 +2726,8 @@ def test_upgraded_spool_cannot_upload_or_restart_unverified_old_history(
     db = capture.connect_state(state, "codex", SESSION)
     saved = capture.load_state(db)
     saved.pop("context_boundary_version")
+    if old_version is not None:
+        saved["context_boundary_version"] = old_version
     if reset_offset:
         saved["offset"] = None
     capture.save_state(db, saved)

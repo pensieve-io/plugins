@@ -196,17 +196,17 @@ BRIDGED = "mcp__a8c774c8-f47c-4458-90f3-9f3d3522c6a3__"
 
 
 @pytest.mark.parametrize(
-    "tool,arguments,redirected",
+    "tool,arguments",
     [
-        ("read", {"ref": "page:1", "context_id": 497}, True),
-        ("search", '{"query": "pricing", "context_id": 497}', True),
-        # Discovery names no company, and another connector's tool of the same
-        # name names no context, so neither is Pensieve company use.
-        ("info", {"context_id": 497}, False),
-        ("read", {"container": {"kind": "project", "id": "doc"}}, False),
+        ("read", {"identifier": "page:1", "context_id": 497}),
+        ("read", {"identifier": "https://app.pensieve.uk/r/497/page/1"}),
+        ("search", '{"query": "pricing", "context_id": 497}'),
+        ("edit_page", {"context_id": 497, "content": "Other provider's content"}),
+        ("info", {"context_id": 497}),
+        ("read", {"container": {"kind": "project", "id": "doc"}}),
     ],
 )
-def test_claude_desktop_company_calls_move_to_the_plugin_server(setup, tool, arguments, redirected):
+def test_opaque_connectors_are_never_rerouted_by_their_argument_shape(setup, tool, arguments):
     path, calls = setup
     event = dict(
         payload("PreToolUse"),
@@ -216,30 +216,61 @@ def test_claude_desktop_company_calls_move_to_the_plugin_server(setup, tool, arg
         mcp_server={"name": BRIDGED[5:-2], "source": "sdk"},
     )
     result = briefing.run_hook(event, "claude", path)
-    if redirected:
-        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert reason.startswith(f"Call mcp__plugin_pensieve_pensieve__{tool} with the same")
-    else:
-        assert result == {}
-    # Nothing can bind a call whose tool-use id never reaches the server.
+    assert result == {}
+    # The UUID cannot establish either provider identity or account equivalence.
     assert calls == []
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize(
+    "content", [None, "", "company primer\n<!-- pensieve-delivery token=opaque -->"]
+)
+def test_tool_preference_only_prefixes_authenticated_claude_briefings(
+    setup, monkeypatch, client, content
+):
+    path, calls = setup
+    key = profile()
+    key["client"] = client
+    config.install_profile(path, key)
+    result = (
+        {}
+        if content is None
+        else {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": content,
+            }
+        }
+    )
+    monkeypatch.setattr(briefing, "request", lambda *_a, **_kw: (200, result))
+    actual = briefing.run_hook(payload(), client, path)
+    if content is None:
+        assert actual == {}
+    else:
+        expected = (
+            briefing.CLAUDE_TOOL_GUIDANCE + "\n\n" + content
+            if client == "claude" and content
+            else content
+        )
+        assert actual["hookSpecificOutput"]["additionalContext"] == expected
 
 
 def test_a_denied_call_tells_the_model_why(monkeypatch, capsys):
     event = dict(
         payload("PreToolUse"),
-        tool_name=BRIDGED + "read",
-        tool_input={"ref": "page:1", "context_id": 497},
+        tool_name="mcp__plugin_pensieve_pensieve__read",
+        tool_use_id="invalid call id",
     )
     monkeypatch.setattr(briefing.sys, "argv", ["context_briefing.py", "--client", "claude"])
     stdin = io.TextIOWrapper(io.BytesIO(json.dumps(event).encode()))
     monkeypatch.setattr(briefing.sys, "stdin", stdin)
     with pytest.raises(SystemExit) as exited:
         briefing.main()
-    # Claude reads a blocking hook's stderr; the JSON on stdout is ignored.
+    # Older Claude hosts need stderr; current hosts can also apply the JSON.
     assert exited.value.code == 2
-    assert "mcp__plugin_pensieve_pensieve__read" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    reason = json.loads(captured.out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason in captured.err
 
 
 def test_claude_binding_failure_denies_without_exposing_error_or_secret(setup, monkeypatch):

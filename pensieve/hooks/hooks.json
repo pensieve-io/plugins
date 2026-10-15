@@ -70,16 +70,6 @@
             "timeout": 5
           }
         ]
-      },
-      {
-        "matcher": "^mcp__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__(create_page|delete_page|edit_page|get_tree|info|list_trees|merge_pages|move_page|read|read_change|save_data|search|search_changes|set_lock)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_briefing.py\" --client claude",
-            "timeout": 5
-          }
-        ]
       }
     ]
   }

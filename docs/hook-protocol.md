@@ -56,18 +56,24 @@ Claude desktop hands its claude.ai connectors to Claude Code under opaque server
 ids (`mcp__<uuid>__<tool>`) and drops `_meta["claudecode/toolUseId"]` on the way
 out, so a binding cannot resolve those calls; the claude.ai relay itself keeps
 the id, as Claude Code CLI shows. The same desktop session also runs the
-plugin's own server, whose calls do carry it. So a desktop connector call to a
-Pensieve company tool that names its `context_id` (the capture parser's own
-test, since the id names no server) is denied with the plugin tool to call
-instead. A blocking hook reaches the model through stderr, so every denial
-prints its reason there. Discovery and other connectors' tools pass untouched.
+plugin's own server, whose calls do carry it. Authenticated Claude briefings
+therefore prefer `mcp__plugin_pensieve_pensieve__*` for that briefing's account.
+The opaque connector id proves neither provider identity nor account equivalence:
+hooks never deny or redirect those calls based on tool names or argument shapes.
+The preference is guidance, not an enforced desktop routing guarantee. Live
+desktop selection, binding and capture still require acceptance testing.
+
+Every existing PreToolUse denial prints the same reason on stderr and in the
+structured decision, covering older hosts that only surface stderr on exit 2.
 
 The server records a conversation's company exposure only for calls it can tie
 to that conversation: Codex's `threadId` or a bound Claude tool-use ID. A host
 command timeout fails open, and other server names are never bound, so those
 calls reach the server unattributed. The capture helper's transcript check is
-the backstop: it reads every company call's `context_id` itself and stops saving
-locally at a second context.
+the backstop: it reads company calls' explicit `context_id`, or the canonical
+Pensieve URLs in `read.identifier`, and stops saving locally at a second context.
+Exposure detection is deliberately conservative; it is never used to establish
+the identity of a connection or redirect its execution.
 
 The plugin's dynamic-header helper creates its private proof before MCP connects
 and emits only `X-Pensieve-Plugin: <client> <proof>` as header JSON. Claude uses
