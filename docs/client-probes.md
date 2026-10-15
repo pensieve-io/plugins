@@ -7,7 +7,7 @@ probe: all 15 hook/briefing checks and 20 capture checks. Native model input
 received the plugin-tool preference on startup and after compaction. Exact-call
 binding, resume, clear, receipt acknowledgement/reset, byte-identical retries,
 fork exclusion and interrupted-turn handling all passed. The complete Python
-3.12 package suite passed 412 tests, including deferred subagent observations,
+3.9 and 3.12 package suites passed 412 tests each, including deferred subagent observations,
 pathless exits, concurrent hooks, citation-only direct/child company reads and
 the local version-3 upgrade fence. Upload wire protocol remains version 2 and
 the deployed compatibility check passed.

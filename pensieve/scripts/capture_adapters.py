@@ -201,7 +201,11 @@ def reference_context(identifier: object) -> int | None:
             )
             if match is None:
                 return None
-            query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+            query = (
+                parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+                if url.query
+                else {}
+            )
             if query and (
                 set(query) != {"anchor"}
                 or len(query["anchor"]) != 1
