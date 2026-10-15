@@ -56,12 +56,13 @@ Claude desktop hands its claude.ai connectors to Claude Code under opaque server
 ids (`mcp__<uuid>__<tool>`) and drops `_meta["claudecode/toolUseId"]` on the way
 out, so a binding cannot resolve those calls; the claude.ai relay itself keeps
 the id, as Claude Code CLI shows. The same desktop session also runs the
-plugin's own server, whose calls do carry it. Authenticated Claude briefings
-therefore prefer `mcp__plugin_pensieve_pensieve__*` for that briefing's account.
-The opaque connector id proves neither provider identity nor account equivalence:
-hooks never deny or redirect those calls based on tool names or argument shapes.
-The preference is guidance, not an enforced desktop routing guarantee. Live
-desktop selection, binding and capture still require acceptance testing.
+plugin's own server, whose calls do carry it. The opaque connector id proves
+neither provider identity nor account equivalence, so hooks neither steer the
+model between the two nor deny or redirect connector calls. A company call through
+the desktop connector therefore stays unattributed: for a member of several
+contexts, saving does not start from it, and the transcript check still stops
+saving at a second context. This is a Claude desktop limitation, reported
+upstream, and only arises when both the connector and the plugin are installed.
 
 Every existing PreToolUse denial prints the same reason on stderr and in the
 structured decision, covering older hosts that only surface stderr on exit 2.
