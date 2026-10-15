@@ -19,6 +19,7 @@ import stat
 import sys
 import time
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -32,6 +33,7 @@ from capture_config import (
     key_for,
     observe_credentials,
     private_directory,
+    private_lock,
     profiles,
 )
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
@@ -719,9 +721,12 @@ def capture_session(
     recover=False,
 ):
     """Resume one known spool, preserving its original ownership and identities."""
-    db = connect_state(state_root, client, session)
     source_error = None
-    try:
+    # A second hook must not append unverified parent events between subagent
+    # observation and batch creation. Recovery uses this same nonblocking lock.
+    with private_lock(state_root / f"{client}-{session}.lock"), closing(
+        connect_state(state_root, client, session)
+    ) as db:
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
         if state["offset"] is None and not state.get("path") and not allow_new_file:
@@ -779,8 +784,6 @@ def capture_session(
         save_state(db, state)
         db.commit()
         flush(db, configured, client, session, endpoint, deadline)
-    finally:
-        db.close()
     return source_error
 
 

@@ -121,6 +121,10 @@ budgets. Subagent observations arrive out of parent-turn order, so withdrawing
 only the current turn cannot establish a safe boundary. Already accepted server
 history is unchanged. Generic
 help and `list_contexts()` are discovery, not company exposure.
+Each conversation's scan, observation and upload share one nonblocking private
+lock, including recovery and pathless exit hooks. A concurrent hook retries on
+the next lifecycle event instead of appending unverified turns to an upload
+whose subagent observation has already completed.
 Authenticated briefing contexts persist across account and consent changes;
 turning sharing off does not remove a briefing from the model's working memory.
 The local guard is conservative: an attempt to call another company may stop

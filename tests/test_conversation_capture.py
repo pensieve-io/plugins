@@ -2598,6 +2598,46 @@ def test_partial_subagent_call_holds_upload_until_the_host_finishes_it(tmp_path,
     assert calls == [] and pending(state) == 0
 
 
+def test_overlapping_hooks_cannot_append_unverified_turns_to_an_observed_flush(
+    tmp_path, monkeypatch
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    append(
+        path,
+        user("Safe prompt", "claude"),
+        hook_record("claude"),
+        assistant("Safe answer", "claude"),
+    )
+    next_batch = capture.next_batch
+    interleaved = False
+
+    def another_hook_before_batch_selection(*args):
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            filler = assistant("x" * 4000, "claude") | {"isSidechain": True}
+            subagent_transcript(
+                path, *[filler] * (capture.MAX_SCAN_BYTES // 4000 + 10), subagent_call("other", 12)
+            )
+            append(
+                path,
+                user("Other company", "claude"),
+                hook_record("claude"),
+                assistant("Second company secret", "claude"),
+            )
+            with pytest.raises(BlockingIOError):
+                run()
+        return next_batch(*args)
+
+    monkeypatch.setattr(capture, "next_batch", another_hook_before_batch_selection)
+    run()
+    assert [event["content"] for event in events(calls)] == ["Safe prompt", "Safe answer"]
+    calls.clear()
+    run()  # The competing hook retries with its own complete observation budget.
+    run()
+    assert calls == [] and pending(state) == 0
+
+
 @pytest.mark.parametrize("client", ["codex", "claude"])
 def test_a_marker_after_tools_used_another_context_saves_nothing(tmp_path, monkeypatch, client):
     """An unbound connection's call never reached the server, so its marker lags."""
