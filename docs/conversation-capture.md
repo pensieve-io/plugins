@@ -115,7 +115,11 @@ is every call through Claude desktop's connectors. Claude subagents' transcripts
 never captured, but their results return to the conversation. Nothing uploads
 while unread subagent bytes remain; a replaced subagent file is reread whole, and
 records too large to decode are skipped: they are tool results, since a model's
-own call is far smaller. Generic
+own call is far smaller. A second company discovered in a subagent discards every
+pending parent turn and unacknowledged batch, including turns held across scan
+budgets. Subagent observations arrive out of parent-turn order, so withdrawing
+only the current turn cannot establish a safe boundary. Already accepted server
+history is unchanged. Generic
 help and `list_contexts()` are discovery, not company exposure.
 Authenticated briefing contexts persist across account and consent changes;
 turning sharing off does not remove a briefing from the model's working memory.

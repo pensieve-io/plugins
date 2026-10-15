@@ -2527,6 +2527,77 @@ def test_unread_subagent_bytes_hold_uploads_until_they_are_read(tmp_path, monkey
     assert [event["content"] for event in events(calls)][-1] == "Answer"
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("next_hook", ["prompt", "pathless", "stopped"])
+def test_late_subagent_exposure_discards_every_pending_parent_turn(
+    tmp_path, monkeypatch, deferred, next_hook
+):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    append(path, user("First company", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    calls.clear()
+    if deferred:
+        filler = assistant("x" * 4000, "claude") | {"isSidechain": True}
+        subagent_transcript(path, *[filler] * (capture.MAX_SCAN_BYTES // 4000 + 10))
+    subagent_transcript(path, subagent_call("other-company", 12))
+    append(
+        path,
+        user("Research the other company", "claude"),
+        hook_record("claude"),
+        pensieve_result("claude", "task", "Second company secret"),
+        assistant("Relayed second company secret", "claude"),
+    )
+    if deferred:
+        run()
+        assert calls == [] and pending(state) > 0
+    # A normal next prompt advances the parent turn before the observer finds
+    # the second company. Both the held answer and this prompt must be dropped.
+    if next_hook == "pathless":
+        capture.run_hook(
+            {"session_id": SESSION, "hook_event_name": "SessionEnd"}, "claude", cfg, state
+        )
+    else:
+        append(
+            path,
+            user("Continue", "claude"),
+            hook_record("claude", context=12 if next_hook == "stopped" else 497),
+        )
+        run("UserPromptSubmit")
+    # A short exit hook may need another observation slice before clearing.
+    run("SessionEnd")
+    assert calls == [] and pending(state) == 0
+    run("SessionEnd")
+    assert calls == []
+
+
+def test_subagent_exposure_discards_unacknowledged_batches(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(client="claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    db = capture.connect_state(state, "claude", SESSION)
+    assert db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] > 0
+    db.close()
+    subagent_transcript(path, subagent_call("other-company", 12))
+    monkeypatch.setattr(capture, "upload", lambda *args: calls.append(args) or ACCEPTED)
+    run()
+    assert calls == [] and pending(state) == 0
+    db = capture.connect_state(state, "claude", SESSION)
+    assert db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+    db.close()
+
+
+def test_partial_subagent_call_holds_upload_until_the_host_finishes_it(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    subagent_transcript(path, json.dumps(subagent_call("other-company", 12)).encode())
+    append(path, user(client="claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    assert calls == [] and pending(state) > 0
+    subagent_transcript(path, b"\n")
+    run()
+    assert calls == [] and pending(state) == 0
+
+
 @pytest.mark.parametrize("client", ["codex", "claude"])
 def test_a_marker_after_tools_used_another_context_saves_nothing(tmp_path, monkeypatch, client):
     """An unbound connection's call never reached the server, so its marker lags."""

@@ -436,11 +436,11 @@ def observe_subagents(db, state, path: Path, session: str, deadline: float) -> b
         try:
             handle = os.fdopen(os.open(transcript, flags), "rb")
         except OSError:
-            continue
+            return False  # An unreadable transcript cannot establish safety.
         with handle:
             details = os.fstat(handle.fileno())
             if not stat.S_ISREG(details.st_mode):
-                continue
+                return False
             # Identify the file by its opening bytes: an inode can be reused at
             # once. A replaced or truncated file is reread whole, which only adds
             # companies.
@@ -454,15 +454,21 @@ def observe_subagents(db, state, path: Path, session: str, deadline: float) -> b
                     return False  # Left unread for the next hook's fresh budget.
                 budget -= len(line)
                 if len(line) <= MAX_RECORD_BYTES and not line.endswith(b"\n"):
-                    break  # End of file, or a record the host has yet to finish.
+                    if line:
+                        return False  # The host has yet to finish this record.
+                    break
                 # A record too large to decode is a tool result, since a model's
                 # own call is far smaller. Its chunks do not parse as records.
                 if record := json_object(line):
                     for context in claude_call_contexts(record, session):
                         record_context_use(db, state, context)
+                        if state.get("capture_stopped"):
+                            # Subagent exposure is observed out of parent-turn
+                            # order. No queued turn or unacknowledged batch can
+                            # be proven to precede it; withdraw the whole spool.
+                            discard_conversation(db, state, "multiple_contexts")
+                            return True
                 offsets[transcript.name] = [opening, handle.tell()]
-                if state.get("capture_stopped"):
-                    return True
     return True
 
 
@@ -623,6 +629,17 @@ def retire_segment(db, segment_id):
 
 
 def flush(db, configured, client, session, endpoint, deadline):
+    if client == "claude":
+        # Every upload path, including pathless exits and stopped/recovered
+        # sessions, must finish observing subagents before sending queued work.
+        db.execute("BEGIN IMMEDIATE")
+        state = load_state(db)
+        path = state.get("path")
+        observed = not path or observe_subagents(db, state, Path(path), session, deadline)
+        save_state(db, state)
+        db.commit()
+        if not observed:
+            return
     denied = set()
     while time.monotonic() < deadline:
         progressed = False
@@ -759,15 +776,9 @@ def capture_session(
                     )
                     state.pop("capture_paused", None)
                 source_error = exc
-        observed = (
-            client != "claude"
-            or not isinstance(path, str)
-            or observe_subagents(db, state, Path(path), session, deadline)
-        )
         save_state(db, state)
         db.commit()
-        if observed:
-            flush(db, configured, client, session, endpoint, deadline)
+        flush(db, configured, client, session, endpoint, deadline)
     finally:
         db.close()
     return source_error
