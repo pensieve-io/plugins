@@ -724,9 +724,10 @@ def capture_session(
     source_error = None
     # A second hook must not append unverified parent events between subagent
     # observation and batch creation. Recovery uses this same nonblocking lock.
-    with private_lock(state_root / f"{client}-{session}.lock"), closing(
-        connect_state(state_root, client, session)
-    ) as db:
+    with (
+        private_lock(state_root / f"{client}-{session}.lock"),
+        closing(connect_state(state_root, client, session)) as db,
+    ):
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
         if state["offset"] is None and not state.get("path") and not allow_new_file:
