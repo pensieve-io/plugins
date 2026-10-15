@@ -1,5 +1,6 @@
 """Command hooks retain context without exposing credentials or a model tool."""
 
+import io
 import json
 
 import capture_config as config
@@ -189,6 +190,56 @@ def test_claude_binding_covers_other_pensieve_connections(setup, tool_name, prov
     assert briefing.run_hook(event, "claude", path) == {}
     bindings = [c[3] for c in calls if c[3] and c[3].get("tool_use_id") == "toolu_456"]
     assert bool(bindings) is bound
+
+
+BRIDGED = "mcp__a8c774c8-f47c-4458-90f3-9f3d3522c6a3__"
+
+
+@pytest.mark.parametrize(
+    "tool,arguments,redirected",
+    [
+        ("read", {"ref": "page:1", "context_id": 497}, True),
+        ("search", '{"query": "pricing", "context_id": 497}', True),
+        # Discovery names no company, and another connector's tool of the same
+        # name names no context, so neither is Pensieve company use.
+        ("info", {"context_id": 497}, False),
+        ("read", {"container": {"kind": "project", "id": "doc"}}, False),
+    ],
+)
+def test_claude_desktop_company_calls_move_to_the_plugin_server(setup, tool, arguments, redirected):
+    path, calls = setup
+    event = dict(
+        payload("PreToolUse"),
+        tool_name=BRIDGED + tool,
+        tool_input=arguments,
+        tool_use_id="toolu_789",
+        mcp_server={"name": BRIDGED[5:-2], "source": "sdk"},
+    )
+    result = briefing.run_hook(event, "claude", path)
+    if redirected:
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert reason.startswith(f"Call mcp__plugin_pensieve_pensieve__{tool} with the same")
+    else:
+        assert result == {}
+    # Nothing can bind a call whose tool-use id never reaches the server.
+    assert calls == []
+
+
+def test_a_denied_call_tells_the_model_why(monkeypatch, capsys):
+    event = dict(
+        payload("PreToolUse"),
+        tool_name=BRIDGED + "read",
+        tool_input={"ref": "page:1", "context_id": 497},
+    )
+    monkeypatch.setattr(briefing.sys, "argv", ["context_briefing.py", "--client", "claude"])
+    stdin = io.TextIOWrapper(io.BytesIO(json.dumps(event).encode()))
+    monkeypatch.setattr(briefing.sys, "stdin", stdin)
+    with pytest.raises(SystemExit) as exited:
+        briefing.main()
+    # Claude reads a blocking hook's stderr; the JSON on stdout is ignored.
+    assert exited.value.code == 2
+    assert "mcp__plugin_pensieve_pensieve__read" in capsys.readouterr().err
 
 
 def test_claude_binding_failure_denies_without_exposing_error_or_secret(setup, monkeypatch):

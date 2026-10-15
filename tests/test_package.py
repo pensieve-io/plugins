@@ -5,6 +5,7 @@ import re
 import struct
 from pathlib import Path
 
+import capture_adapters
 import pytest
 import yaml
 
@@ -100,9 +101,12 @@ def test_host_adapters_use_command_briefing_and_preserve_capture(client, filenam
         assert "conversation_capture.py" in scripts[1]
         assert all("context_receipt.py" not in command for command in scripts)
     if client == "claude":
-        assert hooks["PreToolUse"][0]["matcher"] == (
-            "^mcp__(plugin_pensieve_pensieve|claude_ai_Pensieve|pensieve)__.*$"
-        )
+        bound, bridged = (group["matcher"] for group in hooks["PreToolUse"])
+        assert bound == "^mcp__(plugin_pensieve_pensieve|claude_ai_Pensieve|pensieve)__.*$"
+        # Claude desktop's connector ids name no server, so the hook sees exactly
+        # the tools capture counts as company use there.
+        tools = bridged.removesuffix(")$").split("__(", 1)[1].split("|")
+        assert set(tools) == capture_adapters.COMPANY_TOOLS
     for script in ("context_briefing", "context_receipt", "conversation_capture"):
         assert (PLUGIN / "scripts" / (script + ".py")).is_file()
     assert all(hook["timeout"] == 1 for group in hooks["SessionEnd"] for hook in group["hooks"])

@@ -52,6 +52,16 @@ correlation only: the server still authenticates each call's OAuth account. With
 a credential, expected failures deny the call. Codex supplies `_meta.threadId`
 directly and needs no per-tool binding request.
 
+Claude desktop hands its claude.ai connectors to Claude Code under opaque server
+ids (`mcp__<uuid>__<tool>`) and drops `_meta["claudecode/toolUseId"]` on the way
+out, so a binding cannot resolve those calls; the claude.ai relay itself keeps
+the id, as Claude Code CLI shows. The same desktop session also runs the
+plugin's own server, whose calls do carry it. So a desktop connector call to a
+Pensieve company tool that names its `context_id` (the capture parser's own
+test, since the id names no server) is denied with the plugin tool to call
+instead. A blocking hook reaches the model through stderr, so every denial
+prints its reason there. Discovery and other connectors' tools pass untouched.
+
 The server records a conversation's company exposure only for calls it can tie
 to that conversation: Codex's `threadId` or a bound Claude tool-use ID. A host
 command timeout fails open, and other server names are never bound, so those

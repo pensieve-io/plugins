@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from capture_adapters import context_use
 from capture_config import (
     CONFIG_PATH,
     MAX_CONFIG_BYTES,
@@ -128,18 +129,28 @@ PLUGIN_TOOL_PREFIX = "mcp__plugin_pensieve_pensieve__"
 # The plugin's server, the claude.ai connector and a server added by hand as
 # `pensieve`. Only the plugin's tools are checked against native provenance.
 BOUND_TOOL_PREFIXES = (PLUGIN_TOOL_PREFIX, "mcp__claude_ai_Pensieve__", "mcp__pensieve__")
+# Claude desktop hands its claude.ai connectors to Claude Code under opaque
+# server ids and drops each call's tool-use id, so no binding can resolve them.
+BRIDGED_TOOL = re.compile(
+    r"mcp__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__([a-z_]+)"
+)
+
+
+def deny(reason: str) -> dict:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
 def failure(event: str, client: str, session: str | None, reason: str = "") -> dict:
     if event == "PreToolUse":
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": event,
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "Pensieve could not verify this conversation. "
-                "Retry after the plugin reconnects.",
-            }
-        }
+        return deny(
+            "Pensieve could not verify this conversation. Retry after the plugin reconnects."
+        )
     return {
         "hookSpecificOutput": {
             "hookEventName": event,
@@ -166,7 +177,18 @@ def run_hook(
         return failure(event, client, None)
     if event == "PreToolUse":
         tool = str(payload.get("tool_name", ""))
-        if client != "claude" or not tool.startswith(BOUND_TOOL_PREFIXES):
+        if client != "claude":
+            return {}
+        # A bridged id names no server, so a company call is recognised as
+        # capture recognises one: a Pensieve tool that names its context.
+        bridged = BRIDGED_TOOL.fullmatch(tool)
+        if bridged and context_use(tool, None, payload.get("tool_input")):
+            return deny(
+                f"Call {PLUGIN_TOOL_PREFIX}{bridged[1]} with the same arguments instead. "
+                "This Pensieve connector does not identify the conversation, so its company "
+                "use cannot start transcript saving."
+            )
+        if not tool.startswith(BOUND_TOOL_PREFIXES):
             return {}
         # Other Pensieve connections are bound too, so their calls carry this
         # conversation. A binding is correlation only: the server still
@@ -289,7 +311,10 @@ def main() -> None:
             conversation_id(payload.get("session_id")),
         )
     print(json.dumps(result))
-    if result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+    output = result.get("hookSpecificOutput", {})
+    if output.get("permissionDecision") == "deny":
+        # A blocking exit reaches the model through stderr, not the JSON above.
+        print(output["permissionDecisionReason"], file=sys.stderr)
         raise SystemExit(2)
 
 
