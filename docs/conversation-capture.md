@@ -109,8 +109,22 @@ calls it can tie to the conversation (Codex's thread ID or a bound Claude
 tool-use ID), so the helper also reads company tool calls' `context_id` from the
 transcript, whichever connection carried them: any MCP server whose name contains
 "pensieve", and Pensieve's company tool names on any other server. This is the
-backstop when a binding hook fails open or a connection is never bound. Generic
+backstop when a binding hook fails open or a connection is never bound, which
+is every call through Claude desktop's connectors. Claude subagents' transcripts
+(`<session>/subagents/agent-*.jsonl`) are read for company calls too: they are
+never captured, but their results return to the conversation. Nothing uploads
+while unread subagent bytes remain; a replaced subagent file is reread whole, and
+records too large to decode are skipped: they are tool results, since a model's
+own call is far smaller. A second company discovered in a subagent discards every
+pending parent turn and unacknowledged batch, including turns held across scan
+budgets. Subagent observations arrive out of parent-turn order, so withdrawing
+only the current turn cannot establish a safe boundary. Already accepted server
+history is unchanged. Generic
 help and `list_contexts()` are discovery, not company exposure.
+Each conversation's scan, observation and upload share one nonblocking private
+lock, including recovery and pathless exit hooks. A concurrent hook retries on
+the next lifecycle event instead of appending unverified turns to an upload
+whose subagent observation has already completed.
 Authenticated briefing contexts persist across account and consent changes;
 turning sharing off does not remove a briefing from the model's working memory.
 The local guard is conservative: an attempt to call another company may stop

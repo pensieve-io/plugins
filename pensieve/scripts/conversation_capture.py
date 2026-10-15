@@ -19,24 +19,33 @@ import stat
 import sys
 import time
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_adapters import aware_time, normalise
+from capture_adapters import aware_time, claude_call_contexts, normalise
 from capture_config import (
     credential_revocations,
     encoded,
     key_for,
     observe_credentials,
     private_directory,
+    private_lock,
     profiles,
 )
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
-from capture_state import apply_item, block, discard_conversation, migrate_state, scope_revoked
-from context_receipt import conversation_id
+from capture_state import (
+    apply_item,
+    block,
+    discard_conversation,
+    migrate_state,
+    record_context_use,
+    scope_revoked,
+)
+from context_receipt import conversation_id, json_object
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
 CONFIG_PATH = Path.home() / ".config/pensieve/capture.json"
@@ -44,6 +53,9 @@ STATE_PATH = Path.home() / ".local/state/pensieve/capture"
 MAX_INPUT_BYTES = 65536
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_SCAN_BYTES = 4 * 1024 * 1024
+# A subagent transcript opens with its own uuids and timestamps, so this many
+# bytes tell a replacement from the file already read.
+SUBAGENT_IDENTITY_BYTES = 4096
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
 
@@ -409,6 +421,59 @@ def scan(
             ]
 
 
+def observe_subagents(db, state, path: Path, session: str, deadline: float) -> bool:
+    """Count company calls made inside this Claude conversation's subagents.
+
+    Their transcripts sit beside the conversation's and are never captured, but
+    their results return to it. A second company there must stop saving before
+    this hook uploads the turn that relayed it, since Claude desktop's relayed
+    connector calls never reach the server with this conversation's identity.
+    Returns False when the budget or deadline ends the read early, so nothing
+    uploads past an unread call.
+    """
+    offsets = state.setdefault("subagent_offsets", {})
+    budget = MAX_SCAN_BYTES
+    for transcript in sorted(path.with_suffix("").glob("subagents/agent-*.jsonl")):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            handle = os.fdopen(os.open(transcript, flags), "rb")
+        except OSError:
+            return False  # An unreadable transcript cannot establish safety.
+        with handle:
+            details = os.fstat(handle.fileno())
+            if not stat.S_ISREG(details.st_mode):
+                return False
+            # Identify the file by its opening bytes: an inode can be reused at
+            # once. A replaced or truncated file is reread whole, which only adds
+            # companies.
+            opening = hashlib.sha256(handle.read(SUBAGENT_IDENTITY_BYTES)).hexdigest()
+            known = offsets.get(transcript.name)
+            fresh = not known or known[0] != opening or known[1] > details.st_size
+            handle.seek(0 if fresh else known[1])
+            while True:
+                line = handle.readline(MAX_RECORD_BYTES + 1)
+                if line and (len(line) > budget or time.monotonic() >= deadline):
+                    return False  # Left unread for the next hook's fresh budget.
+                budget -= len(line)
+                if len(line) <= MAX_RECORD_BYTES and not line.endswith(b"\n"):
+                    if line:
+                        return False  # The host has yet to finish this record.
+                    break
+                # A record too large to decode is a tool result, since a model's
+                # own call is far smaller. Its chunks do not parse as records.
+                if record := json_object(line):
+                    for context in claude_call_contexts(record, session):
+                        record_context_use(db, state, context)
+                        if state.get("capture_stopped"):
+                            # Subagent exposure is observed out of parent-turn
+                            # order. No queued turn or unacknowledged batch can
+                            # be proven to precede it; withdraw the whole spool.
+                            discard_conversation(db, state, "multiple_contexts")
+                            return True
+                offsets[transcript.name] = [opening, handle.tell()]
+    return True
+
+
 def next_batch(db, segment, client, session):
     existing = db.execute("SELECT * FROM batches WHERE segment=?", (segment["id"],)).fetchone()
     if existing:
@@ -566,6 +631,17 @@ def retire_segment(db, segment_id):
 
 
 def flush(db, configured, client, session, endpoint, deadline):
+    if client == "claude":
+        # Every upload path, including pathless exits and stopped/recovered
+        # sessions, must finish observing subagents before sending queued work.
+        db.execute("BEGIN IMMEDIATE")
+        state = load_state(db)
+        path = state.get("path")
+        observed = not path or observe_subagents(db, state, Path(path), session, deadline)
+        save_state(db, state)
+        db.commit()
+        if not observed:
+            return
     denied = set()
     while time.monotonic() < deadline:
         progressed = False
@@ -645,9 +721,13 @@ def capture_session(
     recover=False,
 ):
     """Resume one known spool, preserving its original ownership and identities."""
-    db = connect_state(state_root, client, session)
     source_error = None
-    try:
+    # A second hook must not append unverified parent events between subagent
+    # observation and batch creation. Recovery uses this same nonblocking lock.
+    with (
+        private_lock(state_root / f"{client}-{session}.lock"),
+        closing(connect_state(state_root, client, session)) as db,
+    ):
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
         if state["offset"] is None and not state.get("path") and not allow_new_file:
@@ -705,8 +785,6 @@ def capture_session(
         save_state(db, state)
         db.commit()
         flush(db, configured, client, session, endpoint, deadline)
-    finally:
-        db.close()
     return source_error
 
 
