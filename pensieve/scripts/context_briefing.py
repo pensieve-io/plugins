@@ -18,7 +18,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_adapters import claude_call_contexts
 from capture_config import (
     CONFIG_PATH,
     MAX_CONFIG_BYTES,
@@ -35,7 +34,6 @@ from context_receipt import (
     json_object,
     latest_receipt,
     send_receipt,
-    transcript_tail,
 )
 from plugin_connection import (
     CONNECTION_ENDPOINT,
@@ -55,10 +53,6 @@ class NoRedirects(HTTPRedirectHandler):
 
 MAX_RESPONSE_BYTES = 32 * 1024
 HTTP_TIMEOUT_SECONDS = 3
-# The server records only companies it can prove, so a few spares let a second
-# real company through after unproven ones. Context ids are Postgres integers.
-MAX_OBSERVED_CONTEXTS = 8
-MAX_CONTEXT_ID = 2**31 - 1
 
 
 def checked_endpoint(value: str) -> str:
@@ -109,26 +103,6 @@ def request(
         return exc.code, None
     except (OSError, URLError, ValueError):
         return "unavailable", None
-
-
-def observed_contexts(transcript_path: object, session: str) -> list[int]:
-    """Companies this Claude conversation's own Pensieve calls named, oldest first.
-
-    Claude desktop relays connector calls without their tool-use id, so no
-    `PreToolUse` binding can tie them to this conversation on the server. The
-    transcript still shows each call's explicit `context_id`, read as capture reads
-    it. A bounded tail suffices: every prompt reports the turns before it.
-    """
-    tail = transcript_tail(transcript_path)
-    seen: list[int] = []
-    for line in tail[0] if tail else []:
-        record = json_object(line)
-        for context in claude_call_contexts(record, session) if record else []:
-            if context <= MAX_CONTEXT_ID and context not in seen:
-                seen.append(context)
-                if len(seen) == MAX_OBSERVED_CONTEXTS:
-                    return seen
-    return seen
 
 
 def state_path(config: Path, client: str, session: str) -> Path:
@@ -247,12 +221,6 @@ def run_hook(
         }
         if force:
             body["force_refresh"] = True
-        # Codex names its thread on every call, so only Claude needs this. Sent
-        # only when present, so a conversation with no company call is unchanged.
-        if client == "claude":
-            observed = observed_contexts(payload.get("transcript_path"), session)
-            if observed:
-                body["observed_context_ids"] = observed
         source = payload.get("source")
         if isinstance(source, str) and len(source) <= 100:
             body["source"] = source
