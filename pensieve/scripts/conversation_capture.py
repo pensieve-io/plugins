@@ -38,6 +38,7 @@ from capture_config import (
 )
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
 from capture_state import (
+    CONTEXT_BOUNDARY_VERSION,
     apply_item,
     block,
     discard_conversation,
@@ -108,7 +109,7 @@ def load_state(db: sqlite3.Connection) -> dict:
             "sequence": 0,
             "phase": "ready",
             "adapter": {},
-            "context_boundary_version": 2,
+            "context_boundary_version": CONTEXT_BOUNDARY_VERSION,
         }
     state = json.loads(row[0])
     if not isinstance(state, dict):

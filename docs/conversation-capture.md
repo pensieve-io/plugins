@@ -106,8 +106,12 @@ A conversation is saved to one context: the first company whose briefing or
 company tool content it receives. A sticky root briefing counts even when the
 first tool then targets another company. The server records exposure only for
 calls it can tie to the conversation (Codex's thread ID or a bound Claude
-tool-use ID), so the helper also reads company tool calls' `context_id` from the
-transcript, whichever connection carried them: any MCP server whose name contains
+tool-use ID), so the helper also reads company tool calls' `context_id`, or the
+context carried by canonical `https://app.pensieve.uk/r/...` URLs in
+`read.identifier` when the separate id is omitted. A batch of URLs must all
+identify the same context, matching the server's implicit read routing. A valid
+explicit id takes precedence. This applies whichever connection carried them:
+any MCP server whose name contains
 "pensieve", and Pensieve's company tool names on any other server. This is the
 backstop when a binding hook fails open or a connection is never bound, which
 is every call through Claude desktop's connectors. Claude subagents' transcripts
@@ -129,7 +133,11 @@ Authenticated briefing contexts persist across account and consent changes;
 turning sharing off does not remove a briefing from the model's working memory.
 The local guard is conservative: an attempt to call another company may stop
 saving even if the server later rejects that call. It does not duplicate server
-validation or infer safety from arbitrary error text.
+validation, infer safety from arbitrary error text, or identify a provider for
+tool redirection. Local boundary version 3 fences spools consumed before URL
+exposure detection: pending content is discarded and those conversations cannot
+resume saving. Start a new conversation after upgrading; already accepted
+history is retained. This local boundary version does not change wire protocol 2.
 When a second company appears, saving stops for the rest of the host conversation.
 The current turn's unsent events are withdrawn and later markers cannot restart
 saving, even for the first company, because both companies remain in the model's

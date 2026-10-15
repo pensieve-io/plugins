@@ -1,5 +1,6 @@
 """Command hooks retain context without exposing credentials or a model tool."""
 
+import io
 import json
 
 import capture_config as config
@@ -189,6 +190,87 @@ def test_claude_binding_covers_other_pensieve_connections(setup, tool_name, prov
     assert briefing.run_hook(event, "claude", path) == {}
     bindings = [c[3] for c in calls if c[3] and c[3].get("tool_use_id") == "toolu_456"]
     assert bool(bindings) is bound
+
+
+BRIDGED = "mcp__a8c774c8-f47c-4458-90f3-9f3d3522c6a3__"
+
+
+@pytest.mark.parametrize(
+    "tool,arguments",
+    [
+        ("read", {"identifier": "page:1", "context_id": 497}),
+        ("read", {"identifier": "https://app.pensieve.uk/r/497/page/1"}),
+        ("search", '{"query": "pricing", "context_id": 497}'),
+        ("edit_page", {"context_id": 497, "content": "Other provider's content"}),
+        ("info", {"context_id": 497}),
+        ("read", {"container": {"kind": "project", "id": "doc"}}),
+    ],
+)
+def test_opaque_connectors_are_never_rerouted_by_their_argument_shape(setup, tool, arguments):
+    path, calls = setup
+    event = dict(
+        payload("PreToolUse"),
+        tool_name=BRIDGED + tool,
+        tool_input=arguments,
+        tool_use_id="toolu_789",
+        mcp_server={"name": BRIDGED[5:-2], "source": "sdk"},
+    )
+    result = briefing.run_hook(event, "claude", path)
+    assert result == {}
+    # The UUID cannot establish either provider identity or account equivalence.
+    assert calls == []
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize(
+    "content", [None, "", "company primer\n<!-- pensieve-delivery token=opaque -->"]
+)
+def test_tool_preference_only_prefixes_authenticated_claude_briefings(
+    setup, monkeypatch, client, content
+):
+    path, calls = setup
+    key = profile()
+    key["client"] = client
+    config.install_profile(path, key)
+    result = (
+        {}
+        if content is None
+        else {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": content,
+            }
+        }
+    )
+    monkeypatch.setattr(briefing, "request", lambda *_a, **_kw: (200, result))
+    actual = briefing.run_hook(payload(), client, path)
+    if content is None:
+        assert actual == {}
+    else:
+        expected = (
+            briefing.CLAUDE_TOOL_GUIDANCE + "\n\n" + content
+            if client == "claude" and content
+            else content
+        )
+        assert actual["hookSpecificOutput"]["additionalContext"] == expected
+
+
+def test_a_denied_call_tells_the_model_why(monkeypatch, capsys):
+    event = dict(
+        payload("PreToolUse"),
+        tool_name="mcp__plugin_pensieve_pensieve__read",
+        tool_use_id="invalid call id",
+    )
+    monkeypatch.setattr(briefing.sys, "argv", ["context_briefing.py", "--client", "claude"])
+    stdin = io.TextIOWrapper(io.BytesIO(json.dumps(event).encode()))
+    monkeypatch.setattr(briefing.sys, "stdin", stdin)
+    with pytest.raises(SystemExit) as exited:
+        briefing.main()
+    # Older Claude hosts need stderr; current hosts can also apply the JSON.
+    assert exited.value.code == 2
+    captured = capsys.readouterr()
+    reason = json.loads(captured.out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason in captured.err
 
 
 def test_claude_binding_failure_denies_without_exposing_error_or_secret(setup, monkeypatch):

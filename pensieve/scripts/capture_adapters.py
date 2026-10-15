@@ -10,6 +10,7 @@ import json
 import re
 from datetime import datetime
 from typing import Literal, TypedDict
+from urllib.parse import parse_qs, urlsplit
 
 from context_receipt import accepted_contexts, conversation_id
 
@@ -172,11 +173,57 @@ def mcp_tool(name: object, namespace: object) -> tuple[str, str] | None:
     return (server, tool) if name.startswith("mcp__") and server else None
 
 
+def reference_context(identifier: object) -> int | None:
+    """The company named by a read's canonical production Pensieve links.
+
+    Mirrors the server's implicit read routing: every reference must be a
+    canonical link to the same context. This observes exposure only; it never
+    establishes the identity or authority of an MCP connection.
+    """
+    references = identifier if isinstance(identifier, list) else [identifier]
+    contexts = set()
+    for reference in references:
+        if not isinstance(reference, str):
+            return None
+        try:
+            url = urlsplit(reference.strip())
+            if (
+                url.scheme != "https"
+                or url.hostname != "app.pensieve.uk"
+                or url.port not in {None, 443}
+                or url.username is not None
+                or url.password is not None
+                or url.fragment
+            ):
+                return None
+            match = re.fullmatch(
+                r"/r/([1-9]\d*)/(page|data|decision|correction|transcript)/[1-9]\d*", url.path
+            )
+            if match is None:
+                return None
+            query = (
+                parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+                if url.query
+                else {}
+            )
+            if query and (
+                set(query) != {"anchor"}
+                or len(query["anchor"]) != 1
+                or match[2] not in {"data", "transcript"}
+                or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", query["anchor"][0])
+            ):
+                return None
+            contexts.add(int(match[1]))
+        except ValueError:
+            return None
+    return contexts.pop() if len(contexts) == 1 else None
+
+
 def context_use(name: object, namespace: object, arguments: object) -> list[CaptureEvent]:
     """A Pensieve call that names its context, wherever the call was routed.
 
-    Tools route by an explicit context_id, so the transcript itself shows every
-    company a conversation touched. The server records only calls it can tie to
+    Tools route by an explicit context_id or a read's canonical links. The
+    server records only calls it can tie to
     this conversation; this also catches the rest: a hook that failed open, a
     connection the hook does not bind, or Pensieve under another server name.
     Capture state stops on a second context; nothing else is inferred.
@@ -197,6 +244,8 @@ def context_use(name: object, namespace: object, arguments: object) -> list[Capt
     ):
         return []
     context = arguments.get("context_id") if isinstance(arguments, dict) else None
+    if context is None and tool == "read" and isinstance(arguments, dict):
+        context = reference_context(arguments.get("identifier"))
     if type(context) is not int or context <= 0:
         return []
     return [{"kind": "context_use", "context_id": context}]

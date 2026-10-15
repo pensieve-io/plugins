@@ -128,18 +128,29 @@ PLUGIN_TOOL_PREFIX = "mcp__plugin_pensieve_pensieve__"
 # The plugin's server, the claude.ai connector and a server added by hand as
 # `pensieve`. Only the plugin's tools are checked against native provenance.
 BOUND_TOOL_PREFIXES = (PLUGIN_TOOL_PREFIX, "mcp__claude_ai_Pensieve__", "mcp__pensieve__")
+CLAUDE_TOOL_GUIDANCE = (
+    "For this Pensieve briefing, prefer mcp__plugin_pensieve_pensieve__* tools when "
+    "available: they identify this conversation for grounding and optional saving. "
+    "Other Pensieve connections may use a different account; do not substitute "
+    "accounts automatically."
+)
+
+
+def deny(reason: str) -> dict:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
 def failure(event: str, client: str, session: str | None, reason: str = "") -> dict:
     if event == "PreToolUse":
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": event,
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "Pensieve could not verify this conversation. "
-                "Retry after the plugin reconnects.",
-            }
-        }
+        return deny(
+            "Pensieve could not verify this conversation. Retry after the plugin reconnects."
+        )
     return {
         "hookSpecificOutput": {
             "hookEventName": event,
@@ -166,7 +177,9 @@ def run_hook(
         return failure(event, client, None)
     if event == "PreToolUse":
         tool = str(payload.get("tool_name", ""))
-        if client != "claude" or not tool.startswith(BOUND_TOOL_PREFIXES):
+        if client != "claude":
+            return {}
+        if not tool.startswith(BOUND_TOOL_PREFIXES):
             return {}
         # Other Pensieve connections are bound too, so their calls carry this
         # conversation. A binding is correlation only: the server still
@@ -239,6 +252,13 @@ def run_hook(
                 if available:
                     state.pop("needs_refresh", None)
                 save_private_json(path, state)
+                if client == "claude" and output and output.get("additionalContext"):
+                    # Only this authenticated plugin briefing establishes its
+                    # account. Opaque connectors cannot safely be redirected.
+                    # Keep the server's receipt and capture markers intact.
+                    output["additionalContext"] = (
+                        CLAUDE_TOOL_GUIDANCE + "\n\n" + output["additionalContext"]
+                    )
                 return result
         save_private_json(path, state)
         print(
@@ -289,7 +309,11 @@ def main() -> None:
             conversation_id(payload.get("session_id")),
         )
     print(json.dumps(result))
-    if result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+    output = result.get("hookSpecificOutput", {})
+    if output.get("permissionDecision") == "deny":
+        # Older hosts use stderr for exit-2 denials; keep the same reason in
+        # both channels for hosts that also apply the structured decision.
+        print(output["permissionDecisionReason"], file=sys.stderr)
         raise SystemExit(2)
 
 
