@@ -1,5 +1,23 @@
 # Client hook probes
 
+## Subagent capture and plugin tool preference — 15 October 2026
+
+The combined plugins #20/#21 candidate passed the packaged Claude Code 2.1.300
+probe: all 15 hook/briefing checks and 20 capture checks. Native model input
+received the plugin-tool preference on startup and after compaction. Exact-call
+binding, resume, clear, receipt acknowledgement/reset, byte-identical retries,
+fork exclusion and interrupted-turn handling all passed. The complete Python
+3.12 package suite passed 412 tests, including deferred subagent observations,
+pathless exits, concurrent hooks, citation-only direct/child company reads and
+the local version-3 upgrade fence. Upload wire protocol remains version 2 and
+the deployed compatibility check passed.
+
+These probes use synthetic credentials and local model/MCP services. They
+establish native CLI hook delivery, not live desktop agent selection of the
+preferred server or desktop capture acceptance. Opaque desktop connectors are
+never forcibly redirected. Existing conversations parsed by an older capture
+boundary stop saving on upgrade; a new conversation starts under the new guard.
+
 ## Native authentication and private-header validation
 
 `python3 scripts/probe_native_oauth.py` runs installed Claude against a disposable
