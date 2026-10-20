@@ -261,6 +261,10 @@ manifests or service/network failure preserve exact batches.
 Redirects and arbitrary service origins remain disallowed. Each process caches
 checks for at most 30 seconds; the next lifecycle hook starts fresh. Servers also
 reject unsupported `X-Pensieve-Capture-Protocol` versions with 426. A deleted or disabled segment returns a scoped 410; deployment route 404 remains retryable.
+A context whose service is paused (billing hold or operator pause) returns 403
+with `reason: "service_hold"`. Its batches are retained unchanged and recorded as
+`service_hold`, distinct from a refused key (`forbidden`), so they upload once
+service resumes.
 
 Connectors distinguishes Sharing enabled from Last saved, which records a
 retained accepted server upload, not proof of an empty device queue. For a known
