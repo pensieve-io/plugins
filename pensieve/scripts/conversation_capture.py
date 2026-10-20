@@ -595,6 +595,15 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
                     "conversation_stopped": result.get("conversation_stopped") is True,
                 }
             return False
+        if exc.code == 403:
+            # A paused context refuses incoming data without touching the key
+            # or consent, so the same batch is retried once service resumes.
+            try:
+                result = json.loads(exc.read(4097))
+            except (OSError, ValueError):
+                result = None
+            if isinstance(result, dict) and result.get("reason") == "service_hold":
+                return {"status": "service_hold"}
         if exc.code in {401, 403}:
             return "forbidden"
         if exc.code == 426:
@@ -685,7 +694,12 @@ def flush(db, configured, client, session, endpoint, deadline):
                 retire_segment(db, segment["id"])
                 progressed = True
                 continue
-            if outcome == "forbidden":
+            if status in {"forbidden", "service_hold"}:
+                if status == "service_hold":
+                    print(
+                        "Pensieve capture held: this context's service is paused; queued work retained.",
+                        file=sys.stderr,
+                    )
                 denied.add(scope)
                 continue
             if not isinstance(outcome, dict) or outcome["status"] != "accepted":

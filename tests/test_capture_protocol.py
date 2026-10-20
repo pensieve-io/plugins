@@ -116,3 +116,82 @@ def test_status_does_not_create_capture_state(tmp_path):
     root = tmp_path / "absent"
     assert capture.saving_status(root, "codex", SESSION)["status"] == "not_started"
     assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    "refusal,status",
+    [
+        ({"detail": "AI work is paused", "reason": "service_hold"}, "service_hold"),
+        ({"detail": "Upload key is unavailable"}, "forbidden"),
+    ],
+)
+def test_service_hold_is_recorded_apart_from_a_refused_key(
+    tmp_path, monkeypatch, capsys, refusal, status
+):
+    real_upload = capture.upload
+    path, cfg, root, _, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    append(path, user(), hook_record(), assistant())
+    run()
+    db = capture.connect_state(root, "codex", SESSION)
+    before = tuple(db.execute("SELECT body,sha,event_ids FROM batches").fetchone())
+    db.close()
+    state = {"refusal": refusal, "uploads": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(MANIFEST).encode())
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if state["refusal"] is not None:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(json.dumps(state["refusal"]).encode())
+                return
+            state["uploads"].append(raw)
+            batch = json.loads(raw)
+            result = {
+                "batch_id": batch["batch_id"],
+                "batch_sha256": hashlib.sha256(raw).hexdigest(),
+                "segment_id": batch["segment_id"],
+                "conversation_id": SESSION,
+                "accepted_events": len(batch["events"]),
+                "expires_at": None,
+            }
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(capture, "upload", real_upload)
+    endpoint = f"http://127.0.0.1:{server.server_port}/hooks/conversations"
+
+    def retry():
+        capture.run_hook(
+            {"session_id": SESSION, "hook_event_name": "Stop"}, "codex", cfg, root, endpoint
+        )
+
+    try:
+        protocol._cache.clear()
+        capsys.readouterr()
+        retry()
+        recorded = capture.saving_status(root, "codex", SESSION)["segments"][0]
+        assert recorded["status"] == status and recorded["queued_events"] == 2
+        held = "service is paused" in capsys.readouterr().err
+        assert held is (status == "service_hold")
+        state["refusal"] = None
+        retry()
+        assert state["uploads"] == [before[0]] and pending(root) == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        protocol._cache.clear()
