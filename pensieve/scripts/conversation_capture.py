@@ -928,18 +928,38 @@ def saving_status(root: Path, client: str, session: str) -> dict:
     db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)
     db.row_factory = sqlite3.Row
     try:
+        # Do not use load_state: its migration can retire work. Diagnostics are
+        # read-only, including for legacy spools and permanently stopped chats.
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        row = (
+            db.execute("SELECT body FROM state WHERE id=1").fetchone()
+            if "state" in tables
+            else None
+        )
+        state = json.loads(row[0]) if row else {}
+        if not isinstance(state, dict):
+            raise ValueError("Capture state must be an object")
+        diagnostic = {
+            "phase": state.get("phase"),
+            "blocked_reason": state.get("blocked_reason"),
+            "capture_stopped": bool(state.get("capture_stopped")),
+            "source_baselined": isinstance(state.get("offset"), int)
+            and isinstance(state.get("path"), str),
+        }
         # A pre-upgrade spool has no delivery evidence yet; do not invent it.
-        if not db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='delivery'"
-        ).fetchone():
-            return {"status": "not_observed", "segments": []}
+        if "delivery" not in tables:
+            return {**diagnostic, "status": "not_observed", "segments": []}
         rows = db.execute(
             """SELECT s.context,d.status,d.last_attempt_at,d.last_saved_at,
                       (SELECT count(*) FROM events e WHERE e.segment=s.id) AS queued_events
                FROM segments s LEFT JOIN delivery d ON d.segment=s.id
                WHERE s.retired=0 ORDER BY s.rowid LIMIT 101"""
         ).fetchall()
-        return {"segments": [dict(row) for row in rows[:100]], "truncated": len(rows) > 100}
+        return {
+            **diagnostic,
+            "segments": [dict(row) for row in rows[:100]],
+            "truncated": len(rows) > 100,
+        }
     finally:
         db.close()
 
