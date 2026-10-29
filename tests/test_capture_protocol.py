@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -116,6 +117,40 @@ def test_status_does_not_create_capture_state(tmp_path):
     root = tmp_path / "absent"
     assert capture.saving_status(root, "codex", SESSION)["status"] == "not_started"
     assert not root.exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_status_explains_stopped_capture_without_migrating_or_exposing_bodies(tmp_path, legacy):
+    root = tmp_path / "spool"
+    db = capture.connect_state(root, "codex", SESSION)
+    state = {
+        "phase": "blocked",
+        "blocked_reason": "unproven_start",
+        "capture_stopped": True,
+        "offset": None,
+        "path": "/private/transcript.jsonl",
+        "title": "private conversation title",
+        "context_boundary_version": 0,
+    }
+    capture.save_state(db, state)
+    if legacy:
+        db.execute("DROP TABLE delivery")
+    db.commit()
+    before = list(db.iterdump())
+    db.close()
+    status = capture.saving_status(root, "codex", SESSION)
+    assert status["phase"] == "blocked"
+    assert status["blocked_reason"] == "unproven_start"
+    assert status["capture_stopped"] is True
+    assert status["source_baselined"] is False
+    assert status["segments"] == []
+    assert "/private/" not in json.dumps(status)
+    assert "private conversation title" not in json.dumps(status)
+    if legacy:
+        assert status["status"] == "not_observed"
+    db = sqlite3.connect((root / f"codex-{SESSION}.sqlite3").as_uri() + "?mode=ro", uri=True)
+    assert list(db.iterdump()) == before
+    db.close()
 
 
 @pytest.mark.parametrize(

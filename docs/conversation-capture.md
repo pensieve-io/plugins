@@ -274,9 +274,15 @@ native session, inspect private local delivery status without network or body re
 python3 pensieve/scripts/conversation_capture.py --client codex --status SESSION_UUID
 ```
 
-The result contains per-segment context, queued count, last attempted delivery
+The result includes the capture phase, blocked reason, permanent-stop flag and
+whether a source baseline exists. An empty segment list alone does not mean
+saving is healthy. For example, `blocked_reason: "unproven_start"` with
+`capture_stopped: true` requires a new native conversation after the hooks are
+working; diagnostics never clear that privacy safeguard or backfill history.
+The result also contains per-segment context, queued count, last attempted delivery
 status and last validated acknowledgement time (up to 100 segments). It never
-prints transcript text or keys, creates a spool or infers saving from MCP login.
+prints transcript text, file paths or keys, creates or migrates a spool, or infers
+saving from MCP login.
 
 
 ### Nested Codex write calls
