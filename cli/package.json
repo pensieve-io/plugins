@@ -1,0 +1,28 @@
+{
+  "name": "@pensieve/cli",
+  "version": "0.1.0",
+  "description": "Install the Pensieve plugin, sign in, and read your company's context layer from a shell",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "pensieve": "bin/pensieve.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test"
+  },
+  "homepage": "https://docs.pensieve.uk/mcp-server/clients",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pensieve-io/plugins.git",
+    "directory": "cli"
+  },
+  "license": "UNLICENSED"
+}
