@@ -275,8 +275,55 @@ python3 pensieve/scripts/conversation_capture.py --client codex --status SESSION
 ```
 
 The result contains per-segment context, queued count, last attempted delivery
-status and last validated acknowledgement time (up to 100 segments). It never
-prints transcript text or keys, creates a spool or infers saving from MCP login.
+status and last validated acknowledgement time (up to 100 segments). A stopped
+or blocked conversation adds `stopped` and `blocked_reason` (for example
+`unproven_start`, `conversation_stopped` or `multiple_contexts`), and `health`
+carries the client's upload health below. It never prints transcript text or
+keys, creates a spool or infers saving from MCP login.
+
+#### Upload health
+
+Every upload attempt records `health-<client>.json` beside the spools
+(`~/.local/state/pensieve/capture`, file `0600`), written atomically:
+
+```json
+{"last_attempt_at": "…", "last_outcome": "uploaded", "last_success_at": "…", "consecutive_failures": 0}
+```
+
+`last_outcome` is `uploaded`, `service_hold`, `capture_disabled`, `deleted`,
+`conversation_stopped`, `forbidden`, `incompatible`, `invalid_receipt`,
+`network_error` or `http_<code>`, or the local refusal `unproven_start`. Any
+outcome but `uploaded` adds one to `consecutive_failures`, except the local
+refusal, which says nothing about the service; `uploaded` resets it. The file is
+per client, covering recovery of other conversations too, and holds outcome
+names and times only: no transcript content, key or conversation identity. A
+busy health file is skipped rather than delaying an upload.
+
+#### Not-saving notice
+
+When a conversation stops saving for a reason its member would want to know,
+the next `UserPromptSubmit` capture hook adds one short `additionalContext`
+notice saying why, how to fix it and the `--status` command above:
+
+| Reason | When |
+| --- | --- |
+| `unproven_start` | The hooks did not see the conversation start, and its newest marker shows sharing on |
+| `conversation_stopped` | The service stopped the conversation (a second company or an account change) |
+| `service_hold` | The latest upload was held because the context's service is paused |
+| `capture_disabled` | The latest upload was refused because sharing is off |
+| `upload_failing` | The latest upload failed and at least three in a row have |
+
+Each reason is shown at most once per conversation, recorded in that
+conversation's spool. A stop the conversation caused itself, such as using a
+second company, adds no notice.
+
+#### Conversation anchors
+
+A saved conversation is also linked to the commits, pushes and pull requests
+its own agent makes, through the `PostToolUse` hook described in
+[conversation anchors](hook-protocol.md#conversation-anchors). Anchors carry
+repository identities only, never transcript text, and are sent only for a
+conversation that is already being saved.
 
 
 ### Nested Codex write calls

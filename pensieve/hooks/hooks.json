@@ -71,6 +71,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/git_anchor.py\" --client claude",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

@@ -89,7 +89,9 @@ def test_skills_have_valid_identity_and_a_visible_readme_entry():
 def test_host_adapters_use_command_briefing_and_preserve_capture(client, filename):
     hooks = read_json(PLUGIN / "hooks" / filename)["hooks"]
     expected = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
-    assert set(hooks) == expected | ({"PreToolUse"} if client == "claude" else set())
+    assert set(hooks) == expected | {"PostToolUse"} | (
+        {"PreToolUse"} if client == "claude" else set()
+    )
     flattened = [hook for entries in hooks.values() for entry in entries for hook in entry["hooks"]]
     assert all(hook["type"] == "command" for hook in flattened)
     assert all(" --client " + client in hook["command"] for hook in flattened)
@@ -104,6 +106,11 @@ def test_host_adapters_use_command_briefing_and_preserve_capture(client, filenam
         assert hooks["PreToolUse"][0]["matcher"] == (
             "^mcp__(plugin_pensieve_pensieve|claude_ai_Pensieve|pensieve)__.*$"
         )
-    for script in ("context_briefing", "context_receipt", "conversation_capture"):
+    # Anchors watch the shell tool only, which both hosts name `Bash`.
+    assert len(hooks["PostToolUse"]) == 1
+    assert hooks["PostToolUse"][0]["matcher"] == "^Bash$"
+    [anchor] = hooks["PostToolUse"][0]["hooks"]
+    assert "git_anchor.py" in anchor["command"]
+    for script in ("context_briefing", "context_receipt", "conversation_capture", "git_anchor"):
         assert (PLUGIN / "scripts" / (script + ".py")).is_file()
     assert all(hook["timeout"] == 1 for group in hooks["SessionEnd"] for hook in group["hooks"])
