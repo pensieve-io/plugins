@@ -253,7 +253,9 @@ preference, while another context or harness has its own choice. Declining keeps
 and does not trigger repeated prompts. After either choice, change sharing directly in **Data → Connectors in the context**. Declining keeps the hook linked with saving off; no reconnect action is needed.
 Normal hooks complete pending setup and retry authorised uploads. V1 saves new
 work in fresh conversations, with no history import. Forks and conversations
-whose earlier company exposure was not observed cannot save; start a fresh chat. Saved transcripts remain until
+whose earlier company exposure was not observed cannot save; start a fresh chat, and the
+plugin tells the agent once when a conversation is not being saved. A saved conversation is
+also linked to the commits, pushes and pull requests its agent makes. Saved transcripts remain until
 explicitly deleted.
 
 The MCP manifest embeds the same private header helper for Codex, whose HTTP

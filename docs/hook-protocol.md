@@ -20,6 +20,22 @@ renews at SessionStart. `force_refresh` restores grounding after compaction,
 missing transcripts or a bounded tail that cannot establish delivery. It does
 not change the event, so a recovered prompt still receives its capture marker.
 
+Inside a git work tree with an `origin` remote, the request also carries
+`workspace: {repo_url, branch, head_sha}` (`git_workspace.py`), probed in the
+hook payload's `cwd` with a 300 ms timeout per git call. `repo_url` is
+`git remote get-url origin` with any userinfo, query and fragment removed
+(`https://x-access-token:…@github.com/o/r.git` → `https://github.com/o/r.git`);
+scp-style `git@host:o/r.git` is sent unchanged for the server to normalise, and
+a local-path or `file://` remote sends no workspace. `branch` is
+`git symbolic-ref --short -q HEAD`, null when detached; `head_sha` is the 40-hex
+`HEAD`, null in a repository with no commits. Outside a work tree, without
+`origin`, on any git failure or timeout, or if the field would take the request
+past its 2,048-byte limit, the key is omitted, never sent as null. The service
+uses it to list other saved conversations on the same repository and branch and,
+once this conversation's first turn is saved, to give the agent its transcript
+link for a `Pensieve-Conversation:` commit or PR trailer. Both arrive inside the
+ordinary `additionalContext`; the plugin renders nothing itself.
+
 The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
 and `hookSpecificOutput.additionalContext`. A root-rendering fallback also sets
 `briefing_available: false`; the script consumes that field before forwarding
@@ -176,6 +192,77 @@ user turn can start a new segment. Unknown or mismatched 410 responses cannot
 erase the queue. See
 [capture setup and boundaries](conversation-capture.md).
 
+
+## Conversation anchors
+
+`git_anchor.py` is a `PostToolUse` command hook on the shell tool, which both
+hosts name `Bash` (matcher `^Bash$`; Codex 0.166's `post-tool-use.command.input`
+carries `cwd`, `tool_input.command` and `tool_response`). It links a saved
+conversation to the commits, pushes and pull requests its agent makes:
+
+| Command (also with `git -C <dir>`, `-c k=v`, env prefixes, `cd <dir> &&`, chained with `&&`, `;`, `\|` or newlines) | `kind` | Recorded |
+| --- | --- | --- |
+| `git commit` | `commit` | `HEAD` after the command, current branch |
+| `git push` | `push` | `HEAD`, current branch |
+| `gh pr create` | `pull_request` | the last `https://<host>/<owner>/<repo>/pull/<n>` in the tool output, `HEAD`, current branch |
+
+`gh pr view`, `gh pr merge` and every other command are ignored, as is a quoted
+or echoed `git commit`. At most three anchors are sent per command.
+
+It posts `POST https://mcp.pensieve.uk/hooks/conversations/anchors` (the upload
+endpoint plus `/anchors`, with the same loopback-only fixture override) with
+`Authorization: Bearer <the conversation's upload key>`,
+`X-Pensieve-Capture-Protocol: 2` and `User-Agent: Pensieve-Plugin-Capture/1.0`:
+
+```json
+{"client": "claude", "host_conversation_id": "<hook session_id>", "context_id": 497,
+ "kind": "commit", "repo_url": "https://github.com/o/r.git", "branch": "main",
+ "commit_sha": "<40 hex>", "pr_number": null, "pr_url": null}
+```
+
+Every field is always present; `repo_url` and `branch` follow the briefing
+`workspace` rules, and a request over 2,048 bytes is not sent. 200
+(`{anchor_id, conversation_id, created}`) is idempotent. Each request has a
+3-second timeout within a 4-second budget. 401, 403 (`service_hold` or an
+unavailable key), 410 `capture_disabled` and 422 are reported on stderr only.
+
+An agent often commits in a conversation's first turn, before its first upload
+at Stop, when the service could only answer 404 `{"reason": "not_saved"}`. While
+no upload in the conversation's context has been accepted, the hook therefore
+queues the anchor instead of posting it; it also queues one answered 404, 426,
+429, 5xx or not at all. The queue (`anchor_queue.py`) is
+`<client>-<session>.anchors.json` beside the conversation's spool: a private
+JSON list of at most 20 entries (the oldest go first), deduplicated by kind,
+commit and pull request URL, written atomically under its own lock, holding
+each anchor body and its owner only. Entries older than 24 hours are dropped.
+
+After the capture hook's flush (the Stop that uploads the first turn, or any
+later hook), pending anchors whose context now holds an accepted upload are
+posted with that scope's upload key, within the same 3-second requests and a
+4-second cap inside the hook's own deadline. 200 and permanent refusals (401,
+403, 404 now that the transcript is known to be saved, 410, 422) remove an
+entry; no answer, 426, 429 or 5xx keep it for the next flush. A stopped
+conversation's queue is discarded unsent.
+
+The conversation is the hook's own `session_id`, never one inferred from the
+working directory, so a commit by a person or by another conversation in the
+same repository is never attributed to it. Nothing is sent unless:
+
+- the host reports the command finished successfully: failed commands are
+  filtered by exit status (`exit_code`, or Codex's `Exit code: N` output),
+  interruption, background execution and, for commits, the HEAD guard below;
+- for `commit`, `HEAD` was committed within the last ten minutes, so
+  `git commit …; echo done` with nothing to commit does not anchor an old commit;
+- the command ran inside a work tree with an `origin` remote;
+- the conversation's transcript is being shared: it has a local spool that is
+  not stopped; the newest native capture marker in its own transcript (or, with
+  none, the spool's attributed scope) names a context with an enabled consent
+  generation; that context's latest upload was not held (`service_hold`) or
+  refused (`forbidden`); the generation's segment is not retired or disabled;
+  and a key is configured for that scope. Anything else is dropped, not queued.
+
+The spool is read read-only without its lock; any error, timeout or unreachable
+service fails open. The hook always prints `{}` and never adds model context.
 
 ## Hook registration and sharing
 

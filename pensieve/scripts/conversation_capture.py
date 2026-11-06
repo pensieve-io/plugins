@@ -36,6 +36,7 @@ from capture_config import (
     private_lock,
     profiles,
 )
+from capture_health import read_health, record_health
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
 from capture_state import (
     CONTEXT_BOUNDARY_VERSION,
@@ -196,7 +197,7 @@ def scan(
     }
     previous = state.get("profile_keys")
     revocations = credential_revocations(
-        Path(db.execute("PRAGMA database_list").fetchone()["file"]).parent,
+        root_of(db),
         client,
         legacy_profiles=previous
         if state["offset"] is not None and "observed_revocations" not in state
@@ -556,10 +557,17 @@ def checked_endpoint(endpoint: str) -> str:
     return endpoint
 
 
-def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool | str:
+def unavailable(outcome: str) -> dict:
+    """A retryable failure; `outcome` names it for the health file only."""
+    return {"status": "unavailable", "outcome": outcome}
+
+
+def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | str:
     endpoint = checked_endpoint(endpoint)
     deadline = time.monotonic() + timeout
     compatibility = check(endpoint, "upload", min(0.25, timeout / 2))
+    if compatibility == "unavailable":
+        return unavailable("network_error")
     if compatibility != "compatible":
         return {"status": compatibility}
     request = Request(
@@ -577,14 +585,14 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
     try:
         with opener.open(request, timeout=max(0.05, deadline - time.monotonic())) as response:
             if response.status != 200:
-                return False
+                return unavailable(f"http_{response.status}")
             result = json.loads(response.read(4097))
     except HTTPError as exc:
         if exc.code == 410:
             try:
                 result = json.loads(exc.read(4097))
             except (OSError, ValueError):
-                return False
+                return unavailable("http_410")
             if (
                 isinstance(result, dict)
                 and result.get("segment_id") == batch["segment"]
@@ -594,7 +602,7 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
                     "status": result["reason"],
                     "conversation_stopped": result.get("conversation_stopped") is True,
                 }
-            return False
+            return unavailable("http_410")
         if exc.code == 403:
             # A paused context refuses incoming data without touching the key
             # or consent, so the same batch is retried once service resumes.
@@ -608,9 +616,9 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
             return "forbidden"
         if exc.code == 426:
             return {"status": "incompatible"}
-        return False
+        return unavailable(f"http_{exc.code}")
     except (OSError, URLError, ValueError):
-        return False
+        return unavailable("network_error")
     accepted = (
         isinstance(result, dict)
         and result.get("batch_id") == batch["id"]
@@ -621,7 +629,29 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | bool 
         and "expires_at" in result
         and (result["expires_at"] is None or aware_time(result["expires_at"]) is not None)
     )
-    return {"status": "accepted", "expires_at": result["expires_at"]} if accepted else False
+    if not accepted:
+        return unavailable("invalid_receipt")
+    return {"status": "accepted", "expires_at": result["expires_at"]}
+
+
+def health_outcome(outcome: object) -> str:
+    """Name how one upload attempt resolved, for `health-<client>.json`."""
+    if outcome == "forbidden":
+        return "forbidden"
+    if not isinstance(outcome, dict):
+        return "network_error"
+    if outcome.get("conversation_stopped"):
+        return "conversation_stopped"
+    status = outcome.get("status")
+    if status == "accepted":
+        return "uploaded"
+    if status == "unavailable":
+        return outcome.get("outcome") or "network_error"
+    return status if isinstance(status, str) else "network_error"
+
+
+def root_of(db) -> Path:
+    return Path(db.execute("PRAGMA database_list").fetchone()["file"]).parent
 
 
 def retire_segment(db, segment_id):
@@ -652,6 +682,39 @@ def flush(db, configured, client, session, endpoint, deadline):
         db.commit()
         if not observed:
             return
+    upload_batches(db, configured, client, session, endpoint, deadline)
+    replay_anchors(db, configured, client, session, endpoint, deadline)
+
+
+def replay_anchors(db, configured, client, session, endpoint, deadline):
+    """Send this conversation's pending anchors once its context holds a saved upload."""
+    from anchor_queue import pending_path, replay
+
+    root = root_of(db)
+    if not pending_path(root, client, session).exists():
+        return
+    row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
+    state = json.loads(row[0]) if row else {}
+    saved = {
+        (owner, context)
+        for owner, context in db.execute(
+            """SELECT DISTINCT s.owner,s.context FROM segments s JOIN delivery d
+               ON d.segment=s.id WHERE d.last_saved_at IS NOT NULL"""
+        )
+    }
+    replay(
+        root,
+        client,
+        session,
+        saved,
+        lambda owner, context: key_for(configured, owner, context),
+        endpoint,
+        deadline,
+        stopped=not isinstance(state, dict) or state.get("capture_stopped") is True,
+    )
+
+
+def upload_batches(db, configured, client, session, endpoint, deadline):
     denied = set()
     while time.monotonic() < deadline:
         progressed = False
@@ -673,6 +736,7 @@ def flush(db, configured, client, session, endpoint, deadline):
                 if isinstance(outcome, dict)
                 else ("forbidden" if outcome == "forbidden" else "unavailable")
             )
+            record_health(root_of(db), client, health_outcome(outcome))
             now = datetime.now(timezone.utc).isoformat()
             db.execute(
                 """INSERT INTO delivery VALUES (?,?,?,?) ON CONFLICT(segment) DO UPDATE SET
@@ -746,6 +810,8 @@ def capture_session(
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
         if state["offset"] is None and not state.get("path") and not allow_new_file:
+            if not recover and not state.get("capture_stopped"):
+                record_health(state_root, client, "unproven_start")
             discard_conversation(db, state, "unproven_start")
         if state.get("capture_stopped"):
             save_state(db, state)
@@ -905,14 +971,107 @@ def run_hook(
         allow_new_file=event == "SessionStart"
         and payload.get("source") in {None, "startup", "clear"},
     )
+    notice = None
+    if event == "UserPromptSubmit":
+        try:
+            notice = conversation_notice(payload, client, session, state_root)
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            pass  # A busy spool shows its notice on a later prompt.
     if ordinary:
         recover_sessions(client, session, configured, state_root, endpoint, deadline)
     if source_error is not None:
         raise source_error
-    return {}
+    if notice is None:
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": notice}}
+
+
+# Why a conversation is not being saved, when its member would want to know.
+NOTICES = {
+    "unproven_start": "the plugin's hooks did not see this conversation start, so its earlier "
+    "turns cannot be proven to belong to one company; a new conversation saves again",
+    "conversation_stopped": "Pensieve stopped saving it, for example after a second company "
+    "or an account change; a new conversation saves again",
+    "service_hold": "this context's Pensieve service is paused; queued turns are kept and "
+    "upload once it resumes",
+    "capture_disabled": "transcript sharing is off for this context; turning it on in "
+    "Pensieve under Data → Connectors saves new turns",
+    "upload_failing": "the last {failures} uploads failed; queued turns are kept and retried "
+    "automatically",
+}
+FAILING_UPLOADS = 3
+
+
+def notice_reason(db, state: dict, health: dict | None) -> str | None:
+    if state.get("capture_stopped"):
+        reason = state.get("blocked_reason")
+        return reason if reason in {"unproven_start", "conversation_stopped"} else None
+    latest = db.execute(
+        "SELECT status FROM delivery ORDER BY last_attempt_at DESC LIMIT 1"
+    ).fetchone()
+    if latest is None or latest["status"] == "accepted":
+        return None
+    if latest["status"] in {"service_hold", "capture_disabled"}:
+        return latest["status"]
+    failures = (health or {}).get("consecutive_failures")
+    if type(failures) is int and failures >= FAILING_UPLOADS:
+        return "upload_failing"
+    return None
+
+
+def conversation_notice(payload: dict, client: str, session: str, root: Path) -> str | None:
+    """One short notice per conversation and reason that transcript saving is off."""
+    from capture_onboarding import sharing_enabled
+
+    if not (root / f"{client}-{session}.sqlite3").exists():
+        return None
+    try:
+        health = read_health(root, client)
+    except ValueError:
+        health = None
+    with (
+        private_lock(root / f"{client}-{session}.lock"),
+        closing(connect_state(root, client, session)) as db,
+    ):
+        db.execute("BEGIN IMMEDIATE")
+        state = load_state(db)
+        reason = notice_reason(db, state, health)
+        shown = state.get("notices_shown", [])
+        if (
+            reason is None
+            or reason in shown
+            # Every conversation a newly installed plugin did not see start is
+            # refused; only one whose member shares transcripts needs telling.
+            or (
+                reason == "unproven_start"
+                and not sharing_enabled(payload.get("transcript_path"), client, session)
+            )
+        ):
+            db.rollback()
+            return None
+        state["notices_shown"] = [*shown, reason]
+        save_state(db, state)
+        db.commit()
+    why = NOTICES[reason].format(failures=(health or {}).get("consecutive_failures"))
+    script = Path(__file__).resolve()
+    return (
+        f"Pensieve is not saving this conversation's transcript: {why}. Tell the user if it "
+        f'matters to them; `python3 "{script}" --client {client} --status {session}` shows '
+        "the saving status."
+    )
 
 
 def saving_status(root: Path, client: str, session: str) -> dict:
+    """Inspect a known private spool and the client's upload health, creating neither."""
+    result = spool_status(root, client, session)
+    try:
+        result["health"] = read_health(root, client)
+    except (OSError, ValueError):
+        result["health"] = None  # An unreadable health file says nothing about this spool.
+    return result
+
+
+def spool_status(root: Path, client: str, session: str) -> dict:
     """Inspect a known private spool without creating it or reading event bodies."""
     path = root / f"{client}-{session}.sqlite3"
     try:
@@ -933,13 +1092,25 @@ def saving_status(root: Path, client: str, session: str) -> dict:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='delivery'"
         ).fetchone():
             return {"status": "not_observed", "segments": []}
+        result = {}
+        row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
+        state = json.loads(row[0]) if row else {}
+        if isinstance(state, dict) and (
+            state.get("capture_stopped") or state.get("phase") == "blocked"
+        ):
+            # Reason names only, such as `unproven_start` or `conversation_stopped`.
+            result.update(
+                stopped=state.get("capture_stopped") is True,
+                blocked_reason=state.get("blocked_reason"),
+            )
         rows = db.execute(
             """SELECT s.context,d.status,d.last_attempt_at,d.last_saved_at,
                       (SELECT count(*) FROM events e WHERE e.segment=s.id) AS queued_events
                FROM segments s LEFT JOIN delivery d ON d.segment=s.id
                WHERE s.retired=0 ORDER BY s.rowid LIMIT 101"""
         ).fetchall()
-        return {"segments": [dict(row) for row in rows[:100]], "truncated": len(rows) > 100}
+        result.update(segments=[dict(row) for row in rows[:100]], truncated=len(rows) > 100)
+        return result
     finally:
         db.close()
 
@@ -971,10 +1142,11 @@ def main() -> None:
         print(json.dumps(saving_status(args.state, args.client, session)))
         return
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+    result = {}
     try:
         payload = json.loads(raw) if len(raw) <= MAX_INPUT_BYTES else None
         if isinstance(payload, dict):
-            run_hook(payload, args.client, args.config, args.state, args.endpoint)
+            result = run_hook(payload, args.client, args.config, args.state, args.endpoint)
     except sqlite3.OperationalError:
         # Concurrent hooks never wait on a lock; the next lifecycle hook retries.
         print(
@@ -986,7 +1158,7 @@ def main() -> None:
             "Pensieve capture paused: check private config and transcript access; pending events retained.",
             file=sys.stderr,
         )
-    print("{}")
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

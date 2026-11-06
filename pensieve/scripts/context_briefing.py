@@ -35,6 +35,7 @@ from context_receipt import (
     latest_receipt,
     send_receipt,
 )
+from git_workspace import workspace
 from plugin_connection import (
     CONNECTION_ENDPOINT,
     connect_message,
@@ -52,6 +53,8 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 MAX_RESPONSE_BYTES = 32 * 1024
+# The service refuses a larger briefing request outright.
+MAX_REQUEST_BYTES = 2048
 HTTP_TIMEOUT_SECONDS = 3
 
 
@@ -80,6 +83,10 @@ def checked_endpoint(value: str) -> str:
     return value
 
 
+def request_bytes(body: dict) -> bytes:
+    return json.dumps(body, separators=(",", ":")).encode()
+
+
 def request(
     endpoint: str, key: str | None, body: dict, timeout: float = HTTP_TIMEOUT_SECONDS
 ) -> tuple[int | str, dict | None]:
@@ -88,7 +95,7 @@ def request(
         headers["Authorization"] = "Bearer " + key
     req = Request(
         checked_endpoint(endpoint),
-        data=json.dumps(body, separators=(",", ":")).encode(),
+        data=request_bytes(body),
         headers=headers,
         method="POST",
     )
@@ -197,6 +204,8 @@ def run_hook(
             binding_endpoint, key, {"client": client, "session_id": session, "tool_use_id": tool_id}
         )
         return {} if code == 204 else failure(event, client, session)
+    # Probed before the lock: git runs under its own bounded timeouts.
+    repository = workspace(payload.get("cwd"))
     path = state_path(config, client, session)
     with private_lock(path.with_suffix(".lock")):
         state = read_state(path)
@@ -227,6 +236,11 @@ def run_hook(
         turn = conversation_id(payload.get("turn_id"))
         if turn:
             body["turn_id"] = turn
+        if repository is not None and len(request_bytes(dict(body, workspace=repository))) <= (
+            MAX_REQUEST_BYTES
+        ):
+            # Sent only for a work tree with an `origin` remote; never null.
+            body["workspace"] = repository
         code, result = request(endpoint, key, body)
         if code == 200 and isinstance(result, dict):
             available = result.pop("briefing_available", True) is True

@@ -368,3 +368,57 @@ def test_parallel_claude_calls_bind_independently_of_lifecycle_lock(setup, monke
         results = list(executor.map(call, ["toolu_one", "toolu_two"]))
     assert results == [{}, {}]
     assert set(bound) == {"toolu_one", "toolu_two"}
+
+
+def test_briefing_names_the_work_tree_it_runs_in(setup, tmp_path, monkeypatch):
+    import subprocess
+
+    path, calls = setup
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ("init", "-q", "-b", "main"),
+        ("remote", "add", "origin", "https://x-access-token:abc@github.com/o/r.git"),
+        (
+            "-c",
+            "user.name=F",
+            "-c",
+            "user.email=f@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ),
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    briefing.run_hook(dict(payload(), cwd=str(repo)), "codex", path)
+    body = calls[-1][3]
+    assert body["workspace"] == {
+        "repo_url": "https://github.com/o/r.git",
+        "branch": "main",
+        "head_sha": sha,
+    }
+    assert len(briefing.request_bytes(body)) <= briefing.MAX_REQUEST_BYTES
+    assert "abc" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("cwd", [None, "relative", "/"])
+def test_briefing_omits_workspace_outside_a_repository(setup, cwd):
+    path, calls = setup
+    event = payload() if cwd is None else dict(payload(), cwd=cwd)
+    briefing.run_hook(event, "codex", path)
+    assert "workspace" not in calls[-1][3]
+
+
+def test_an_oversized_workspace_is_omitted_rather_than_refused(setup, monkeypatch):
+    path, calls = setup
+    huge = {"repo_url": "https://github.com/" + "o" * 2048, "branch": None, "head_sha": None}
+    monkeypatch.setattr(briefing, "workspace", lambda cwd: huge)
+    briefing.run_hook(dict(payload(), cwd="/repo"), "codex", path)
+    assert "workspace" not in calls[-1][3]
