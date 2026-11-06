@@ -70,6 +70,14 @@ Start a new conversation to use the installed plugin.
 For both command-line clients, `python3` (3.9 or newer) must be available to the
 client's command runner for the bundled hook helper.
 
+### Pensieve CLI
+
+The [`pensieve` CLI](cli/README.md) runs the commands above for whichever of
+`claude` and `codex` it finds (`pensieve install`, reversed by
+`pensieve uninstall`), checks a setup with `pensieve doctor`, and gives agents
+without MCP a shell route into Pensieve: `pensieve search`, `read`, `tree` and
+`docs pull`, which copies a repository's Pensieve docs into local Markdown.
+
 ### Desktop and workspace clients
 
 **Claude web, Desktop and Cowork** (paid plans with plugins enabled):
