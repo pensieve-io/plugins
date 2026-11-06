@@ -6,9 +6,8 @@ import io
 import json
 import os
 import subprocess
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import anchor_queue
 import capture_protocol as protocol
 import conversation_capture as capture
 import git_anchor
@@ -28,16 +27,7 @@ from test_conversation_capture import (
 ORIGIN = "https://x-access-token:secret-token@github.com/acme/widgets.git"
 PUBLIC = "https://github.com/acme/widgets.git"
 PR = "https://github.com/acme/widgets/pull/42"
-
-
-@pytest.fixture(autouse=True)
-def isolated_git(monkeypatch, tmp_path):
-    # The member's own git configuration (signing, hooks, templates) never applies.
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-gitconfig"))
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    for name in ("AUTHOR", "COMMITTER"):
-        monkeypatch.setenv(f"GIT_{name}_NAME", "Fixture")
-        monkeypatch.setenv(f"GIT_{name}_EMAIL", "fixture@example.com")
+pytestmark = pytest.mark.usefixtures("isolated_git")
 
 
 def git(cwd, *args, **env):
@@ -170,36 +160,6 @@ def test_failed_or_unfinished_commands_are_never_anchored(response, ok):
 
 
 @pytest.fixture
-def anchor_service():
-    state = {"status": 200, "body": {"anchor_id": "a", "conversation_id": "c", "created": True}}
-    state["requests"] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def do_POST(self):
-            raw = self.rfile.read(int(self.headers["Content-Length"]))
-            state["requests"].append((self.path, dict(self.headers), json.loads(raw), len(raw)))
-            body = json.dumps(state["body"]).encode()
-            self.send_response(state["status"])
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
-    thread.start()
-    state["endpoint"] = f"http://127.0.0.1:{server.server_port}/hooks/conversations"
-    try:
-        yield state
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
-
-
-@pytest.fixture
 def saved(tmp_path, monkeypatch):
     """A Claude conversation whose first turn the service has accepted."""
     path, cfg, root, _calls, run = setup(tmp_path, monkeypatch, client="claude")
@@ -209,8 +169,13 @@ def saved(tmp_path, monkeypatch):
     return cfg, root, run
 
 
-def event(cwd, command, response=None, session=SESSION, tool="Bash"):
+def pending(root, client="claude"):
+    return anchor_queue.read_pending(anchor_queue.pending_path(root, client, SESSION))
+
+
+def event(cwd, command, response=None, session=SESSION, tool="Bash", transcript=None):
     return {
+        "transcript_path": None if transcript is None else str(transcript),
         "hook_event_name": "PostToolUse",
         "session_id": session,
         "cwd": str(cwd),
@@ -354,7 +319,7 @@ def test_a_stopped_conversation_is_not_anchored(tmp_path, saved, anchor_service,
     assert anchor_service["requests"] == []
 
 
-def test_a_conversation_with_nothing_saved_yet_is_not_anchored(
+def test_a_conversation_with_nothing_saved_yet_queues_without_posting(
     tmp_path, monkeypatch, anchor_service
 ):
     path, cfg, root, _calls, run = setup(tmp_path, monkeypatch, client="claude")
@@ -363,27 +328,37 @@ def test_a_conversation_with_nothing_saved_yet_is_not_anchored(
     run()
     repo = repository(tmp_path)
     payload = event(repo, "git commit -m x")
-    assert git_anchor.run_hook(payload, "claude", cfg, root, anchor_service["endpoint"]) == []
+    sent = git_anchor.run_hook(payload, "claude", cfg, root, anchor_service["endpoint"])
+    assert sent == [("commit", "queued")]
     assert anchor_service["requests"] == []
+    assert [entry["anchor"]["kind"] for entry in pending(root)] == ["commit"]
 
 
-def test_a_disabled_consent_generation_is_not_anchored(tmp_path, monkeypatch, anchor_service):
+@pytest.mark.parametrize("from_transcript", [False, True])
+def test_a_disabled_consent_generation_is_not_anchored(
+    tmp_path, monkeypatch, anchor_service, from_transcript
+):
     path, cfg, root, _calls, run = setup(tmp_path, monkeypatch, client="claude")
     append(path, user(client="claude"), hook_record("claude"), assistant(client="claude"))
     run()
     append(path, user("Off", client="claude"), hook_record("claude", generation=None))
-    run()
+    if not from_transcript:
+        run()
     repo = repository(tmp_path)
-    payload = event(repo, "git commit -m x")
+    payload = event(repo, "git commit -m x", transcript=path if from_transcript else None)
     assert git_anchor.run_hook(payload, "claude", cfg, root, anchor_service["endpoint"]) == []
+    assert pending(root) == []
 
 
-def test_not_saved_is_dropped_silently_without_retry(tmp_path, saved, anchor_service, capsys):
+def test_not_saved_is_kept_silently_for_the_next_accepted_upload(
+    tmp_path, saved, anchor_service, capsys
+):
     anchor_service.update(status=404, body={"reason": "not_saved"})
     repo = repository(tmp_path)
     assert anchor(saved, anchor_service, event(repo, "git commit -m x")) == [("commit", 404)]
     assert len(anchor_service["requests"]) == 1
     assert capsys.readouterr().err == ""
+    assert len(pending(saved[1])) == 1
 
 
 def test_service_failure_is_reported_on_stderr_only(tmp_path, saved, anchor_service, capsys):
@@ -393,6 +368,7 @@ def test_service_failure_is_reported_on_stderr_only(tmp_path, saved, anchor_serv
     captured = capsys.readouterr()
     assert captured.out == "" and "403" in captured.err
     assert KEY not in captured.err
+    assert pending(saved[1]) == []
 
 
 def test_unreachable_service_fails_open(tmp_path, saved):
@@ -403,6 +379,7 @@ def test_unreachable_service_fails_open(tmp_path, saved):
         payload, "claude", cfg, root, "http://127.0.0.1:9/hooks/conversations"
     )
     assert sent == [("commit", "unavailable")]
+    assert len(pending(root)) == 1
 
 
 def test_codex_shell_output_is_understood(tmp_path, monkeypatch, anchor_service):
@@ -435,9 +412,9 @@ def test_hook_prints_only_empty_json(monkeypatch, capsys, tmp_path):
 )
 def test_upload_key_cannot_be_sent_elsewhere(endpoint):
     with pytest.raises(ValueError):
-        git_anchor.post_anchor(endpoint, KEY, {}, 1)
+        anchor_queue.post_anchor(endpoint, KEY, {}, 1)
 
 
 def test_capture_scope_is_the_saved_conversations_owner_and_context(saved):
     _cfg, root, _run = saved
-    assert git_anchor.capture_scope(root, "claude", SESSION) == (OWNER, 497)
+    assert git_anchor.capture_scope(root, "claude", SESSION, None) == (OWNER, 497, True)

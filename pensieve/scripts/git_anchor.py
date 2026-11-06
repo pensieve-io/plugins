@@ -4,9 +4,10 @@ A PostToolUse hook on the agent's shell tool. It reads only the hook's own
 payload: the command the agent ran, its reported result and working directory.
 It tags the conversation named by the hook's own `session_id`, never one found
 by working directory, so a human's commit or another conversation in the same
-repository is never attributed here. It posts only for a conversation that is
-already being saved, with the key that conversation uploads with, and fails
-open: nothing it does can change or delay the agent's command. Python 3.9+,
+repository is never attributed here. It acts only for a conversation whose
+transcript is being shared, with the key that conversation uploads with: an
+anchor waits in `anchor_queue` until the conversation's first upload is
+accepted. It fails open: nothing it does can change or delay the agent's command. Python 3.9+,
 standard library only.
 """
 
@@ -146,16 +147,24 @@ def succeeded(response: object) -> bool:
         match = EXIT_CODE.search(response[:200])
         if match:
             return int(match.group(1)) == 0
-    # Claude reports a failed command through its separate failure event, not here.
+    # Otherwise unknown: the commit HEAD guard still applies.
     return True
 
 
-def capture_scope(state_root: Path, client: str, session: str) -> tuple[str, int] | None:
-    """`(owner, context)` while this conversation is being saved, else None.
+def capture_scope(
+    state_root: Path, client: str, session: str, transcript: object
+) -> tuple[str, int, bool] | None:
+    """`(owner, context, saved)` while this conversation is being saved, else None.
 
-    Read-only and lock-free: the capture hooks own the spool. A conversation
-    that is stopped, blocked, held, disabled or never saved is not anchored.
+    The newest native capture marker in the hook's own transcript names the
+    current turn's owner, context and consent generation, even in a first turn
+    the spool has yet to read; the spool's attributed scope stands in without
+    one. The spool is read read-only and lock-free: the capture hooks own it. A
+    conversation with no spool, or stopped, disabled, held or refused, is not
+    anchored. `saved` says whether an upload in that context was accepted.
     """
+    from capture_onboarding import latest_attribution
+
     path = state_root / f"{client}-{session}.sqlite3"
     try:
         info = path.lstat()
@@ -174,30 +183,35 @@ def capture_scope(state_root: Path, client: str, session: str) -> tuple[str, int
         state = json.loads(row[0]) if row else None
         if not isinstance(state, dict) or state.get("capture_stopped"):
             return None
-        scope = state.get("scope") or state.get("candidate_scope")
+        found = latest_attribution(transcript, client, session)
+        if found is not None:
+            marker = found[0]
+            scope = [marker["user_id"], marker["context_id"], marker["capture_generation"]]
+        else:
+            scope = state.get("scope") or state.get("candidate_scope")
         if (
             not isinstance(scope, list)
             or len(scope) != 3
+            or not isinstance(scope[0], str)
             or type(scope[1]) is not int
             or scope[2] is None
         ):
-            return None
+            return None  # No company, or sharing is off for this turn.
         owner, context, generation = scope
+        latest = db.execute(
+            """SELECT d.status FROM segments s JOIN delivery d ON d.segment=s.id
+               WHERE s.owner=? AND s.context=? ORDER BY d.last_attempt_at DESC LIMIT 1""",
+            (owner, context),
+        ).fetchone()
+        if latest is not None and latest["status"] in {"service_hold", "forbidden"}:
+            return None
         segment = db.execute(
             """SELECT s.retired,d.status FROM segments s LEFT JOIN delivery d ON d.segment=s.id
                WHERE s.owner=? AND s.context=? AND s.generation=? ORDER BY s.rowid DESC LIMIT 1""",
             (owner, context, generation),
         ).fetchone()
-        if (
-            segment is None
-            or segment["retired"]
-            or segment["status"]
-            in {
-                "service_hold",
-                "forbidden",
-                "capture_disabled",
-                "deleted",
-            }
+        if segment is not None and (
+            segment["retired"] or segment["status"] in {"capture_disabled", "deleted"}
         ):
             return None
         saved = db.execute(
@@ -205,48 +219,9 @@ def capture_scope(state_root: Path, client: str, session: str) -> tuple[str, int
                WHERE s.owner=? AND s.context=? AND d.last_saved_at IS NOT NULL LIMIT 1""",
             (owner, context),
         ).fetchone()
-        return (owner, context) if saved else None
+        return owner, context, saved is not None
     finally:
         db.close()
-
-
-def post_anchor(endpoint: str, key: str, body: dict, timeout: float) -> tuple[int | str, dict]:
-    from urllib.error import HTTPError, URLError
-    from urllib.request import ProxyHandler, Request, build_opener
-
-    from capture_protocol import HEADER, VERSION
-    from conversation_capture import NoRedirects, checked_endpoint
-
-    request = Request(
-        checked_endpoint(endpoint) + "/anchors",
-        data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + key,
-            "User-Agent": "Pensieve-Plugin-Capture/1.0",
-            HEADER: str(VERSION),
-        },
-        method="POST",
-    )
-    opener = build_opener(ProxyHandler({}), NoRedirects())
-    try:
-        with opener.open(request, timeout=max(0.05, timeout)) as response:
-            return response.status, json_body(response.read(4097))
-    except HTTPError as exc:
-        try:
-            return exc.code, json_body(exc.read(4097))
-        except OSError:
-            return exc.code, {}
-    except (OSError, URLError, ValueError):
-        return "unavailable", {}
-
-
-def json_body(raw: bytes) -> dict:
-    try:
-        value = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def anchor(kind: str, directory: Path, output: str) -> dict | None:
@@ -313,16 +288,18 @@ def run_hook(
     if not succeeded(response):
         return []
 
+    from anchor_queue import post_anchor, queue_anchor, retryable
     from capture_config import key_for, profiles
     from context_receipt import conversation_id
 
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return []
-    scope = capture_scope(state_root, client, session)
+    scope = capture_scope(state_root, client, session, payload.get("transcript_path"))
     if scope is None:
         return []
-    key = key_for(profiles(config, client), *scope)
+    owner, context, saved = scope
+    key = key_for(profiles(config, client), owner, context)
     if key is None:
         return []
     deadline = time.monotonic() + HOOK_BUDGET_SECONDS
@@ -333,19 +310,21 @@ def run_hook(
         remaining = deadline - time.monotonic()
         if fields is None or remaining < 0.05:
             continue
-        body = {
-            "client": client,
-            "host_conversation_id": session,
-            "context_id": scope[1],
-            **fields,
-        }
+        body = {"client": client, "host_conversation_id": session, "context_id": context, **fields}
         if len(json.dumps(body, separators=(",", ":")).encode()) > MAX_REQUEST_BYTES:
             continue
-        code, result = post_anchor(endpoint, key, body, min(REQUEST_TIMEOUT_SECONDS, remaining))
+        if not saved:
+            # A first turn uploads at Stop: until then the service could only
+            # answer `not_saved`. The upload that saves it sends this anchor.
+            queue_anchor(state_root, client, session, owner, body)
+            sent.append((kind, "queued"))
+            continue
+        code, _ = post_anchor(endpoint, key, body, min(REQUEST_TIMEOUT_SECONDS, remaining))
         sent.append((kind, code))
-        # 404 `not_saved`: nothing of this conversation is saved yet. Dropped,
-        # never retried: an anchor names a transcript that already exists.
-        if code not in {200, 404}:
+        if code == 404 or retryable(code):
+            # `not_saved`, or no answer: the next accepted upload sends it.
+            queue_anchor(state_root, client, session, owner, body)
+        elif code != 200:
             print(f"Pensieve could not anchor this {kind} ({code}).", file=sys.stderr)
     return sent
 

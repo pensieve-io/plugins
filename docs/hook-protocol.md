@@ -222,27 +222,44 @@ endpoint plus `/anchors`, with the same loopback-only fixture override) with
 
 Every field is always present; `repo_url` and `branch` follow the briefing
 `workspace` rules, and a request over 2,048 bytes is not sent. 200
-(`{anchor_id, conversation_id, created}`) is idempotent. 404
-`{"reason": "not_saved"}` means the conversation has no saved transcript in that
-context yet: the anchor is dropped and never retried. 401, 403 (`service_hold`
-or an unavailable key), 410 `capture_disabled`, 422 and 426 are reported on
-stderr only. Each request has a 3-second timeout within a 4-second budget.
+(`{anchor_id, conversation_id, created}`) is idempotent. Each request has a
+3-second timeout within a 4-second budget. 401, 403 (`service_hold` or an
+unavailable key), 410 `capture_disabled` and 422 are reported on stderr only.
+
+An agent often commits in a conversation's first turn, before its first upload
+at Stop, when the service could only answer 404 `{"reason": "not_saved"}`. While
+no upload in the conversation's context has been accepted, the hook therefore
+queues the anchor instead of posting it; it also queues one answered 404, 426,
+429, 5xx or not at all. The queue (`anchor_queue.py`) is
+`<client>-<session>.anchors.json` beside the conversation's spool: a private
+JSON list of at most 20 entries (the oldest go first), deduplicated by kind,
+commit and pull request URL, written atomically under its own lock, holding
+each anchor body and its owner only. Entries older than 24 hours are dropped.
+
+After the capture hook's flush (the Stop that uploads the first turn, or any
+later hook), pending anchors whose context now holds an accepted upload are
+posted with that scope's upload key, within the same 3-second requests and a
+4-second cap inside the hook's own deadline. 200 and permanent refusals (401,
+403, 404 now that the transcript is known to be saved, 410, 422) remove an
+entry; no answer, 426, 429 or 5xx keep it for the next flush. A stopped
+conversation's queue is discarded unsent.
 
 The conversation is the hook's own `session_id`, never one inferred from the
 working directory, so a commit by a person or by another conversation in the
 same repository is never attributed to it. Nothing is sent unless:
 
-- the host reports the command finished successfully: not interrupted, not a
-  background task, and no non-zero exit code (`exit_code`, or Codex's
-  `Exit code: N` output). Claude reports failed commands through a separate
-  failure event, which this hook does not register;
+- the host reports the command finished successfully: failed commands are
+  filtered by exit status (`exit_code`, or Codex's `Exit code: N` output),
+  interruption, background execution and, for commits, the HEAD guard below;
 - for `commit`, `HEAD` was committed within the last ten minutes, so
   `git commit …; echo done` with nothing to commit does not anchor an old commit;
 - the command ran inside a work tree with an `origin` remote;
-- the conversation is being saved: its local spool has an attributed scope with
-  an enabled consent generation, is not stopped, its segment is not retired,
-  held (`service_hold`), refused (`forbidden`) or disabled, a key is configured
-  for that scope, and an upload in that context has already been accepted.
+- the conversation's transcript is being shared: it has a local spool that is
+  not stopped; the newest native capture marker in its own transcript (or, with
+  none, the spool's attributed scope) names a context with an enabled consent
+  generation; that context's latest upload was not held (`service_hold`) or
+  refused (`forbidden`); the generation's segment is not retired or disabled;
+  and a key is configured for that scope. Anything else is dropped, not queued.
 
 The spool is read read-only without its lock; any error, timeout or unreachable
 service fails open. The hook always prints `{}` and never adds model context.

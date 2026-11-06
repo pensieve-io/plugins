@@ -322,8 +322,10 @@ second company, adds no notice.
 A saved conversation is also linked to the commits, pushes and pull requests
 its own agent makes, through the `PostToolUse` hook described in
 [conversation anchors](hook-protocol.md#conversation-anchors). Anchors carry
-repository identities only, never transcript text, and are sent only for a
-conversation that is already being saved.
+repository identities only, never transcript text, and are made only for a
+conversation whose transcript is being shared. One made before the
+conversation's first upload waits in `<client>-<session>.anchors.json` beside
+the spool and is sent once that upload is accepted.
 
 
 ### Nested Codex write calls

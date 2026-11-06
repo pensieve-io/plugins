@@ -682,6 +682,39 @@ def flush(db, configured, client, session, endpoint, deadline):
         db.commit()
         if not observed:
             return
+    upload_batches(db, configured, client, session, endpoint, deadline)
+    replay_anchors(db, configured, client, session, endpoint, deadline)
+
+
+def replay_anchors(db, configured, client, session, endpoint, deadline):
+    """Send this conversation's pending anchors once its context holds a saved upload."""
+    from anchor_queue import pending_path, replay
+
+    root = root_of(db)
+    if not pending_path(root, client, session).exists():
+        return
+    row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
+    state = json.loads(row[0]) if row else {}
+    saved = {
+        (owner, context)
+        for owner, context in db.execute(
+            """SELECT DISTINCT s.owner,s.context FROM segments s JOIN delivery d
+               ON d.segment=s.id WHERE d.last_saved_at IS NOT NULL"""
+        )
+    }
+    replay(
+        root,
+        client,
+        session,
+        saved,
+        lambda owner, context: key_for(configured, owner, context),
+        endpoint,
+        deadline,
+        stopped=not isinstance(state, dict) or state.get("capture_stopped") is True,
+    )
+
+
+def upload_batches(db, configured, client, session, endpoint, deadline):
     denied = set()
     while time.monotonic() < deadline:
         progressed = False
