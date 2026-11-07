@@ -37,6 +37,7 @@ from capture_config import (
     profiles,
 )
 from capture_health import read_health, record_health
+from capture_pause import pause_state
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
 from capture_state import (
     CONTEXT_BOUNDARY_VERSION,
@@ -944,6 +945,8 @@ def run_hook(
         return {}
     event = payload["hook_event_name"]
     deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
+    if pause_state(state_root) is not None:
+        return paused_hook(payload, client, session, state_root)
     configured = profiles(config, client)
     observe_credentials(state_root, client, configured)
     if event != "SessionEnd":
@@ -981,9 +984,35 @@ def run_hook(
         recover_sessions(client, session, configured, state_root, endpoint, deadline)
     if source_error is not None:
         raise source_error
+    return hook_output(event, notice)
+
+
+def hook_output(event: str, notice: str | None) -> dict:
     if notice is None:
         return {}
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": notice}}
+
+
+def paused_hook(payload: dict, client: str, session: str, state_root: Path) -> dict:
+    """Save nothing while the member has paused saving on this machine.
+
+    The pause is observed exactly as removing every credential is: the
+    client-wide observation fences each spool at the transcript position it
+    next reads, so no turn written while paused is ever attributed, spooled or
+    uploaded, even after resume, and the first prompt after resume needs its
+    own fresh marker. Work spooled before the pause stays queued, unsent while
+    paused, and uploads after resume under the consent it was captured with.
+    No transcript is scanned, no upload credential is read and no upload is
+    attempted; the not-saving notice reads only the newest capture marker.
+    """
+    observe_credentials(state_root, client, {})
+    notice = None
+    if payload["hook_event_name"] == "UserPromptSubmit":
+        try:
+            notice = conversation_notice(payload, client, session, state_root, paused=True)
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            pass
+    return hook_output(payload["hook_event_name"], notice)
 
 
 # Why a conversation is not being saved, when its member would want to know.
@@ -998,6 +1027,7 @@ NOTICES = {
     "Pensieve under Data → Connectors saves new turns",
     "upload_failing": "the last {failures} uploads failed; queued turns are kept and retried "
     "automatically",
+    "paused": "saving is paused on this machine; `pensieve resume` turns it back on",
 }
 FAILING_UPLOADS = 3
 
@@ -1019,11 +1049,18 @@ def notice_reason(db, state: dict, health: dict | None) -> str | None:
     return None
 
 
-def conversation_notice(payload: dict, client: str, session: str, root: Path) -> str | None:
+def conversation_notice(
+    payload: dict, client: str, session: str, root: Path, *, paused: bool = False
+) -> str | None:
     """One short notice per conversation and reason that transcript saving is off."""
     from capture_onboarding import sharing_enabled
 
-    if not (root / f"{client}-{session}.sqlite3").exists():
+    if paused:
+        # Only a member who shares transcripts is losing anything. A spool made
+        # here holds just the record that this notice was shown.
+        if not sharing_enabled(payload.get("transcript_path"), client, session):
+            return None
+    elif not (root / f"{client}-{session}.sqlite3").exists():
         return None
     try:
         health = read_health(root, client)
@@ -1035,7 +1072,7 @@ def conversation_notice(payload: dict, client: str, session: str, root: Path) ->
     ):
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
-        reason = notice_reason(db, state, health)
+        reason = "paused" if paused else notice_reason(db, state, health)
         shown = state.get("notices_shown", [])
         if (
             reason is None
@@ -1064,6 +1101,8 @@ def conversation_notice(payload: dict, client: str, session: str, root: Path) ->
 def saving_status(root: Path, client: str, session: str) -> dict:
     """Inspect a known private spool and the client's upload health, creating neither."""
     result = spool_status(root, client, session)
+    pause = pause_state(root)
+    result.update(paused=pause is not None, paused_at=(pause or {}).get("paused_at"))
     try:
         result["health"] = read_health(root, client)
     except (OSError, ValueError):

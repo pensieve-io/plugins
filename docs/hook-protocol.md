@@ -36,6 +36,17 @@ once this conversation's first turn is saved, to give the agent its transcript
 link for a `Pensieve-Conversation:` commit or PR trailer. Both arrive inside the
 ordinary `additionalContext`; the plugin renders nothing itself.
 
+Every briefing also sends `hook_revision`, an integer (`HOOK_REVISION` in
+`context_briefing.py`, currently 1). It is bumped whenever hook behaviour the
+service relies on changes, such as a new request field or hook; a service whose
+minimum is higher adds one line to the briefing asking the member to update the
+plugin. A service older than both `hook_revision` and `workspace` refuses unknown
+fields with 422, so on a 422 the script asks once more in the same hook run
+with those two fields removed, keeping `client`, `session_id`, `event`,
+`delivery_id`, `force_refresh`, `source` and `turn_id`. The retry uses the
+remainder of a 9-second budget inside the 10-second hook timeout, and is skipped
+when less than half a second remains.
+
 The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
 and `hookSpecificOutput.additionalContext`. A root-rendering fallback also sets
 `briefing_available: false`; the script consumes that field before forwarding
@@ -261,8 +272,11 @@ same repository is never attributed to it. Nothing is sent unless:
   refused (`forbidden`); the generation's segment is not retired or disabled;
   and a key is configured for that scope. Anything else is dropped, not queued.
 
-The spool is read read-only without its lock; any error, timeout or unreachable
-service fails open. The hook always prints `{}` and never adds model context.
+While saving is paused on the machine (`paused.json`, see
+[the capture guide](conversation-capture.md#pausing-on-this-machine)), the hook
+posts nothing and queues nothing. The spool is read read-only without its lock;
+any error, timeout or unreachable service fails open. The hook always prints
+`{}` and never adds model context.
 
 ## Hook registration and sharing
 

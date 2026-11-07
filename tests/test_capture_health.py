@@ -222,6 +222,8 @@ def test_status_creates_nothing(tmp_path):
         "status": "not_started",
         "segments": [],
         "health": None,
+        "paused": False,
+        "paused_at": None,
     }
     assert not root.exists()
 

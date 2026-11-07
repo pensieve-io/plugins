@@ -289,6 +289,10 @@ def run_hook(
         return []
 
     from anchor_queue import post_anchor, queue_anchor, retryable
+    from capture_pause import is_paused
+
+    if is_paused(state_root):
+        return []  # Saving is paused on this machine: nothing is sent or kept.
     from capture_config import key_for, profiles
     from context_receipt import conversation_id
 

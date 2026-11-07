@@ -422,3 +422,62 @@ def test_an_oversized_workspace_is_omitted_rather_than_refused(setup, monkeypatc
     monkeypatch.setattr(briefing, "workspace", lambda cwd: huge)
     briefing.run_hook(dict(payload(), cwd="/repo"), "codex", path)
     assert "workspace" not in calls[-1][3]
+
+
+@pytest.mark.parametrize("event", ["SessionStart", "UserPromptSubmit"])
+def test_every_briefing_names_the_hook_revision(setup, event):
+    path, calls = setup
+    briefing.run_hook(payload(event), "codex", path)
+    assert calls[-1][3]["hook_revision"] == briefing.HOOK_REVISION == 1
+
+
+def test_an_older_service_is_asked_again_without_the_fields_it_refuses(setup, monkeypatch):
+    path, calls = setup
+    monkeypatch.setattr(
+        briefing,
+        "workspace",
+        lambda cwd: {"repo_url": "https://github.com/o/r.git", "branch": "b", "head_sha": None},
+    )
+    sent = []
+
+    def request(_endpoint, _key, body, **kwargs):
+        sent.append((dict(body), kwargs.get("timeout")))
+        if "hook_revision" in body or "workspace" in body:
+            return 422, {"detail": "extra fields not permitted"}
+        return 200, {
+            "hookSpecificOutput": {"hookEventName": body["event"], "additionalContext": "primer"}
+        }
+
+    monkeypatch.setattr(briefing, "request", request)
+    event = dict(payload("SessionStart"), source="startup", cwd="/repo")
+    result = briefing.run_hook(event, "codex", path)
+    assert result["hookSpecificOutput"]["additionalContext"] == "primer"
+    assert len(sent) == 2
+    first, (retry, timeout) = sent[0][0], sent[1]
+    assert {"hook_revision", "workspace"} <= set(first)
+    assert set(retry) == {
+        "client",
+        "session_id",
+        "event",
+        "delivery_id",
+        "force_refresh",
+        "source",
+        "turn_id",
+    }
+    assert all(retry[field] == first[field] for field in retry)
+    assert 0 < timeout <= briefing.HTTP_TIMEOUT_SECONDS
+
+
+def test_a_422_is_retried_once_and_only_within_the_hook_budget(setup, monkeypatch):
+    path, calls = setup
+    sent = []
+    monkeypatch.setattr(
+        briefing, "request", lambda _e, _k, body, **_kw: sent.append(body) or (422, None)
+    )
+    result = briefing.run_hook(payload(), "codex", path)
+    assert len(sent) == 2
+    assert "unavailable" in result["hookSpecificOutput"]["additionalContext"]
+    sent.clear()
+    monkeypatch.setattr(briefing, "HOOK_BUDGET_SECONDS", 0)
+    briefing.run_hook(payload(), "codex", path)
+    assert len(sent) == 1

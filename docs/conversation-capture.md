@@ -277,8 +277,10 @@ python3 pensieve/scripts/conversation_capture.py --client codex --status SESSION
 The result contains per-segment context, queued count, last attempted delivery
 status and last validated acknowledgement time (up to 100 segments). A stopped
 or blocked conversation adds `stopped` and `blocked_reason` (for example
-`unproven_start`, `conversation_stopped` or `multiple_contexts`), and `health`
-carries the client's upload health below. It never prints transcript text or
+`unproven_start`, `conversation_stopped` or `multiple_contexts`), `health`
+carries the client's upload health below, and `paused` / `paused_at` report a
+pause on this machine (`paused_at` is null when the pause file holds no valid
+time). It never prints transcript text or
 keys, creates a spool or infers saving from MCP login.
 
 #### Upload health
@@ -312,10 +314,41 @@ notice saying why, how to fix it and the `--status` command above:
 | `service_hold` | The latest upload was held because the context's service is paused |
 | `capture_disabled` | The latest upload was refused because sharing is off |
 | `upload_failing` | The latest upload failed and at least three in a row have |
+| `paused` | Saving is paused on this machine, and the conversation's newest marker shows sharing on |
 
 Each reason is shown at most once per conversation, recorded in that
 conversation's spool. A stop the conversation caused itself, such as using a
 second company, adds no notice.
+
+#### Pausing on this machine
+
+`pensieve pause` writes `paused.json` beside the spools (in
+`PENSIEVE_CAPTURE_STATE`, or `~/.local/state/pensieve/capture`), holding
+`{"paused_at": "<ISO-8601 UTC>"}`; `pensieve resume` deletes it. While the file
+exists, saving is paused for every client on the machine. Its presence is what
+counts: a file that cannot be read, is not a regular file or holds malformed
+JSON still pauses saving, failing closed.
+
+While paused, the capture hooks scan no transcript, read no upload credential
+and attempt no upload; only the not-saving notice reads the transcript's newest
+capture marker, and a spool it creates holds just that notice record. They observe the pause exactly as removing every
+credential is observed (the client-wide observation in
+[capture state](#capture-state-and-saving-status)): each spool is fenced at the
+transcript position it next reads, so no turn written while paused is ever
+attributed, spooled or uploaded, even after resume. The fence is placed when a
+hook first runs after resume, so the turn in progress then is fenced too;
+saving restarts with a later prompt carrying its own fresh marker. A
+conversation started while paused never saves, like any whose start the hooks
+did not see. Briefings still load, and the anchor hook sends and queues nothing.
+
+Work spooled before the pause, whether queued turns or pending anchors, is held
+unsent while paused and uploads after resume under the consent it was captured
+with. Holding it keeps the promise that nothing leaves the machine while paused,
+and discarding it would lose work the member had already agreed to share.
+
+A pause that begins and ends while no hook of a client runs, for example within
+one long agent turn, is invisible to that client: the presence file records no
+history, so that turn uploads at its Stop as usual.
 
 #### Conversation anchors
 
