@@ -370,58 +370,25 @@ def test_parallel_claude_calls_bind_independently_of_lifecycle_lock(setup, monke
     assert set(bound) == {"toolu_one", "toolu_two"}
 
 
-def test_briefing_names_the_work_tree_it_runs_in(setup, tmp_path, monkeypatch):
-    import subprocess
-
-    path, calls = setup
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-gitconfig"))
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    for args in (
-        ("init", "-q", "-b", "main"),
-        ("remote", "add", "origin", "https://x-access-token:abc@github.com/o/r.git"),
-        (
-            "-c",
-            "user.name=F",
-            "-c",
-            "user.email=f@example.com",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "first",
-        ),
-    ):
-        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    briefing.run_hook(dict(payload(), cwd=str(repo)), "codex", path)
-    body = calls[-1][3]
-    assert body["workspace"] == {
-        "repo_url": "https://github.com/o/r.git",
-        "branch": "main",
-        "head_sha": sha,
-    }
-    assert len(briefing.request_bytes(body)) <= briefing.MAX_REQUEST_BYTES
-    assert "abc" not in json.dumps(body)
-
-
-@pytest.mark.parametrize("cwd", [None, "relative", "/"])
-def test_briefing_omits_workspace_outside_a_repository(setup, cwd):
+@pytest.mark.parametrize("cwd", [None, "/", "/repo"])
+def test_briefing_never_sends_a_workspace(setup, cwd):
+    # Branch recall arrives after a shell command, never through the briefing.
     path, calls = setup
     event = payload() if cwd is None else dict(payload(), cwd=cwd)
     briefing.run_hook(event, "codex", path)
     assert "workspace" not in calls[-1][3]
 
 
-def test_an_oversized_workspace_is_omitted_rather_than_refused(setup, monkeypatch):
-    path, calls = setup
-    huge = {"repo_url": "https://github.com/" + "o" * 2048, "branch": None, "head_sha": None}
-    monkeypatch.setattr(briefing, "workspace", lambda cwd: huge)
-    briefing.run_hook(dict(payload(), cwd="/repo"), "codex", path)
-    assert "workspace" not in calls[-1][3]
+def test_session_start_forgets_the_branch_recall_it_was_given(setup):
+    import branch_recall
+
+    path, _calls = setup
+    state = branch_recall.state_path(path, "codex", SESSION)
+    config.save_private_json(state, {"workspace": {}, "status": "listed", "checked_at": 1})
+    briefing.run_hook(payload("UserPromptSubmit"), "codex", path)
+    assert state.exists()
+    briefing.run_hook(dict(payload("SessionStart"), source="compact"), "codex", path)
+    assert not state.exists()
 
 
 @pytest.mark.parametrize("event", ["SessionStart", "UserPromptSubmit"])
@@ -433,28 +400,23 @@ def test_every_briefing_names_the_hook_revision(setup, event):
 
 def test_an_older_service_is_asked_again_without_the_fields_it_refuses(setup, monkeypatch):
     path, calls = setup
-    monkeypatch.setattr(
-        briefing,
-        "workspace",
-        lambda cwd: {"repo_url": "https://github.com/o/r.git", "branch": "b", "head_sha": None},
-    )
     sent = []
 
     def request(_endpoint, _key, body, **kwargs):
         sent.append((dict(body), kwargs.get("timeout")))
-        if "hook_revision" in body or "workspace" in body:
+        if "hook_revision" in body:
             return 422, {"detail": "extra fields not permitted"}
         return 200, {
             "hookSpecificOutput": {"hookEventName": body["event"], "additionalContext": "primer"}
         }
 
     monkeypatch.setattr(briefing, "request", request)
-    event = dict(payload("SessionStart"), source="startup", cwd="/repo")
+    event = dict(payload("SessionStart"), source="startup")
     result = briefing.run_hook(event, "codex", path)
     assert result["hookSpecificOutput"]["additionalContext"] == "primer"
     assert len(sent) == 2
     first, (retry, timeout) = sent[0][0], sent[1]
-    assert {"hook_revision", "workspace"} <= set(first)
+    assert "hook_revision" in first
     assert set(retry) == {
         "client",
         "session_id",

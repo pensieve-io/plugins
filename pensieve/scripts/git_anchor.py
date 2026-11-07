@@ -1,10 +1,14 @@
 """Anchor a saved conversation to the commits, pushes and pull requests it made.
 
-A PostToolUse hook on the agent's shell tool. It reads only the hook's own
-payload: the command the agent ran, its reported result and working directory.
-It tags the conversation named by the hook's own `session_id`, never one found
-by working directory, so a human's commit or another conversation in the same
-repository is never attributed here. It acts only for a conversation whose
+A PostToolUse hook on the agent's shell tool. After every command it also asks
+`branch_recall` whether the agent has just arrived on a branch other saved
+conversations worked on; that answer is the hook's only output.
+
+For anchors it reads only the hook's own payload: the command the agent ran,
+its reported result and working directory. It tags the conversation named by
+the hook's own `session_id`, never one found by working directory, so a
+human's commit or another conversation in the same repository is never
+attributed here. It acts only for a conversation whose
 transcript is being shared, with the key that conversation uploads with: an
 anchor waits in `anchor_queue` until the conversation's first upload is
 accepted. It fails open: nothing it does can change or delay the agent's command. Python 3.9+,
@@ -80,6 +84,20 @@ def resolve(base: Path, target: str) -> Path:
     return Path(os.path.normpath(base / os.path.expanduser(target)))
 
 
+def git_target(words: list[str], directory: Path) -> tuple[Path, int]:
+    """For `git [options] <subcommand> …`: its working directory and subcommand index."""
+    where, index = directory, 1
+    while index < len(words) and words[index].startswith("-"):
+        option = words[index]
+        if option in GIT_VALUE_OPTIONS and index + 1 < len(words):
+            if option == "-C":
+                where = resolve(where, words[index + 1])
+            index += 2
+            continue
+        index += 1
+    return where, index
+
+
 def detected(command: str, cwd: str) -> list[tuple[str, Path]]:
     """`(kind, directory)` for each commit, push or PR creation, in order."""
     found = []
@@ -93,15 +111,7 @@ def detected(command: str, cwd: str) -> list[tuple[str, Path]]:
             directory = resolve(directory, words[1])
             continue
         if words[0] == "git":
-            where, index = directory, 1
-            while index < len(words) and words[index].startswith("-"):
-                option = words[index]
-                if option in GIT_VALUE_OPTIONS and index + 1 < len(words):
-                    if option == "-C":
-                        where = resolve(where, words[index + 1])
-                    index += 2
-                    continue
-                index += 1
+            where, index = git_target(words, directory)
             if index < len(words) and words[index] in {"commit", "push"}:
                 found.append((words[index], where))
         elif words[0] == "gh":
@@ -117,6 +127,27 @@ def detected(command: str, cwd: str) -> list[tuple[str, Path]]:
         if item not in unique:
             unique.append(item)
     return unique[:MAX_ANCHORS]
+
+
+def working_directory(command: str, cwd: str) -> Path:
+    """Where the command's work ended up: its last git or gh target, else its last `cd`."""
+    directory, target = Path(cwd), None
+    try:
+        parsed = segments(command)
+    except ValueError:
+        return directory  # Unbalanced quoting: the shell refused it too.
+    for words in parsed:
+        while words and ASSIGNMENT.fullmatch(words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        if words[0] == "cd" and len(words) == 2 and words[1] != "-":
+            directory = resolve(directory, words[1])
+        elif words[0] == "git":
+            target = git_target(words, directory)[0]
+        elif words[0] == "gh":
+            target = directory
+    return target or directory
 
 
 def output_text(response: object) -> str:
@@ -333,7 +364,29 @@ def run_hook(
     return sent
 
 
+def recall_hook(payload: dict, client: str, config: Path, endpoint: str, deadline: float):
+    """Hook output naming the branch's other saved conversations, or None."""
+    from branch_recall import recall
+    from context_receipt import conversation_id
+
+    if client not in {"claude", "codex"} or payload.get("hook_event_name") != "PostToolUse":
+        return None
+    if payload.get("tool_name") != "Bash":
+        return None
+    session = conversation_id(payload.get("session_id"))
+    cwd = payload.get("cwd")
+    if session is None or not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return None
+    if deadline - time.monotonic() < 0.5:
+        return None  # Anchors spent the budget; the next command asks.
+    command = command_text(payload.get("tool_input")) or ""
+    directory = working_directory(command, cwd)
+    return recall(client, session, directory, config, endpoint, deadline)
+
+
 def main() -> None:
+    from context_briefing import RECALL_ENDPOINT
+    from context_briefing import checked_endpoint as checked_recall_endpoint
     from conversation_capture import CONFIG_PATH, STATE_PATH, UPLOAD_ENDPOINT, checked_endpoint
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -349,16 +402,30 @@ def main() -> None:
         default=Path(os.environ.get("PENSIEVE_CAPTURE_STATE", str(STATE_PATH))),
     )
     parser.add_argument("--endpoint", type=checked_endpoint, default=UPLOAD_ENDPOINT)
+    parser.add_argument("--recall-endpoint", type=checked_recall_endpoint, default=RECALL_ENDPOINT)
     args = parser.parse_args()
+    deadline = time.monotonic() + HOOK_BUDGET_SECONDS
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     try:
         payload = json.loads(raw) if len(raw) <= MAX_INPUT_BYTES else None
-        if isinstance(payload, dict):
-            run_hook(payload, args.client, args.config, args.state, args.endpoint)
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        print("{}")
+        return
+    try:
+        run_hook(payload, args.client, args.config, args.state, args.endpoint)
     except (OSError, ValueError, sqlite3.DatabaseError):
         pass  # An anchor is never worth interrupting the agent's command.
-    # Nothing for the model: an anchor changes no tool result.
-    print("{}")
+    output = None
+    try:
+        # After anchors: an anchor skipped for time is lost, an unasked
+        # recall is simply asked by the next command.
+        output = recall_hook(payload, args.client, args.config, args.recall_endpoint, deadline)
+    except (OSError, ValueError):
+        pass  # Recall is a hint; it never interrupts the agent's command.
+    # An anchor changes no tool result; only recall adds model context.
+    print(json.dumps(output or {}))
 
 
 if __name__ == "__main__":

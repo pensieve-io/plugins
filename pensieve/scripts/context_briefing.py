@@ -36,7 +36,6 @@ from context_receipt import (
     latest_receipt,
     send_receipt,
 )
-from git_workspace import workspace
 from plugin_connection import (
     CONNECTION_ENDPOINT,
     connect_message,
@@ -45,11 +44,13 @@ from plugin_connection import (
 )
 
 BRIEFING_ENDPOINT = "https://mcp.pensieve.uk/hooks/briefing"
+# Branch recall after a shell command (`branch_recall.py`), on the same credential.
+RECALL_ENDPOINT = "https://mcp.pensieve.uk/hooks/recall"
 # Bumped whenever hook behaviour the service relies on changes, so a briefing
 # can ask an older installation to update its plugin.
 HOOK_REVISION = 1
 # Fields an older service, whose request model forbids unknown fields, refuses.
-OPTIONAL_BRIEFING_FIELDS = ("hook_revision", "workspace")
+OPTIONAL_BRIEFING_FIELDS = ("hook_revision",)
 BINDING_ENDPOINT = "https://mcp.pensieve.uk/hooks/tool-binding"
 
 
@@ -62,13 +63,13 @@ MAX_RESPONSE_BYTES = 32 * 1024
 # Within the 10-second hook timeout: a 422 retry only starts with time to finish.
 HOOK_BUDGET_SECONDS = 9
 MIN_RETRY_SECONDS = 0.5
-# The service refuses a larger briefing request outright.
+# The service refuses a larger briefing or recall request outright.
 MAX_REQUEST_BYTES = 2048
 HTTP_TIMEOUT_SECONDS = 3
 
 
 def checked_endpoint(value: str) -> str:
-    if value in {BRIEFING_ENDPOINT, BINDING_ENDPOINT, CONNECTION_ENDPOINT}:
+    if value in {BRIEFING_ENDPOINT, BINDING_ENDPOINT, CONNECTION_ENDPOINT, RECALL_ENDPOINT}:
         return value
     parsed = urlsplit(value)
     try:
@@ -85,7 +86,8 @@ def checked_endpoint(value: str) -> str:
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or parsed.path not in {"/hooks/briefing", "/hooks/tool-binding", "/hooks/connection"}
+        or parsed.path
+        not in {"/hooks/briefing", "/hooks/tool-binding", "/hooks/connection", "/hooks/recall"}
         or (parsed.port is not None and parsed.port < 1)
     ):
         raise ValueError("Only the fixed Pensieve endpoint or HTTP loopback fixture is supported")
@@ -214,8 +216,12 @@ def run_hook(
             binding_endpoint, key, {"client": client, "session_id": session, "tool_use_id": tool_id}
         )
         return {} if code == 204 else failure(event, client, session)
-    # Probed before the lock: git runs under its own bounded timeouts.
-    repository = workspace(payload.get("cwd"))
+    if event == "SessionStart":
+        # A new, resumed, cleared or compacted window no longer holds the
+        # branch recall it was given; the next shell command asks again.
+        from branch_recall import reset
+
+        reset(config, client, session)
     path = state_path(config, client, session)
     with private_lock(path.with_suffix(".lock")):
         state = read_state(path)
@@ -247,11 +253,6 @@ def run_hook(
         if turn:
             body["turn_id"] = turn
         body["hook_revision"] = HOOK_REVISION
-        if repository is not None and len(request_bytes(dict(body, workspace=repository))) <= (
-            MAX_REQUEST_BYTES
-        ):
-            # Sent only for a work tree with an `origin` remote; never null.
-            body["workspace"] = repository
         code, result = request(endpoint, key, body)
         remaining = started + HOOK_BUDGET_SECONDS - time.monotonic()
         if code == 422 and remaining >= MIN_RETRY_SECONDS:

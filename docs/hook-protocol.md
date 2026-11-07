@@ -20,29 +20,18 @@ renews at SessionStart. `force_refresh` restores grounding after compaction,
 missing transcripts or a bounded tail that cannot establish delivery. It does
 not change the event, so a recovered prompt still receives its capture marker.
 
-Inside a git work tree with an `origin` remote, the request also carries
-`workspace: {repo_url, branch, head_sha}` (`git_workspace.py`), probed in the
-hook payload's `cwd` with a 300 ms timeout per git call. `repo_url` is
-`git remote get-url origin` with any userinfo, query and fragment removed
-(`https://x-access-token:…@github.com/o/r.git` → `https://github.com/o/r.git`);
-scp-style `git@host:o/r.git` is sent unchanged for the server to normalise, and
-a local-path or `file://` remote sends no workspace. `branch` is
-`git symbolic-ref --short -q HEAD`, null when detached; `head_sha` is the 40-hex
-`HEAD`, null in a repository with no commits. Outside a work tree, without
-`origin`, on any git failure or timeout, or if the field would take the request
-past its 2,048-byte limit, the key is omitted, never sent as null. The service
-uses it to list other saved conversations on the same repository and branch and,
-once this conversation's first turn is saved, to give the agent its transcript
-link for a `Pensieve-Conversation:` commit or PR trailer. Both arrive inside the
-ordinary `additionalContext`; the plugin renders nothing itself.
+The briefing carries no git state. The conversation's own transcript link
+arrives inside its ordinary `additionalContext`; other conversations on the
+agent's branch arrive after a shell command instead, through
+[branch recall](#branch-recall).
 
 Every briefing also sends `hook_revision`, an integer (`HOOK_REVISION` in
 `context_briefing.py`, currently 1). It is bumped whenever hook behaviour the
 service relies on changes, such as a new request field or hook; a service whose
 minimum is higher adds one line to the briefing asking the member to update the
-plugin. A service older than both `hook_revision` and `workspace` refuses unknown
-fields with 422, so on a 422 the script asks once more in the same hook run
-with those two fields removed, keeping `client`, `session_id`, `event`,
+plugin. A service older than `hook_revision` refuses unknown fields with 422, so
+on a 422 the script asks once more in the same hook run without it, keeping
+`client`, `session_id`, `event`,
 `delivery_id`, `force_refresh`, `source` and `turn_id`. The retry uses the
 remainder of a 9-second budget inside the 10-second hook timeout, and is skipped
 when less than half a second remains.
@@ -231,8 +220,9 @@ endpoint plus `/anchors`, with the same loopback-only fixture override) with
  "commit_sha": "<40 hex>", "pr_number": null, "pr_url": null}
 ```
 
-Every field is always present; `repo_url` and `branch` follow the briefing
-`workspace` rules, and a request over 2,048 bytes is not sent. 200
+Every field is always present; `repo_url` and `branch` follow the
+[repository identity](#repository-identity) rules, and a request over 2,048
+bytes is not sent. 200
 (`{anchor_id, conversation_id, created}`) is idempotent. Each request has a
 3-second timeout within a 4-second budget. 401, 403 (`service_hold` or an
 unavailable key), 410 `capture_disabled` and 422 are reported on stderr only.
@@ -275,8 +265,69 @@ same repository is never attributed to it. Nothing is sent unless:
 While saving is paused on the machine (`paused.json`, see
 [the capture guide](conversation-capture.md#pausing-on-this-machine)), the hook
 posts nothing and queues nothing. The spool is read read-only without its lock;
-any error, timeout or unreachable service fails open. The hook always prints
-`{}` and never adds model context.
+any error, timeout or unreachable service fails open. Anchors never add model
+context: the hook's only output is [branch recall](#branch-recall), and `{}`
+otherwise.
+
+## Repository identity
+
+`git_workspace.py` describes the work tree a command ran in, with a 300 ms
+timeout per git call. `repo_url` is `git remote get-url origin` with any
+userinfo, query and fragment removed
+(`https://x-access-token:…@github.com/o/r.git` → `https://github.com/o/r.git`);
+scp-style `git@host:o/r.git` is sent unchanged for the server to normalise, and
+a local-path or `file://` remote, a directory outside a work tree, a missing
+`origin`, or any git failure or timeout means no repository at all. `branch` is
+`git symbolic-ref --short -q HEAD`, null when detached; an anchor's `commit_sha`
+is the 40-hex `HEAD`. Credentials never leave the device.
+
+## Branch recall
+
+The same `PostToolUse` hook tells the agent which other saved conversations
+worked on the branch it has just arrived on, straight after the command that
+got it there: at its first shell command in a repository, or right after a
+`git checkout`, `git switch`, `gh pr checkout` or a `cd` into another work tree,
+mid-turn rather than at the next prompt. The briefing never carries this list.
+
+After every shell command (`branch_recall.py`), the hook takes the directory
+the command worked in: the target of its last `git` (including `git -C <dir>`)
+or `gh` command, otherwise the directory after its last `cd`, otherwise the
+payload's `cwd`. It reads that directory's [repository identity](#repository-identity)
+and, for a named branch, compares it with the last one recalled for this
+conversation. Only a different `{repo_url, branch}` is asked about:
+
+`POST https://mcp.pensieve.uk/hooks/recall` (loopback fixtures as for the
+briefing), with the briefing's own `Authorization: Bearer` installation
+credential, never an upload key, and at most 2,048 bytes:
+
+```json
+{"client": "claude", "session_id": "<hook session_id>",
+ "workspace": {"repo_url": "https://github.com/o/r.git", "branch": "feature/x"}}
+```
+
+| 200 `status` | Meaning | Hook output | Asked again |
+| --- | --- | --- | --- |
+| `listed` | Other saved conversations anchored to that repository and branch | `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "<the service's text>"}}` | Only on another branch |
+| `empty` | Grounded, nothing on that branch | `{}` | Only on another branch |
+| `unavailable` | No company chosen yet, a service hold, or recall failed | `{}` | After 60 seconds |
+
+Any other status, an invalid body, no answer or a timeout counts as
+`unavailable`. The hook rebuilds the output from `additionalContext` alone,
+since Codex refuses unknown output fields; both hosts add PostToolUse
+`additionalContext` to the model's context after the tool result (Codex as
+developer context, under its `additionalContextLimit`).
+
+The recall state is `<client>-<session>.recall.json` beside the briefing state:
+a private file holding the last `{repo_url, branch}`, its status and when it was
+asked, written under its own lock. A command finding the lock held asks nothing,
+so parallel commands never inject the list twice. SessionStart (startup,
+resume, clear or compact) deletes it, so a new or compacted window is told
+again. Nothing is asked for a detached HEAD, outside a work tree with `origin`,
+before the briefing hook has connected the installation, or with less than half
+a second of the hook's 4-second budget left after anchors; an unasked branch is
+asked by the next command. Recall reads only: it needs no transcript sharing
+and, like the briefing, still runs while saving is paused. Any error fails open
+and never changes or delays the command.
 
 ## Hook registration and sharing
 

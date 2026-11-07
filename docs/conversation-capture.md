@@ -339,7 +339,8 @@ attributed, spooled or uploaded, even after resume. The fence is placed when a
 hook first runs after resume, so the turn in progress then is fenced too;
 saving restarts with a later prompt carrying its own fresh marker. A
 conversation started while paused never saves, like any whose start the hooks
-did not see. Briefings still load, and the anchor hook sends and queues nothing.
+did not see. Briefings and branch recall still load, and the anchor hook sends
+and queues nothing.
 
 Work spooled before the pause, whether queued turns or pending anchors, is held
 unsent while paused and uploads after resume under the consent it was captured
@@ -359,6 +360,13 @@ repository identities only, never transcript text, and are made only for a
 conversation whose transcript is being shared. One made before the
 conversation's first upload waits in `<client>-<session>.anchors.json` beside
 the spool and is sent once that upload is accepted.
+
+Those anchors are how a later conversation finds this one. After each shell
+command the same hook checks the branch the command worked in and, on a branch
+new to the conversation, the host adds the other saved conversations anchored
+there to the model's context straight after the command; see
+[branch recall](hook-protocol.md#branch-recall). Recall only reads, so it needs
+no transcript sharing and still runs while saving is paused, like the briefing.
 
 
 ### Nested Codex write calls

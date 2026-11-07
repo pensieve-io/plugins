@@ -81,8 +81,12 @@ def head_sha(cwd: str | Path) -> str | None:
     return value if value and SHA.fullmatch(value) else None
 
 
-def workspace(cwd: object) -> dict | None:
-    """`{repo_url, branch, head_sha}` for a work tree with an `origin` remote."""
+def workspace(cwd: object, *, head: bool = True) -> dict | None:
+    """`{repo_url, branch, head_sha}` for a work tree with an `origin` remote.
+
+    `head=False` skips the HEAD probe and omits `head_sha`, for callers that
+    only need to know which branch they are on.
+    """
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
         return None
     if git(cwd, "rev-parse", "--is-inside-work-tree") != "true":
@@ -93,4 +97,7 @@ def workspace(cwd: object) -> dict | None:
     branch = git(cwd, "symbolic-ref", "--short", "-q", "HEAD") or None
     if branch is not None and len(branch) > MAX_BRANCH_CHARS:
         branch = None
-    return {"repo_url": repo_url, "branch": branch, "head_sha": head_sha(cwd)}
+    result = {"repo_url": repo_url, "branch": branch}
+    if head:
+        result["head_sha"] = head_sha(cwd)
+    return result
