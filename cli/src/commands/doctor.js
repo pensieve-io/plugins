@@ -4,6 +4,7 @@ import { loadCredentials } from "../lib/credentials.js";
 import { which } from "../lib/exec.js";
 import { readJson } from "../lib/files.js";
 import { captureStateDir, credentialsPath, serverUrl } from "../lib/paths.js";
+import { pausePath, readPause } from "../lib/pause.js";
 import { loadReceipt } from "../lib/receipt.js";
 import { VERSION } from "../lib/version.js";
 
@@ -43,7 +44,7 @@ export default {
 Reports the CLI and Node versions, which clients are on PATH and whether the
 Pensieve plugin is installed in each, the CLI's sign-in, whether the MCP
 server answers /health, and the plugin's capture health file per client if
-the installed plugin writes one.`,
+the installed plugin writes one, and whether transcript saving is paused.`,
   options: {},
 
   async run(io) {
@@ -77,6 +78,16 @@ the installed plugin writes one.`,
         out("  capture health: no health file");
       }
     }
+    const paused = await readPause(io);
+    out(
+      `Transcript saving: ${
+        !paused.paused
+          ? "not paused"
+          : paused.since
+            ? `paused since ${paused.since}`
+            : "paused (the pause file is unreadable; the plugin treats that as paused)"
+      }${paused.paused ? ` — ${pausePath(io)}; \`pensieve resume\` to start again` : ""}`,
+    );
     out();
     out(`Sign-in: ${describeLogin(await loadCredentials(io).catch(() => null), io.now())}`);
     out(`  credentials: ${credentialsPath(io)}`);

@@ -6,7 +6,9 @@ import doctor from "./commands/doctor.js";
 import install from "./commands/install.js";
 import login from "./commands/login.js";
 import logout from "./commands/logout.js";
+import pause from "./commands/pause.js";
 import read from "./commands/read.js";
+import resume from "./commands/resume.js";
 import search from "./commands/search.js";
 import tree from "./commands/tree.js";
 import uninstall from "./commands/uninstall.js";
@@ -15,7 +17,7 @@ import { CliError } from "./lib/errors.js";
 import { openBrowser } from "./lib/exec.js";
 import { VERSION } from "./lib/version.js";
 
-export const COMMANDS = [install, uninstall, login, logout, contexts, search, read, tree, docs, doctor];
+export const COMMANDS = [install, uninstall, login, logout, pause, resume, contexts, search, read, tree, docs, doctor];
 
 /** Everything a command touches outside itself, so tests can replace it. */
 export function defaultIo() {

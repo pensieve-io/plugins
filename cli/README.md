@@ -72,6 +72,27 @@ plugin sign-in, and `logout` does not touch it.
 | `PENSIEVE_OAUTH_RESOURCE=1` | Send the RFC 8707 `resource` parameter (off by default) |
 | `PENSIEVE_CONFIG_DIR` | Where credentials and the receipt live (default `~/.pensieve`) |
 
+## Go off the record
+
+```sh
+pensieve pause
+pensieve resume
+```
+
+`pause` is a machine-wide switch for the plugin's transcript saving. While
+paused, the Pensieve plugin saves no transcripts and records no commit or PR
+anchors from any Claude Code or Codex conversation on this machine, and nothing
+from the paused period is uploaded after resuming. Company briefings and MCP
+tools keep working.
+
+It writes `{"paused_at": "<ISO-8601 UTC>"}` atomically to `paused.json` in the
+plugin's capture state directory (`PENSIEVE_CAPTURE_STATE`, else
+`~/.local/state/pensieve/capture`), as a 0600 file in a 0700 directory.
+Pausing again reports the original time. `resume` deletes the file, and says
+so when there was nothing to resume. Any file there counts as paused, even one
+that cannot be read, matching the hooks' fail-closed reading; `doctor` shows
+which. The switch takes effect with plugin versions whose hooks read the file.
+
 ## Read the context layer
 
 These call the hosted MCP server's own tools (`list_contexts`, `search`,
@@ -148,8 +169,9 @@ Reports the CLI and Node versions; for each client, whether it is on `PATH`,
 whether a `pensieve@…` plugin is installed (`claude plugin list --json`,
 `codex plugin list`), what this CLI installed, and the plugin's capture health
 file (`health-<client>.json` in `~/.local/state/pensieve/capture`, or
-`PENSIEVE_CAPTURE_STATE`) when the installed plugin writes one; then the CLI
-sign-in and its expiry, and whether the MCP server answers `/health`.
+`PENSIEVE_CAPTURE_STATE`) when the installed plugin writes one; whether
+transcript saving is paused, and since when; then the CLI sign-in and its
+expiry, and whether the MCP server answers `/health`.
 
 ## Development
 
