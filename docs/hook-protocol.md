@@ -217,10 +217,14 @@ endpoint plus `/anchors`, with the same loopback-only fixture override) with
 ```json
 {"client": "claude", "host_conversation_id": "<hook session_id>", "context_id": 497,
  "kind": "commit", "repo_url": "https://github.com/o/r.git", "branch": "main",
- "commit_sha": "<40 hex>", "pr_number": null, "pr_url": null, "tool_call_id": "toolu_…"}
+ "commit_sha": "<40 hex>", "pr_number": null, "pr_url": null, "tool_call_id": "toolu_…",
+ "turn_id": null}
 ```
 
-Every field is always present; `tool_call_id` is the hook's `tool_use_id` (null
+Every field is always present; `turn_id` is the hook's `turn_id` (Codex; null
+for Claude Code, which gives none), the id its saved events carry, because
+Codex's `tool_use_id` (`exec-…`) is not the call id its transcript saves.
+`tool_call_id` is the hook's `tool_use_id` (null
 when absent or not a capture id), the same id the captured tool call carries, so
 branch recall can open the conversation at the turn that ran the command.
 `repo_url` and `branch` follow the

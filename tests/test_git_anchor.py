@@ -216,6 +216,7 @@ def test_a_commit_anchors_the_hooks_own_saved_conversation(tmp_path, saved, anch
         "pr_number": None,
         "pr_url": None,
         "tool_call_id": "toolu_1",
+        "turn_id": None,
     }
     assert size <= git_anchor.MAX_REQUEST_BYTES
     assert "secret-token" not in json.dumps(body)
@@ -429,3 +430,13 @@ def test_an_unusable_tool_call_id_is_sent_as_null(tmp_path, saved, anchor_servic
     payload["tool_use_id"] = tool_use_id
     assert anchor(saved, anchor_service, payload) == [("commit", 200)]
     assert anchor_service["requests"][0][2]["tool_call_id"] is None
+
+
+def test_codex_sends_the_turn_its_transcript_saves(tmp_path, saved, anchor_service):
+    repo = repository(tmp_path)
+    git(repo, "commit", "-q", "--allow-empty", "-m", "agent change")
+    payload = event(repo, "git commit -m 'agent change'")
+    payload.update(tool_use_id="exec-7712b828", turn_id="01a1c61c-1e04")
+    assert anchor(saved, anchor_service, payload) == [("commit", 200)]
+    body = anchor_service["requests"][0][2]
+    assert (body["tool_call_id"], body["turn_id"]) == ("exec-7712b828", "01a1c61c-1e04")

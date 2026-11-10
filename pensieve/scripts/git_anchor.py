@@ -341,6 +341,9 @@ def run_hook(
     # The captured tool call carries this id too, so recall can open the
     # conversation at the turn that ran this command.
     tool_call_id = capture_id(payload.get("tool_use_id"))
+    # Codex names the call by an id its transcript never saves, but gives the
+    # turn id its transcript does save; Claude Code gives none.
+    turn_id = capture_id(payload.get("turn_id"))
     deadline = time.monotonic() + HOOK_BUDGET_SECONDS
     output = output_text(response)
     sent = []
@@ -355,6 +358,7 @@ def run_hook(
             "context_id": context,
             **fields,
             "tool_call_id": tool_call_id,
+            "turn_id": turn_id,
         }
         if len(json.dumps(body, separators=(",", ":")).encode()) > MAX_REQUEST_BYTES:
             continue
