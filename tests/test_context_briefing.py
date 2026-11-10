@@ -368,3 +368,78 @@ def test_parallel_claude_calls_bind_independently_of_lifecycle_lock(setup, monke
         results = list(executor.map(call, ["toolu_one", "toolu_two"]))
     assert results == [{}, {}]
     assert set(bound) == {"toolu_one", "toolu_two"}
+
+
+@pytest.mark.parametrize("cwd", [None, "/", "/repo"])
+def test_briefing_never_sends_a_workspace(setup, cwd):
+    # Branch recall arrives after a shell command, never through the briefing.
+    path, calls = setup
+    event = payload() if cwd is None else dict(payload(), cwd=cwd)
+    briefing.run_hook(event, "codex", path)
+    assert "workspace" not in calls[-1][3]
+
+
+def test_session_start_forgets_the_branch_recall_it_was_given(setup):
+    import branch_recall
+
+    path, _calls = setup
+    state = branch_recall.state_path(path, "codex", SESSION)
+    config.save_private_json(state, {"workspace": {}, "status": "listed", "checked_at": 1})
+    briefing.run_hook(payload("UserPromptSubmit"), "codex", path)
+    assert state.exists()
+    briefing.run_hook(dict(payload("SessionStart"), source="compact"), "codex", path)
+    assert not state.exists()
+
+
+@pytest.mark.parametrize("event", ["SessionStart", "UserPromptSubmit"])
+def test_every_briefing_names_the_hook_revision(setup, event):
+    path, calls = setup
+    briefing.run_hook(payload(event), "codex", path)
+    assert calls[-1][3]["hook_revision"] == briefing.HOOK_REVISION == 1
+
+
+def test_an_older_service_is_asked_again_without_the_fields_it_refuses(setup, monkeypatch):
+    path, calls = setup
+    sent = []
+
+    def request(_endpoint, _key, body, **kwargs):
+        sent.append((dict(body), kwargs.get("timeout")))
+        if "hook_revision" in body:
+            return 422, {"detail": "extra fields not permitted"}
+        return 200, {
+            "hookSpecificOutput": {"hookEventName": body["event"], "additionalContext": "primer"}
+        }
+
+    monkeypatch.setattr(briefing, "request", request)
+    event = dict(payload("SessionStart"), source="startup")
+    result = briefing.run_hook(event, "codex", path)
+    assert result["hookSpecificOutput"]["additionalContext"] == "primer"
+    assert len(sent) == 2
+    first, (retry, timeout) = sent[0][0], sent[1]
+    assert "hook_revision" in first
+    assert set(retry) == {
+        "client",
+        "session_id",
+        "event",
+        "delivery_id",
+        "force_refresh",
+        "source",
+        "turn_id",
+    }
+    assert all(retry[field] == first[field] for field in retry)
+    assert 0 < timeout <= briefing.HTTP_TIMEOUT_SECONDS
+
+
+def test_a_422_is_retried_once_and_only_within_the_hook_budget(setup, monkeypatch):
+    path, calls = setup
+    sent = []
+    monkeypatch.setattr(
+        briefing, "request", lambda _e, _k, body, **_kw: sent.append(body) or (422, None)
+    )
+    result = briefing.run_hook(payload(), "codex", path)
+    assert len(sent) == 2
+    assert "unavailable" in result["hookSpecificOutput"]["additionalContext"]
+    sent.clear()
+    monkeypatch.setattr(briefing, "HOOK_BUDGET_SECONDS", 0)
+    briefing.run_hook(payload(), "codex", path)
+    assert len(sent) == 1
