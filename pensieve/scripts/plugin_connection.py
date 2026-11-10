@@ -39,20 +39,29 @@ def connect_message(client: str) -> str:
     )
 
 
+def connected_profile(profiles: list, client: str, token: str) -> dict | None:
+    """The installation's own briefing profile, once its briefing hook has connected."""
+    for profile in profiles:
+        if (
+            isinstance(profile, dict)
+            and profile.get("client") == client
+            and profile.get("upload_key") == token
+            and profile.get("briefing_enabled") is True
+            and profile.get("context_id") is None
+        ):
+            return profile
+    return None
+
+
 def connection(config: Path, client: str, token: str, endpoint: str, request) -> dict | None:
     """Resolve the installation's authenticated owner, with no pairing exchange."""
     try:
         value = load_config(config, client)
     except ReconnectRequired:
         value = {"profiles": []}
-    for profile in value["profiles"]:
-        if (
-            profile.get("client") == client
-            and profile.get("upload_key") == token
-            and profile.get("briefing_enabled") is True
-            and profile.get("context_id") is None
-        ):
-            return profile
+    profile = connected_profile(value["profiles"], client, token)
+    if profile is not None:
+        return profile
     code, identity = request(endpoint, token, {"client": client}, timeout=2)
     if code != 200 or not isinstance(identity, dict):
         return None

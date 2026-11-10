@@ -63,8 +63,6 @@ MAX_RESPONSE_BYTES = 32 * 1024
 # Within the 10-second hook timeout: a 422 retry only starts with time to finish.
 HOOK_BUDGET_SECONDS = 9
 MIN_RETRY_SECONDS = 0.5
-# The service refuses a larger briefing or recall request outright.
-MAX_REQUEST_BYTES = 2048
 HTTP_TIMEOUT_SECONDS = 3
 
 

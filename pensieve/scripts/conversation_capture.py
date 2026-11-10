@@ -975,7 +975,8 @@ def run_hook(
         and payload.get("source") in {None, "startup", "clear"},
     )
     notice = None
-    if event == "UserPromptSubmit":
+    # A failed scan prints nothing, so its notice waits for a prompt that can show it.
+    if event == "UserPromptSubmit" and source_error is None:
         try:
             notice = conversation_notice(payload, client, session, state_root)
         except (OSError, ValueError, sqlite3.DatabaseError):

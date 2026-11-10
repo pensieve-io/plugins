@@ -4,8 +4,9 @@ A PostToolUse hook on the agent's shell tool. After every command it also asks
 `branch_recall` whether the agent has just arrived on a branch other saved
 conversations worked on; that answer is the hook's only output.
 
-For anchors it reads only the hook's own payload: the command the agent ran,
-its reported result and working directory. It tags the conversation named by
+For anchors it starts from the hook's own payload: the command the agent ran,
+its reported result and working directory, then reads that directory's git
+state and the conversation's own capture spool. It tags the conversation named by
 the hook's own `session_id`, never one found by working directory, so a
 human's commit or another conversation in the same repository is never
 attributed here. It acts only for a conversation whose
@@ -34,10 +35,14 @@ MAX_REQUEST_BYTES = 2048
 MAX_PR_URL_CHARS = 500
 REQUEST_TIMEOUT_SECONDS = 3
 HOOK_BUDGET_SECONDS = 4
-# A commit reported as made by this command is younger than this. An older HEAD
-# means the commit itself did not happen, whatever the chain's exit status said.
+# A commit made by this command is the work tree's newest HEAD move, and
+# younger than this. Anything else means the commit itself did not happen,
+# whatever the chain's exit status said.
 COMMIT_FRESH_SECONDS = 600
-SEPARATORS = {"&&", "||", ";", "|", "&", "\n", "(", ")", ";;", "|&"}
+REFLOG_COMMIT = re.compile(r"HEAD@\{(\d+)\} commit\b.*", re.DOTALL)
+SEPARATOR_CHARACTERS = set("();|&\n")
+# `<<EOF`, `<<-EOF` or `<<'EOF'`, but not a `<<<` here-string.
+HEREDOC = re.compile(r"(?<!<)<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 # git options that take their value as the next argument.
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
@@ -60,31 +65,62 @@ def command_text(tool_input: object) -> str | None:
     return None
 
 
-def segments(command: str) -> list[list[str]]:
-    """Split a shell command into simple commands; quoting is honoured."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+def without_heredocs(command: str) -> str:
+    """The command without its heredoc bodies: they are data, and shlex cannot read them."""
+    kept, closing = [], None
+    for line in command.split("\n"):
+        if closing is not None:
+            if line.strip() == closing:
+                closing = None
+            continue
+        kept.append(line)
+        match = HEREDOC.search(line)
+        if match:
+            closing = match.group(2)
+    return "\n".join(kept)
+
+
+def segments(command: str) -> list[list[str] | str]:
+    """Split a shell command into simple commands; quoting is honoured.
+
+    A subshell's `(` and `)` are kept as items of their own, so a `cd` inside
+    one can be undone where it closes.
+    """
+    lexer = shlex.shlex(without_heredocs(command), posix=True, punctuation_chars="();<>|&\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     # shlex would swallow a comment's newline and join the next command to it.
     lexer.commenters = ""
-    result, current = [], []
-    for token in lexer:
-        if token in SEPARATORS or set(token) <= set("();|&\n"):
-            if current:
-                result.append(current)
-            current = []
-        else:
-            current.append(token)
+    result: list[list[str] | str] = []
+    current: list[str] = []
+    try:
+        for token in lexer:
+            if set(token) <= SEPARATOR_CHARACTERS:
+                if current:
+                    result.append(current)
+                current = []
+                result.extend(character for character in token if character in "()")
+            else:
+                current.append(token)
+    except ValueError:
+        # shlex is not a shell: quotes inside `"$(…)"` or an apostrophe in a
+        # comment are valid shell it cannot read. What it read before that
+        # still names the command, since a message follows `git commit`.
+        pass
     if current:
         result.append(current)
     return result
 
 
-def resolve(base: Path, target: str) -> Path:
-    return Path(os.path.normpath(base / os.path.expanduser(target)))
+def resolve(base: Path | None, target: str) -> Path | None:
+    """`target` from `base`; None when it depends on shell state the hook cannot see."""
+    target = os.path.expanduser(target)
+    if "$" in target or "`" in target or (base is None and not os.path.isabs(target)):
+        return None
+    return Path(os.path.normpath((base or Path(os.sep)) / target))
 
 
-def git_target(words: list[str], directory: Path) -> tuple[Path, int]:
+def git_target(words: list[str], directory: Path | None) -> tuple[Path | None, int]:
     """For `git [options] <subcommand> …`: its working directory and subcommand index."""
     where, index = directory, 1
     while index < len(words) and words[index].startswith("-"):
@@ -98,23 +134,44 @@ def git_target(words: list[str], directory: Path) -> tuple[Path, int]:
     return where, index
 
 
-def detected(command: str, cwd: str) -> list[tuple[str, Path]]:
-    """`(kind, directory)` for each commit, push or PR creation, in order."""
-    found = []
-    directory = Path(cwd)
+def walk(command: str, cwd: str) -> tuple[list[tuple[str, Path]], Path]:
+    """Each commit, push or PR creation with its directory, and where the work ended up.
+
+    The second value is the command's last git or gh target, else its last
+    `cd`. A directory the hook cannot follow (`cd "$REPO"`) anchors nothing,
+    rather than naming the wrong repository, and leaves the host's `cwd` as
+    where the work ended up.
+    """
+    found: list[tuple[str, Path]] = []
+    directory: Path | None = Path(cwd)
+    target: Path | None = None
+    subshells: list[Path | None] = []
     for words in segments(command):
+        if words == "(":
+            subshells.append(directory)
+            continue
+        if words == ")":
+            if subshells:
+                directory = subshells.pop()
+            continue
         while words and ASSIGNMENT.fullmatch(words[0]):
             words = words[1:]  # `GIT_AUTHOR_NAME=x git commit`
         if not words:
             continue
         if words[0] == "cd" and len(words) == 2 and words[1] != "-":
             directory = resolve(directory, words[1])
-            continue
-        if words[0] == "git":
+        elif words[0] == "git":
             where, index = git_target(words, directory)
-            if index < len(words) and words[index] in {"commit", "push"}:
+            target = where or target
+            if (
+                where is not None
+                and index < len(words)
+                and words[index] in {"commit", "push"}
+                and "--dry-run" not in words
+            ):
                 found.append((words[index], where))
-        elif words[0] == "gh":
+        elif words[0] == "gh" and directory is not None:
+            target = directory
             rest = [
                 word
                 for position, word in enumerate(words[1:], 1)
@@ -126,28 +183,7 @@ def detected(command: str, cwd: str) -> list[tuple[str, Path]]:
     for item in found:
         if item not in unique:
             unique.append(item)
-    return unique[:MAX_ANCHORS]
-
-
-def working_directory(command: str, cwd: str) -> Path:
-    """Where the command's work ended up: its last git or gh target, else its last `cd`."""
-    directory, target = Path(cwd), None
-    try:
-        parsed = segments(command)
-    except ValueError:
-        return directory  # Unbalanced quoting: the shell refused it too.
-    for words in parsed:
-        while words and ASSIGNMENT.fullmatch(words[0]):
-            words = words[1:]
-        if not words:
-            continue
-        if words[0] == "cd" and len(words) == 2 and words[1] != "-":
-            directory = resolve(directory, words[1])
-        elif words[0] == "git":
-            target = git_target(words, directory)[0]
-        elif words[0] == "gh":
-            target = directory
-    return target or directory
+    return unique[:MAX_ANCHORS], target or directory or Path(cwd)
 
 
 def output_text(response: object) -> str:
@@ -165,11 +201,11 @@ def output_text(response: object) -> str:
 def succeeded(response: object) -> bool:
     """False when the host reported a failed, interrupted or unfinished command."""
     if isinstance(response, dict):
-        if response.get("interrupted") is True or response.get("is_error") is True:
+        if response.get("interrupted") is True:
             return False
-        if response.get("backgroundTaskId") or response.get("success") is False:
+        if response.get("backgroundTaskId"):
             return False  # A background command has not finished yet.
-        for field in ("exit_code", "exitCode", "returncode"):
+        for field in ("exit_code", "exitCode"):
             if field in response:
                 return response[field] == 0
         response = response.get("output")
@@ -271,12 +307,15 @@ def anchor(kind: str, directory: Path, output: str) -> dict | None:
         "pr_url": None,
     }
     if kind == "commit":
-        committed = git(directory, "log", "-1", "--format=%ct", "HEAD")
+        # A pull, a checkout or someone's older commit also leaves a recent
+        # HEAD; only this work tree's own reflog says a commit was just made.
+        moved = REFLOG_COMMIT.fullmatch(
+            git(directory, "reflog", "-1", "--date=unix", "--format=%gd %gs", "HEAD") or ""
+        )
         if (
             body["commit_sha"] is None
-            or not committed
-            or not committed.isdigit()
-            or time.time() - int(committed) > COMMIT_FRESH_SECONDS
+            or moved is None
+            or time.time() - int(moved.group(1)) > COMMIT_FRESH_SECONDS
         ):
             return None
     if kind == "pull_request":
@@ -287,29 +326,38 @@ def anchor(kind: str, directory: Path, output: str) -> dict | None:
     return body
 
 
+def shell_call(payload: dict, client: str) -> tuple[str, str, str] | None:
+    """`(command, cwd, session)` for a finished shell call from a known host, else None."""
+    from context_receipt import conversation_id
+
+    if client not in {"claude", "codex"} or payload.get("hook_event_name") != "PostToolUse":
+        return None
+    if payload.get("tool_name") != "Bash":
+        return None
+    session = conversation_id(payload.get("session_id"))
+    cwd = payload.get("cwd")
+    if session is None or not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return None
+    return command_text(payload.get("tool_input")) or "", cwd, session
+
+
 def run_hook(
     payload: dict,
     client: str,
     config: Path,
     state_root: Path,
     endpoint: str,
+    deadline: float | None = None,
 ) -> list[tuple[str, int | str]]:
     """Post this command's anchors; returns `(kind, response)` for each one sent."""
-    if client not in {"claude", "codex"} or payload.get("hook_event_name") != "PostToolUse":
+    call = shell_call(payload, client)
+    if call is None:
         return []
-    if payload.get("tool_name") != "Bash":
-        return []
-    command = command_text(payload.get("tool_input"))
-    cwd = payload.get("cwd")
-    if command is None or not isinstance(cwd, str) or not os.path.isabs(cwd):
-        return []
+    command, cwd, session = call
     # Cheap rejection first: almost every shell command is not one of these.
     if "git" not in command and "gh" not in command:
         return []
-    try:
-        found = detected(command, cwd)
-    except ValueError:
-        return []  # Unbalanced quoting: the shell refused it too.
+    found, _ = walk(command, cwd)
     response = payload.get("tool_response")
     if not found or (
         isinstance(payload.get("tool_input"), dict)
@@ -326,11 +374,7 @@ def run_hook(
     if is_paused(state_root):
         return []  # Saving is paused on this machine: nothing is sent or kept.
     from capture_config import key_for, profiles
-    from context_receipt import conversation_id
 
-    session = conversation_id(payload.get("session_id"))
-    if session is None:
-        return []
     scope = capture_scope(state_root, client, session, payload.get("transcript_path"))
     if scope is None:
         return []
@@ -344,7 +388,8 @@ def run_hook(
     # Codex names the call by an id its transcript never saves, but gives the
     # turn id its transcript does save; Claude Code gives none.
     turn_id = capture_id(payload.get("turn_id"))
-    deadline = time.monotonic() + HOOK_BUDGET_SECONDS
+    if deadline is None:
+        deadline = time.monotonic() + HOOK_BUDGET_SECONDS
     output = output_text(response)
     sent = []
     for kind, directory in found:
@@ -368,7 +413,7 @@ def run_hook(
             queue_anchor(state_root, client, session, owner, body)
             sent.append((kind, "queued"))
             continue
-        code, _ = post_anchor(endpoint, key, body, min(REQUEST_TIMEOUT_SECONDS, remaining))
+        code = post_anchor(endpoint, key, body, min(REQUEST_TIMEOUT_SECONDS, remaining))
         sent.append((kind, code))
         if code == 404 or retryable(code):
             # `not_saved`, or no answer: the next accepted upload sends it.
@@ -381,21 +426,12 @@ def run_hook(
 def recall_hook(payload: dict, client: str, config: Path, endpoint: str, deadline: float):
     """Hook output naming the branch's other saved conversations, or None."""
     from branch_recall import recall
-    from context_receipt import conversation_id
 
-    if client not in {"claude", "codex"} or payload.get("hook_event_name") != "PostToolUse":
-        return None
-    if payload.get("tool_name") != "Bash":
-        return None
-    session = conversation_id(payload.get("session_id"))
-    cwd = payload.get("cwd")
-    if session is None or not isinstance(cwd, str) or not os.path.isabs(cwd):
-        return None
-    if deadline - time.monotonic() < 0.5:
-        return None  # Anchors spent the budget; the next command asks.
-    command = command_text(payload.get("tool_input")) or ""
-    directory = working_directory(command, cwd)
-    return recall(client, session, directory, config, endpoint, deadline)
+    call = shell_call(payload, client)
+    if call is None or deadline - time.monotonic() < 0.5:
+        return None  # No time left after anchors: the next command asks.
+    command, cwd, session = call
+    return recall(client, session, walk(command, cwd)[1], config, endpoint, deadline)
 
 
 def main() -> None:
@@ -428,7 +464,7 @@ def main() -> None:
         print("{}")
         return
     try:
-        run_hook(payload, args.client, args.config, args.state, args.endpoint)
+        run_hook(payload, args.client, args.config, args.state, args.endpoint, deadline)
     except (OSError, ValueError, sqlite3.DatabaseError):
         pass  # An anchor is never worth interrupting the agent's command.
     output = None

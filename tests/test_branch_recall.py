@@ -99,7 +99,9 @@ def recall(connected, service, payload, client="claude"):
 
 
 def state(connected):
-    return json.loads(branch_recall.state_path(connected, "claude", SESSION).read_text())
+    """The newest branch this conversation asked about."""
+    path = branch_recall.state_path(connected, "claude", SESSION)
+    return list(json.loads(path.read_text())["branches"].values())[-1]
 
 
 def test_arriving_on_a_branch_asks_once_and_injects_the_answer(tmp_path, connected, service):
@@ -116,12 +118,37 @@ def test_arriving_on_a_branch_asks_once_and_injects_the_answer(tmp_path, connect
         "session_id": SESSION,
         "workspace": {"repo_url": PUBLIC, "branch": "feature/anchors"},
     }
-    assert size <= briefing.MAX_REQUEST_BYTES
+    assert size <= branch_recall.MAX_REQUEST_BYTES
     assert "secret-token" not in json.dumps(body)
     assert state(connected)["status"] == "listed"
     # The same branch is never asked again, whatever the next command is.
     assert recall(connected, service, event(repo, "git status")) is None
     assert len(service["requests"]) == 1
+
+
+def test_returning_to_a_branch_never_repeats_its_list(tmp_path, connected, service):
+    repo = repository(tmp_path)
+    assert recall(connected, service, event(repo))
+    git(repo, "branch", "main")
+    for branch in ("main", "feature/anchors", "main", "feature/anchors"):
+        git(repo, "checkout", "-q", branch)
+        assert recall(connected, service, event(repo)) is None
+    assert len(service["requests"]) == 1
+
+
+def test_a_request_the_host_kills_still_backs_off(tmp_path, connected, service, monkeypatch):
+    repo = repository(tmp_path)
+
+    def killed(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(briefing, "request", killed)
+    with pytest.raises(KeyboardInterrupt):
+        recall(connected, service, event(repo))
+    monkeypatch.undo()
+    assert state(connected)["status"] == "unavailable"
+    assert recall(connected, service, event(repo)) is None
+    assert service["requests"] == []
 
 
 def test_an_empty_branch_is_not_asked_again(tmp_path, connected, service):
@@ -186,10 +213,12 @@ def test_an_unavailable_answer_is_asked_again_only_after_a_minute(tmp_path, conn
     assert recall(connected, service, event(repo)) is None
     assert recall(connected, service, event(repo)) is None
     assert len(service["requests"]) == 1
-    saved = state(connected)
-    assert saved["status"] == "unavailable"
-    saved["checked_at"] -= branch_recall.RETRY_UNAVAILABLE_SECONDS
-    config.save_private_json(branch_recall.state_path(connected, "claude", SESSION), saved)
+    assert state(connected)["status"] == "unavailable"
+    path = branch_recall.state_path(connected, "claude", SESSION)
+    saved = json.loads(path.read_text())
+    for entry in saved["branches"].values():
+        entry["checked_at"] -= branch_recall.RETRY_UNAVAILABLE_SECONDS
+    config.save_private_json(path, saved)
     service["body"] = LISTED
     assert recall(connected, service, event(repo))
     assert len(service["requests"]) == 2

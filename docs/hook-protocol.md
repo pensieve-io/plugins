@@ -259,8 +259,13 @@ same repository is never attributed to it. Nothing is sent unless:
 - the host reports the command finished successfully: failed commands are
   filtered by exit status (`exit_code`, or Codex's `Exit code: N` output),
   interruption, background execution and, for commits, the HEAD guard below;
-- for `commit`, `HEAD` was committed within the last ten minutes, so
-  `git commit …; echo done` with nothing to commit does not anchor an old commit;
+- for `commit`, the work tree's newest `HEAD` reflog entry is a commit made
+  within the last ten minutes, so `git commit …; echo done` with nothing to
+  commit does not anchor an older commit, a pull or a checkout;
+- the command was not a `--dry-run`;
+- the directory the command ran in can be followed: a `cd` inside a subshell
+  ends where the subshell closes, and after a `cd` to a path holding a shell
+  expansion (`cd "$REPO"`) nothing is anchored until an absolute `cd`;
 - the command ran inside a work tree with an `origin` remote;
 - the conversation's transcript is being shared: it has a local spool that is
   not stopped; the newest native capture marker in its own transcript (or, with
@@ -300,8 +305,9 @@ After every shell command (`branch_recall.py`), the hook takes the directory
 the command worked in: the target of its last `git` (including `git -C <dir>`)
 or `gh` command, otherwise the directory after its last `cd`, otherwise the
 payload's `cwd`. It reads that directory's [repository identity](#repository-identity)
-and, for a named branch, compares it with the last one recalled for this
-conversation. Only a different `{repo_url, branch}` is asked about, and never
+and, for a named branch, looks it up among those already recalled for this
+conversation. Only a `{repo_url, branch}` not yet answered is asked about, so
+returning to a branch never repeats its list, and never
 the repository's default branch (this clone's `origin/HEAD`, else `main` or
 `master`; no network call): most conversations start there, and what was
 committed straight to it is rarely the work at hand.
@@ -317,8 +323,8 @@ credential, never an upload key, and at most 2,048 bytes:
 
 | 200 `status` | Meaning | Hook output | Asked again |
 | --- | --- | --- | --- |
-| `listed` | Other saved conversations anchored to that repository and branch | `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "<the service's text>"}}` | Only on another branch |
-| `empty` | Grounded, nothing on that branch | `{}` | Only on another branch |
+| `listed` | Other saved conversations anchored to that repository and branch | `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "<the service's text>"}}` | Never in this window |
+| `empty` | Grounded, nothing on that branch | `{}` | Never in this window |
 | `unavailable` | No company chosen yet, a service hold, or recall failed | `{}` | After 60 seconds |
 
 Any other status, an invalid body, no answer or a timeout counts as
@@ -328,8 +334,10 @@ since Codex refuses unknown output fields; both hosts add PostToolUse
 developer context, under its `additionalContextLimit`).
 
 The recall state is `<client>-<session>.recall.json` beside the briefing state:
-a private file holding the last `{repo_url, branch}`, its status and when it was
-asked, written under its own lock. A command finding the lock held asks nothing,
+a private file holding up to 20 `{repo_url, branch}` pairs, each with its status
+and when it was asked, written under its own lock. `unavailable` is recorded
+before the request is sent, so a hook the host kills mid-request backs off for
+the same minute. A command finding the lock held asks nothing,
 so parallel commands never inject the list twice. SessionStart (startup,
 resume, clear or compact) deletes it, so a new or compacted window is told
 again. Nothing is asked for a detached HEAD, outside a work tree with `origin`,

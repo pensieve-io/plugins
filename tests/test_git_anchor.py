@@ -126,20 +126,47 @@ def test_a_slow_git_fails_open(tmp_path, monkeypatch):
         ("gh pr merge 42 --squash", []),
         ("git log --oneline", []),
         ("echo git commit", []),
-        ("git commit -m 'unbalanced", []),
+        # Valid shell that shlex cannot read still names its command.
+        ('git commit -m "$(cat <<\'EOF\'\nFix "can\'t connect" error\nEOF\n)"', ["commit"]),
+        ('gh pr create --body "$(cat <<\'EOF\'\nSupports 5" screens\nEOF\n)"', ["pull_request"]),
+        ("git commit -F - <<'EOF'\nDon't crash\nEOF\ngit push", ["commit", "push"]),
+        ("# don't forget\ngit commit -m x", []),
+        ('git commit -m "$(printf "it\'s")" && git push', ["commit"]),
+        ("cat > notes <<EOF\ngit push origin main\nEOF", []),
+        ("git push --dry-run", []),
+        ("git commit --dry-run -m x", []),
+        ('cd "$REPO" && git commit -m x', []),
+        ('cd "$REPO" && git -C /srv/repo commit -m x', ["commit"]),
     ],
 )
 def test_only_commits_pushes_and_created_pull_requests_are_detected(tmp_path, command, kinds):
-    try:
-        found = git_anchor.detected(command, str(tmp_path))
-    except ValueError:
-        found = []
+    found, _ = git_anchor.walk(command, str(tmp_path))
     assert [kind for kind, _ in found] == kinds
 
 
 def test_directories_follow_cd_and_git_c(tmp_path):
-    found = git_anchor.detected("cd a && git -C ../b commit -m x; git push", str(tmp_path))
+    found, ended = git_anchor.walk("cd a && git -C ../b commit -m x; git push", str(tmp_path))
     assert found == [("commit", tmp_path / "b"), ("push", tmp_path / "a")]
+    assert ended == tmp_path / "a"
+
+
+def test_a_subshell_cd_ends_where_the_subshell_closes(tmp_path):
+    found, ended = git_anchor.walk("(cd other && git status); git commit -m x", str(tmp_path))
+    assert found == [("commit", tmp_path)]
+    assert ended == tmp_path
+
+
+def test_an_unfollowable_cd_leaves_the_hosts_directory(tmp_path):
+    assert git_anchor.walk('cd "$REPO" && ls', str(tmp_path)) == ([], tmp_path)
+
+
+def test_a_recent_head_this_command_did_not_commit_is_not_anchored(tmp_path, saved, anchor_service):
+    repo = repository(tmp_path)
+    # A fresh commit by someone else, then a checkout: HEAD is recent, but the
+    # work tree's newest move is not a commit.
+    git(repo, "checkout", "-q", "-b", "elsewhere")
+    assert anchor(saved, anchor_service, event(repo, "git commit -m x; echo done")) == []
+    assert anchor_service["requests"] == []
 
 
 @pytest.mark.parametrize(
@@ -415,6 +442,15 @@ def test_hook_prints_only_empty_json(monkeypatch, capsys, tmp_path):
 def test_upload_key_cannot_be_sent_elsewhere(endpoint):
     with pytest.raises(ValueError):
         anchor_queue.post_anchor(endpoint, KEY, {}, 1)
+
+
+@pytest.mark.parametrize(
+    "remote",
+    ["oauth2:glpat-secret@gitlab.com:o/r.git", "x-access-token:ghs_secret@github.com:o/r.git"],
+)
+def test_a_token_in_an_scp_style_remote_is_no_repository(remote):
+    assert git_workspace.public_remote(remote) is None
+    assert git_workspace.public_remote("git@github.com:o/r.git") == "git@github.com:o/r.git"
 
 
 def test_capture_scope_is_the_saved_conversations_owner_and_context(saved):

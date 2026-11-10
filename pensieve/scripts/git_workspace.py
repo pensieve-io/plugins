@@ -18,8 +18,9 @@ MAX_REPO_URL_CHARS = 500
 MAX_BRANCH_CHARS = 255
 SHA = re.compile(r"[0-9a-f]{40}")
 # `[user@]host:path`, git's scp-like syntax. A Windows drive letter or a local
-# path never matches, since the host needs at least two characters.
-SCP_REMOTE = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]{2,}:(?!/)\S+")
+# path never matches, since the host needs at least two characters. Nor does a
+# path holding `@`: `oauth2:<token>@host:o/r.git` would pass its token off as one.
+SCP_REMOTE = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]{2,}:(?!/)[^\s@]+")
 REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh", "ssh+git"}
 
 

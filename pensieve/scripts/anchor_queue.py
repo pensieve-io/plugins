@@ -14,7 +14,13 @@ import json
 import time
 from pathlib import Path
 
-from capture_config import MAX_CONFIG_BYTES, private_file, private_lock, save_private_json
+from capture_config import (
+    CLIENTS,
+    MAX_CONFIG_BYTES,
+    private_file,
+    private_lock,
+    save_private_json,
+)
 
 MAX_PENDING = 20
 PENDING_TTL_SECONDS = 24 * 60 * 60
@@ -30,7 +36,7 @@ def retryable(code: int | str) -> bool:
 
 
 def pending_path(root: Path, client: str, session: str) -> Path:
-    if client not in {"claude", "codex"}:
+    if client not in CLIENTS:
         raise ValueError("Invalid capture client")
     return root / f"{client}-{session}.anchors.json"
 
@@ -59,25 +65,21 @@ def read_pending(path: Path) -> list[dict]:
 
 def update_pending(path: Path, change) -> list[dict] | None:
     """Apply `change(entries) -> entries` under the queue's lock; None when busy."""
-    deadline = time.monotonic() + LOCK_WAIT_SECONDS
-    while True:
-        try:
-            with private_lock(path.with_suffix(".lock")):
-                try:
-                    entries = read_pending(path)
-                except ValueError:
-                    entries = []  # A damaged queue holds nothing worth keeping.
-                fresh = time.time() - PENDING_TTL_SECONDS
-                entries = change([entry for entry in entries if entry["queued_at"] >= fresh])
-                if entries:
-                    save_private_json(path, entries[-MAX_PENDING:])
-                elif path.exists():
-                    path.unlink()
-                return entries
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.01)
+    try:
+        with private_lock(path.with_suffix(".lock"), LOCK_WAIT_SECONDS):
+            try:
+                entries = read_pending(path)
+            except ValueError:
+                entries = []  # A damaged queue holds nothing worth keeping.
+            fresh = time.time() - PENDING_TTL_SECONDS
+            entries = change([entry for entry in entries if entry["queued_at"] >= fresh])
+            if entries:
+                save_private_json(path, entries[-MAX_PENDING:])
+            elif path.exists():
+                path.unlink()
+            return entries
+    except BlockingIOError:
+        return None
 
 
 def queue_anchor(root: Path, client: str, session: str, owner: str, anchor: dict) -> bool:
@@ -91,7 +93,8 @@ def queue_anchor(root: Path, client: str, session: str, owner: str, anchor: dict
     return update_pending(pending_path(root, client, session), add) is not None
 
 
-def post_anchor(endpoint: str, key: str, body: dict, timeout: float) -> tuple[int | str, dict]:
+def post_anchor(endpoint: str, key: str, body: dict, timeout: float) -> int | str:
+    """The service's status code, or `unavailable` when it gave none."""
     from urllib.error import HTTPError, URLError
     from urllib.request import ProxyHandler, Request, build_opener
 
@@ -112,22 +115,11 @@ def post_anchor(endpoint: str, key: str, body: dict, timeout: float) -> tuple[in
     opener = build_opener(ProxyHandler({}), NoRedirects())
     try:
         with opener.open(request, timeout=max(0.05, timeout)) as response:
-            return response.status, json_body(response.read(4097))
+            return response.status
     except HTTPError as exc:
-        try:
-            return exc.code, json_body(exc.read(4097))
-        except OSError:
-            return exc.code, {}
+        return exc.code
     except (OSError, URLError, ValueError):
-        return "unavailable", {}
-
-
-def json_body(raw: bytes) -> dict:
-    try:
-        value = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+        return "unavailable"
 
 
 def replay(
@@ -174,7 +166,7 @@ def replay(
         if len(json.dumps(anchor, separators=(",", ":")).encode()) > MAX_REQUEST_BYTES:
             resolved.append(identity(anchor))
             continue
-        code, _ = post_anchor(endpoint, key, anchor, min(REQUEST_TIMEOUT_SECONDS, remaining))
+        code = post_anchor(endpoint, key, anchor, min(REQUEST_TIMEOUT_SECONDS, remaining))
         if not retryable(code):
             resolved.append(identity(anchor))
     if resolved:
