@@ -12,7 +12,9 @@ carries this list.
 Local state is one private file per conversation beside the briefing state:
 the last `{repo_url, branch}` asked about, the answer's status and its time.
 The same branch is not asked again after `listed` or `empty`; `unavailable` is
-asked again after a minute. SessionStart clears it, so a new, resumed or
+asked again after a minute. The repository's default branch is never asked
+about: most conversations start there, and what was committed straight to it
+is rarely the work at hand. SessionStart clears it, so a new, resumed or
 compacted window is told again. It uses the plugin's own briefing credential,
 never an upload key, and fails open: nothing here can change or delay the
 agent's command. Standard library, Python 3.9+.
@@ -130,7 +132,7 @@ def recall(
 ) -> dict | None:
     """Hook output naming this branch's other saved conversations, or None."""
     from context_briefing import MAX_REQUEST_BYTES, request, request_bytes
-    from git_workspace import workspace
+    from git_workspace import on_default_branch, workspace
 
     repository = workspace(str(directory), head=False)
     if repository is None or repository["branch"] is None:
@@ -138,6 +140,12 @@ def recall(
     path = state_path(config, client, session)
     if not due(read_state(path), repository, time.time()):
         return None  # Cheap check before the credential and the lock.
+    if on_default_branch(directory, repository["branch"]):
+        # Recorded, so later commands here skip the probe as well.
+        locked(
+            path, lambda: save_private_json(path, {"workspace": repository, "status": "default"})
+        )
+        return None
     key = briefing_key(config, client)
     if key is None:
         return None

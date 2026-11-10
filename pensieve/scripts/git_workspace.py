@@ -81,6 +81,18 @@ def head_sha(cwd: str | Path) -> str | None:
     return value if value and SHA.fullmatch(value) else None
 
 
+def on_default_branch(cwd: str | Path, branch: str) -> bool:
+    """Whether `branch` is the one `origin` names as its default.
+
+    Read from this clone's `origin/HEAD`, with no network call; a clone that
+    never recorded one is taken to default to `main` or `master`.
+    """
+    default = git(cwd, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")
+    if default and "/" in default:
+        return branch == default.split("/", 1)[1]
+    return branch in {"main", "master"}
+
+
 def workspace(cwd: object, *, head: bool = True) -> dict | None:
     """`{repo_url, branch, head_sha}` for a work tree with an `origin` remote.
 

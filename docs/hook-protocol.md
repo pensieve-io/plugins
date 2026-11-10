@@ -301,7 +301,10 @@ the command worked in: the target of its last `git` (including `git -C <dir>`)
 or `gh` command, otherwise the directory after its last `cd`, otherwise the
 payload's `cwd`. It reads that directory's [repository identity](#repository-identity)
 and, for a named branch, compares it with the last one recalled for this
-conversation. Only a different `{repo_url, branch}` is asked about:
+conversation. Only a different `{repo_url, branch}` is asked about, and never
+the repository's default branch (this clone's `origin/HEAD`, else `main` or
+`master`; no network call): most conversations start there, and what was
+committed straight to it is rarely the work at hand.
 
 `POST https://mcp.pensieve.uk/hooks/recall` (loopback fixtures as for the
 briefing), with the briefing's own `Authorization: Bearer` installation

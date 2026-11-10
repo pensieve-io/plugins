@@ -148,11 +148,36 @@ def test_a_checkout_mid_turn_asks_about_the_new_branch(tmp_path, connected, serv
     "command", ["git -C ../repo switch main", "cd ../repo && git log -1", "cd ../repo"]
 )
 def test_recall_follows_the_directory_the_command_worked_in(tmp_path, connected, service, command):
-    repository(tmp_path, branch="main")
+    repository(tmp_path, branch="feature/there")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     assert recall(connected, service, event(elsewhere, command))
-    assert service["requests"][0][2]["workspace"]["branch"] == "main"
+    assert service["requests"][0][2]["workspace"]["branch"] == "feature/there"
+
+
+@pytest.mark.parametrize(
+    ("origin_head", "branch", "asked"),
+    [
+        (None, "main", False),
+        (None, "master", False),
+        ("develop", "develop", False),
+        # `main` is ordinary work where the repository's default is another branch.
+        ("develop", "main", True),
+    ],
+)
+def test_the_default_branch_is_never_asked_about(
+    tmp_path, connected, service, origin_head, branch, asked
+):
+    repo = repository(tmp_path, branch=branch)
+    if origin_head:
+        git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{origin_head}")
+    assert bool(recall(connected, service, event(repo))) is asked
+    assert bool(recall(connected, service, event(repo))) is False
+    assert len(service["requests"]) == int(asked)
+    assert state(connected)["status"] == ("listed" if asked else "default")
+    # Leaving the default branch asks as usual.
+    git(repo, "checkout", "-q", "-b", "feature/next")
+    assert recall(connected, service, event(repo))
 
 
 def test_an_unavailable_answer_is_asked_again_only_after_a_minute(tmp_path, connected, service):
