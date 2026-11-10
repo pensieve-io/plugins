@@ -88,3 +88,17 @@ test("uninstall without a receipt does nothing", async () => {
   assert.equal(await uninstall.run(io, {}), 0);
   assert.equal(io.spawn.calls.length, 0);
 });
+
+test("a client that already has Pensieve from another marketplace is left alone", async () => {
+  const spawn = fakeSpawn((command, args) => {
+    const line = [command, ...args].join(" ");
+    if (line === "claude plugin list --json") return { stdout: JSON.stringify([{ id: "pensieve@synced" }]) };
+    if (line === "claude plugin marketplace list --json") return { stdout: "[]" };
+    return 0;
+  });
+  const io = makeIo({ spawn, env: { PATH: binDir(["claude"]) } });
+  assert.equal(await install.run(io, {}), 0);
+  assert.deepEqual(mutating(io.spawn.calls), [], "no second copy is installed");
+  assert.match(io.stdout.text, /Already installed as pensieve@synced; leaving Claude Code as is\./);
+  assert.equal(existsSync(receiptPath(io)), false);
+});

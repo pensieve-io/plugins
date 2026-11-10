@@ -6,15 +6,15 @@ export const pointerText = (out) =>
   "They may lag the code: check the revision in `index.md` and verify against source.";
 
 /**
- * Insert or refresh the marked pointer block. Running it again with the same
+ * Insert or refresh a marked block (the docs pointer unless other markers are given). Running it again with the same
  * text returns the content unchanged, so repeated pulls never duplicate it.
  */
-export function upsertPointer(content, text) {
-  const block = `${POINTER_START}\n${text}\n${POINTER_END}`;
-  const start = content.indexOf(POINTER_START);
-  const end = content.indexOf(POINTER_END, start);
+export function upsertPointer(content, text, [open, close] = [POINTER_START, POINTER_END]) {
+  const block = `${open}\n${text}\n${close}`;
+  const start = content.indexOf(open);
+  const end = content.indexOf(close, start);
   if (start >= 0 && end > start) {
-    return content.slice(0, start) + block + content.slice(end + POINTER_END.length);
+    return content.slice(0, start) + block + content.slice(end + close.length);
   }
   const separator = !content ? "" : content.endsWith("\n\n") ? "" : content.endsWith("\n") ? "\n" : "\n\n";
   return `${content}${separator}${block}\n`;

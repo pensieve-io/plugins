@@ -7,9 +7,12 @@ import install from "./commands/install.js";
 import login from "./commands/login.js";
 import logout from "./commands/logout.js";
 import pause from "./commands/pause.js";
+import prime from "./commands/prime.js";
 import read from "./commands/read.js";
 import resume from "./commands/resume.js";
 import search from "./commands/search.js";
+import setup from "./commands/setup.js";
+import tools, { runTool } from "./commands/tools.js";
 import tree from "./commands/tree.js";
 import uninstall from "./commands/uninstall.js";
 import { parseArgs } from "./lib/args.js";
@@ -17,7 +20,23 @@ import { CliError } from "./lib/errors.js";
 import { openBrowser } from "./lib/exec.js";
 import { VERSION } from "./lib/version.js";
 
-export const COMMANDS = [install, uninstall, login, logout, pause, resume, contexts, search, read, tree, docs, doctor];
+export const COMMANDS = [
+  setup,
+  install,
+  uninstall,
+  login,
+  logout,
+  prime,
+  pause,
+  resume,
+  contexts,
+  search,
+  read,
+  tree,
+  tools,
+  docs,
+  doctor,
+];
 
 /** Everything a command touches outside itself, so tests can replace it. */
 export function defaultIo() {
@@ -45,6 +64,9 @@ Usage: pensieve <command> [options]
 Commands:
 ${COMMANDS.map((c) => `  ${c.name.padEnd(width)}  ${c.summary}`).join("\n")}
 
+Every other Pensieve tool is a command too, reads and writes alike:
+\`pensieve save-data …\`, \`pensieve edit-page …\` (see \`pensieve tools\`).
+
 Run \`pensieve <command> --help\` for a command's options.
 Set PENSIEVE_MCP_URL to target another MCP server (development).
 `;
@@ -61,7 +83,13 @@ export async function main(argv, io = defaultIo()) {
       return 0;
     }
     const command = COMMANDS.find((c) => c.name === name);
-    if (!command) throw new CliError(`Unknown command \`${name}\`. Run \`pensieve --help\`.`);
+    if (!command) {
+      const code = /^[a-z][a-z0-9_-]*$/.test(name) ? await runTool(io, name, rest) : null;
+      if (code === null) {
+        throw new CliError(`Unknown command \`${name}\`. Run \`pensieve --help\`, or \`pensieve tools\` for the server's tools.`);
+      }
+      return code;
+    }
     const { flags, positionals } = parseArgs(rest, command.options);
     if (flags.help) {
       io.stdout.write(`${command.usage}\n`);

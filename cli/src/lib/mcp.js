@@ -1,6 +1,7 @@
 import { getAccessToken } from "./credentials.js";
 import { CliError } from "./errors.js";
 import { serverUrl } from "./paths.js";
+import { typesOf } from "./toolargs.js";
 import { VERSION } from "./version.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -55,8 +56,6 @@ const ALIASES = {
   cursor: ["cursor"],
 };
 
-const typesOf = (schema = {}) =>
-  [schema.type, ...(schema.anyOf || schema.oneOf || []).map((s) => s.type)].flat().filter(Boolean);
 
 /**
  * Map CLI values onto the argument names the server's own schema declares
@@ -70,7 +69,7 @@ export function buildArguments(tool, values) {
     if (value === undefined || value === null) continue;
     const name = (ALIASES[key] || [key]).find((candidate) => candidate in properties);
     if (!name) throw new CliError(`The server's ${tool.name} tool does not accept ${key}.`);
-    const types = typesOf(properties[name]).filter((type) => type !== "null");
+    const types = typesOf(properties[name]);
     let v = value;
     if (types.length === 1 && types[0] === "array" && !Array.isArray(v)) v = [v];
     else if (!types.includes("string") && types.includes("integer") && /^\d+$/.test(String(v))) {
@@ -137,7 +136,8 @@ export class McpClient {
     return result;
   }
 
-  async tool(name) {
+  /** Every tool the server offers, by name. */
+  async listTools() {
     if (!this.tools) {
       const tools = [];
       let cursor;
@@ -148,19 +148,25 @@ export class McpClient {
       } while (cursor);
       this.tools = new Map(tools.map((t) => [t.name, t]));
     }
-    const tool = this.tools.get(name);
+    return this.tools;
+  }
+
+  async tool(name) {
+    const tool = (await this.listTools()).get(name);
     if (!tool) throw new CliError(`The Pensieve MCP server has no ${name} tool.`);
     return tool;
   }
 
-  /** Call a tool with CLI-level values mapped through its schema. */
-  async call(name, values = {}) {
-    const result = await this.request("tools/call", {
-      name,
-      arguments: buildArguments(await this.tool(name), values),
-    });
+  /** Call a tool with arguments already in the server's own names. */
+  async invoke(name, args = {}) {
+    const result = await this.request("tools/call", { name, arguments: args });
     if (result.isError) throw new CliError(toolText(result) || `${name} failed.`);
     return result;
+  }
+
+  /** Call a tool with CLI-level values mapped through its schema. */
+  async call(name, values = {}) {
+    return this.invoke(name, buildArguments(await this.tool(name), values));
   }
 
   /** Call a windowed tool and follow its continuation cursors to the end. */

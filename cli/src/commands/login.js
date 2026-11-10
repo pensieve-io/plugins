@@ -1,6 +1,6 @@
 import { credentialsFromTokens, resourceIndicator, saveCredentials } from "../lib/credentials.js";
 import { CliError } from "../lib/errors.js";
-import { readJson, writePrivateJson } from "../lib/files.js";
+import { readJson, readStream, writePrivateJson } from "../lib/files.js";
 import {
   authorizeUrl,
   createPkce,
@@ -13,12 +13,6 @@ import {
   startCallbackServer,
 } from "../lib/oauth.js";
 import { credentialsPath, oauthClientsPath, serverUrl } from "../lib/paths.js";
-
-async function readStdin(stdin) {
-  let data = "";
-  for await (const chunk of stdin) data += chunk;
-  return data.trim();
-}
 
 /**
  * Start the loopback listener, reusing the cached client's registered port
@@ -109,7 +103,7 @@ Environment:
 
   async run(io, flags) {
     if (flags.tokenStdin) {
-      const token = await readStdin(io.stdin);
+      const token = (await readStream(io.stdin)).trim();
       if (!token || /\s/.test(token)) throw new CliError("Expected a single access token on stdin.");
       await saveCredentials(io, {
         access_token: token,

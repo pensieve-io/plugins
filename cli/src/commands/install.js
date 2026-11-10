@@ -50,9 +50,12 @@ Options:
         failed = true;
         continue;
       }
+      // A copy from another marketplace already loads the same hooks and
+      // tools; a second one would run every hook twice.
       const others = ((await installedPensieve(io, name)) || []).filter((id) => id !== PLUGIN);
       if (others.length) {
-        io.stderr.write(`Note: Pensieve is already installed as ${others.join(", ")}; ${PLUGIN} would be a second copy.\n`);
+        io.stdout.write(`Already installed as ${others.join(", ")}; leaving ${client.label} as is.\n`);
+        continue;
       }
       const ran = [];
       let stopped = false;

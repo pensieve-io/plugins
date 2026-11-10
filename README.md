@@ -72,11 +72,14 @@ client's command runner for the bundled hook helper.
 
 ### Pensieve CLI
 
-The [`pensieve` CLI](cli/README.md) runs the commands above for whichever of
-`claude` and `codex` it finds (`pensieve install`, reversed by
-`pensieve uninstall`), checks a setup with `pensieve doctor`, and gives agents
-without MCP a shell route into Pensieve: `pensieve search`, `read`, `tree` and
-`docs pull`, which copies a repository's Pensieve docs into local Markdown.
+The [`pensieve` CLI](cli/README.md) does the above in one command.
+`pensieve setup` installs the plugin into whichever of `claude` and `codex` it
+finds, signs in and checks the connection (`pensieve uninstall` reverses the
+install, `pensieve doctor` reports the state). It also gives agents without
+MCP a shell route into Pensieve: every MCP tool is a command of the same name
+(`pensieve search`, `pensieve read`, `pensieve save-data`), `pensieve prime`
+writes the standing instructions that tell an agent to use them, and
+`pensieve docs pull` copies a repository's Pensieve docs into local Markdown.
 
 ### Desktop and workspace clients
 

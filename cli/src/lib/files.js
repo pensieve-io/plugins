@@ -33,3 +33,10 @@ export async function writePrivateJson(path, value) {
 export async function removeFile(path) {
   await rm(path, { force: true });
 }
+
+/** Everything on a readable stream, as text. */
+export async function readStream(stream) {
+  let data = "";
+  for await (const chunk of stream) data += chunk;
+  return data;
+}

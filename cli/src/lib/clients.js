@@ -68,7 +68,12 @@ export const CLIENTS = {
         id: "login",
         run: ["mcp", "login", MARKETPLACE],
         undo: ["mcp", "logout", MARKETPLACE],
-        present: async () => false,
+        // Signed in already (ours or the member's own): never reopen the browser.
+        present: async (io) => {
+          const { code, stdout } = await capture(io, "codex", ["mcp", "list", "--json"]);
+          const servers = code === 0 ? json(stdout) : null;
+          return Array.isArray(servers) && servers.some((s) => s.name === MARKETPLACE && s.auth_status === "o_auth");
+        },
       },
     ],
     nextSteps: ["Enable the plugin's hooks if prompted, then start a new chat."],
