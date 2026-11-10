@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -43,6 +44,13 @@ from plugin_connection import (
 )
 
 BRIEFING_ENDPOINT = "https://mcp.pensieve.uk/hooks/briefing"
+# Branch recall after a shell command (`branch_recall.py`), on the same credential.
+RECALL_ENDPOINT = "https://mcp.pensieve.uk/hooks/recall"
+# Bumped whenever hook behaviour the service relies on changes, so a briefing
+# can ask an older installation to update its plugin.
+HOOK_REVISION = 1
+# Fields an older service, whose request model forbids unknown fields, refuses.
+OPTIONAL_BRIEFING_FIELDS = ("hook_revision",)
 BINDING_ENDPOINT = "https://mcp.pensieve.uk/hooks/tool-binding"
 
 
@@ -52,11 +60,14 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 MAX_RESPONSE_BYTES = 32 * 1024
+# Within the 10-second hook timeout: a 422 retry only starts with time to finish.
+HOOK_BUDGET_SECONDS = 9
+MIN_RETRY_SECONDS = 0.5
 HTTP_TIMEOUT_SECONDS = 3
 
 
 def checked_endpoint(value: str) -> str:
-    if value in {BRIEFING_ENDPOINT, BINDING_ENDPOINT, CONNECTION_ENDPOINT}:
+    if value in {BRIEFING_ENDPOINT, BINDING_ENDPOINT, CONNECTION_ENDPOINT, RECALL_ENDPOINT}:
         return value
     parsed = urlsplit(value)
     try:
@@ -73,11 +84,16 @@ def checked_endpoint(value: str) -> str:
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or parsed.path not in {"/hooks/briefing", "/hooks/tool-binding", "/hooks/connection"}
+        or parsed.path
+        not in {"/hooks/briefing", "/hooks/tool-binding", "/hooks/connection", "/hooks/recall"}
         or (parsed.port is not None and parsed.port < 1)
     ):
         raise ValueError("Only the fixed Pensieve endpoint or HTTP loopback fixture is supported")
     return value
+
+
+def request_bytes(body: dict) -> bytes:
+    return json.dumps(body, separators=(",", ":")).encode()
 
 
 def request(
@@ -88,7 +104,7 @@ def request(
         headers["Authorization"] = "Bearer " + key
     req = Request(
         checked_endpoint(endpoint),
-        data=json.dumps(body, separators=(",", ":")).encode(),
+        data=request_bytes(body),
         headers=headers,
         method="POST",
     )
@@ -158,6 +174,7 @@ def run_hook(
     receipt_endpoint: str = DELIVERY_ENDPOINT,
     connection_endpoint: str = CONNECTION_ENDPOINT,
 ) -> dict:
+    started = time.monotonic()
     event = payload.get("hook_event_name")
     if event not in {"SessionStart", "UserPromptSubmit", "PreToolUse"}:
         return {}
@@ -197,6 +214,12 @@ def run_hook(
             binding_endpoint, key, {"client": client, "session_id": session, "tool_use_id": tool_id}
         )
         return {} if code == 204 else failure(event, client, session)
+    if event == "SessionStart":
+        # A new, resumed, cleared or compacted window no longer holds the
+        # branch recall it was given; the next shell command asks again.
+        from branch_recall import reset
+
+        reset(config, client, session)
     path = state_path(config, client, session)
     with private_lock(path.with_suffix(".lock")):
         state = read_state(path)
@@ -227,7 +250,16 @@ def run_hook(
         turn = conversation_id(payload.get("turn_id"))
         if turn:
             body["turn_id"] = turn
+        body["hook_revision"] = HOOK_REVISION
         code, result = request(endpoint, key, body)
+        remaining = started + HOOK_BUDGET_SECONDS - time.monotonic()
+        if code == 422 and remaining >= MIN_RETRY_SECONDS:
+            # An older service refuses fields it does not know; ask once more
+            # with only the fields every service accepts.
+            body = {k: v for k, v in body.items() if k not in OPTIONAL_BRIEFING_FIELDS}
+            code, result = request(
+                endpoint, key, body, timeout=min(HTTP_TIMEOUT_SECONDS, remaining)
+            )
         if code == 200 and isinstance(result, dict):
             available = result.pop("briefing_available", True) is True
             output = result.get("hookSpecificOutput")

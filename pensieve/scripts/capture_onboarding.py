@@ -30,7 +30,8 @@ CONSENT_PAGE = "https://app.pensieve.uk/oauth/conversation-capture"
 OFFER_INTERVAL_SECONDS = 600
 
 
-def current_offer(path: object, client: str, session: str) -> dict | None:
+def latest_attribution(path: object, client: str, session: str) -> tuple[dict, str] | None:
+    """The newest native capture marker since compaction, with the text carrying it."""
     tail = transcript_tail(path)
     if tail is None:
         return None
@@ -43,30 +44,47 @@ def current_offer(path: object, client: str, session: str) -> dict | None:
             return None
         for content in reversed(accepted_contexts(record, session, codex_session, client)):
             marker = parse_marker(content, client, session)
-            if marker is None:
-                continue
-            # The newest native attribution wins, including a cleared context.
-            if marker["context_id"] is None:
-                return None
-            consents = CONSENT_MARKER.findall(content)
-            if len(consents) != 1:
-                return None
-            try:
-                consent = json.loads(consents[0])
-            except (ValueError, TypeError):
-                return None
-            if (
-                not isinstance(consent, dict)
-                or any(
-                    consent.get(k) != marker[k]
-                    for k in ("user_id", "client", "context_id", "conversation_id")
-                )
-                or consent.get("status") not in {"approved", "declined", "unknown"}
-            ):
-                return None
-            marker = dict(marker, consent=consent["status"])
-            return marker
+            if marker is not None:
+                return marker, content
     return None
+
+
+def sharing_enabled(path: object, client: str, session: str) -> bool:
+    """Whether the newest marker names a context with an enabled consent generation."""
+    found = latest_attribution(path, client, session)
+    return (
+        found is not None
+        and found[0]["context_id"] is not None
+        and found[0]["capture_generation"] is not None
+    )
+
+
+def current_offer(path: object, client: str, session: str) -> dict | None:
+    found = latest_attribution(path, client, session)
+    if found is None:
+        return None
+    marker, content = found
+    # The newest native attribution wins, including a cleared context.
+    if marker["context_id"] is None:
+        return None
+    consents = CONSENT_MARKER.findall(content)
+    if len(consents) != 1:
+        return None
+    try:
+        consent = json.loads(consents[0])
+    except (ValueError, TypeError):
+        return None
+    if (
+        not isinstance(consent, dict)
+        or any(
+            consent.get(k) != marker[k]
+            for k in ("user_id", "client", "context_id", "conversation_id")
+        )
+        or consent.get("status") not in {"approved", "declined", "unknown"}
+    ):
+        return None
+    marker = dict(marker, consent=consent["status"])
+    return marker
 
 
 def open_page(url: str) -> None:

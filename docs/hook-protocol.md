@@ -20,6 +20,22 @@ renews at SessionStart. `force_refresh` restores grounding after compaction,
 missing transcripts or a bounded tail that cannot establish delivery. It does
 not change the event, so a recovered prompt still receives its capture marker.
 
+The briefing carries no git state. The conversation's own transcript link
+arrives inside its ordinary `additionalContext`; other conversations on the
+agent's branch arrive after a shell command instead, through
+[branch recall](#branch-recall).
+
+Every briefing also sends `hook_revision`, an integer (`HOOK_REVISION` in
+`context_briefing.py`, currently 1). It is bumped whenever hook behaviour the
+service relies on changes, such as a new request field or hook; a service whose
+minimum is higher adds one line to the briefing asking the member to update the
+plugin. A service older than `hook_revision` refuses unknown fields with 422, so
+on a 422 the script asks once more in the same hook run without it, keeping
+`client`, `session_id`, `event`,
+`delivery_id`, `force_refresh`, `source` and `turn_id`. The retry uses the
+remainder of a 9-second budget inside the 10-second hook timeout, and is skipped
+when less than half a second remains.
+
 The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
 and `hookSpecificOutput.additionalContext`. A root-rendering fallback also sets
 `briefing_available: false`; the script consumes that field before forwarding
@@ -176,6 +192,160 @@ user turn can start a new segment. Unknown or mismatched 410 responses cannot
 erase the queue. See
 [capture setup and boundaries](conversation-capture.md).
 
+
+## Conversation anchors
+
+`git_anchor.py` is a `PostToolUse` command hook on the shell tool, which both
+hosts name `Bash` (matcher `^Bash$`; Codex 0.166's `post-tool-use.command.input`
+carries `cwd`, `tool_input.command` and `tool_response`). It links a saved
+conversation to the commits, pushes and pull requests its agent makes:
+
+| Command (also with `git -C <dir>`, `-c k=v`, env prefixes, `cd <dir> &&`, chained with `&&`, `;`, `\|` or newlines) | `kind` | Recorded |
+| --- | --- | --- |
+| `git commit` | `commit` | `HEAD` after the command, current branch |
+| `git push` | `push` | `HEAD`, current branch |
+| `gh pr create` | `pull_request` | the last `https://<host>/<owner>/<repo>/pull/<n>` in the tool output, `HEAD`, current branch |
+
+`gh pr view`, `gh pr merge` and every other command are ignored, as is a quoted
+or echoed `git commit`. At most three anchors are sent per command.
+
+It posts `POST https://mcp.pensieve.uk/hooks/conversations/anchors` (the upload
+endpoint plus `/anchors`, with the same loopback-only fixture override) with
+`Authorization: Bearer <the conversation's upload key>`,
+`X-Pensieve-Capture-Protocol: 2` and `User-Agent: Pensieve-Plugin-Capture/1.0`:
+
+```json
+{"client": "claude", "host_conversation_id": "<hook session_id>", "context_id": 497,
+ "kind": "commit", "repo_url": "https://github.com/o/r.git", "branch": "main",
+ "commit_sha": "<40 hex>", "pr_number": null, "pr_url": null, "tool_call_id": "toolu_…",
+ "turn_id": null}
+```
+
+Every field is always present; `turn_id` is the hook's `turn_id` (Codex; null
+for Claude Code, which gives none), the id its saved events carry, because
+Codex's `tool_use_id` (`exec-…`) is not the call id its transcript saves.
+`tool_call_id` is the hook's `tool_use_id` (null
+when absent or not a capture id), the same id the captured tool call carries, so
+branch recall can open the conversation at the turn that ran the command.
+`repo_url` and `branch` follow the
+[repository identity](#repository-identity) rules, and a request over 2,048
+bytes is not sent. 200
+(`{anchor_id, conversation_id, created}`) is idempotent. Each request has a
+3-second timeout within a 4-second budget. 401, 403 (`service_hold` or an
+unavailable key), 410 `capture_disabled` and 422 are reported on stderr only.
+
+An agent often commits in a conversation's first turn, before its first upload
+at Stop, when the service could only answer 404 `{"reason": "not_saved"}`. While
+no upload in the conversation's context has been accepted, the hook therefore
+queues the anchor instead of posting it; it also queues one answered 404, 426,
+429, 5xx or not at all. The queue (`anchor_queue.py`) is
+`<client>-<session>.anchors.json` beside the conversation's spool: a private
+JSON list of at most 20 entries (the oldest go first), deduplicated by kind,
+commit and pull request URL, written atomically under its own lock, holding
+each anchor body and its owner only. Entries older than 24 hours are dropped.
+
+After the capture hook's flush (the Stop that uploads the first turn, or any
+later hook), pending anchors whose context now holds an accepted upload are
+posted with that scope's upload key, within the same 3-second requests and a
+4-second cap inside the hook's own deadline. 200 and permanent refusals (401,
+403, 404 now that the transcript is known to be saved, 410, 422) remove an
+entry; no answer, 426, 429 or 5xx keep it for the next flush. A stopped
+conversation's queue is discarded unsent.
+
+The conversation is the hook's own `session_id`, never one inferred from the
+working directory, so a commit by a person or by another conversation in the
+same repository is never attributed to it. Nothing is sent unless:
+
+- the host reports the command finished successfully: failed commands are
+  filtered by exit status (`exit_code`, or Codex's `Exit code: N` output),
+  interruption, background execution and, for commits, the HEAD guard below;
+- for `commit`, the work tree's newest `HEAD` reflog entry is a commit made
+  within the last ten minutes, so `git commit …; echo done` with nothing to
+  commit does not anchor an older commit, a pull or a checkout;
+- the command was not a `--dry-run`;
+- the directory the command ran in can be followed: a `cd` inside a subshell
+  ends where the subshell closes, and after a `cd` to a path holding a shell
+  expansion (`cd "$REPO"`) nothing is anchored until an absolute `cd`;
+- the command ran inside a work tree with an `origin` remote;
+- the conversation's transcript is being shared: it has a local spool that is
+  not stopped; the newest native capture marker in its own transcript (or, with
+  none, the spool's attributed scope) names a context with an enabled consent
+  generation; that context's latest upload was not held (`service_hold`) or
+  refused (`forbidden`); the generation's segment is not retired or disabled;
+  and a key is configured for that scope. Anything else is dropped, not queued.
+
+While saving is paused on the machine (`paused.json`, see
+[the capture guide](conversation-capture.md#pausing-on-this-machine)), the hook
+posts nothing and queues nothing. The spool is read read-only without its lock;
+any error, timeout or unreachable service fails open. Anchors never add model
+context: the hook's only output is [branch recall](#branch-recall), and `{}`
+otherwise.
+
+## Repository identity
+
+`git_workspace.py` describes the work tree a command ran in, with a 300 ms
+timeout per git call. `repo_url` is `git remote get-url origin` with any
+userinfo, query and fragment removed
+(`https://x-access-token:…@github.com/o/r.git` → `https://github.com/o/r.git`);
+scp-style `git@host:o/r.git` is sent unchanged for the server to normalise, and
+a local-path or `file://` remote, a directory outside a work tree, a missing
+`origin`, or any git failure or timeout means no repository at all. `branch` is
+`git symbolic-ref --short -q HEAD`, null when detached; an anchor's `commit_sha`
+is the 40-hex `HEAD`. Credentials never leave the device.
+
+## Branch recall
+
+The same `PostToolUse` hook tells the agent which other saved conversations
+worked on the branch it has just arrived on, straight after the command that
+got it there: at its first shell command in a repository, or right after a
+`git checkout`, `git switch`, `gh pr checkout` or a `cd` into another work tree,
+mid-turn rather than at the next prompt. The briefing never carries this list.
+
+After every shell command (`branch_recall.py`), the hook takes the directory
+the command worked in: the target of its last `git` (including `git -C <dir>`)
+or `gh` command, otherwise the directory after its last `cd`, otherwise the
+payload's `cwd`. It reads that directory's [repository identity](#repository-identity)
+and, for a named branch, looks it up among those already recalled for this
+conversation. Only a `{repo_url, branch}` not yet answered is asked about, so
+returning to a branch never repeats its list, and never
+the repository's default branch (this clone's `origin/HEAD`, else `main` or
+`master`; no network call): most conversations start there, and what was
+committed straight to it is rarely the work at hand.
+
+`POST https://mcp.pensieve.uk/hooks/recall` (loopback fixtures as for the
+briefing), with the briefing's own `Authorization: Bearer` installation
+credential, never an upload key, and at most 2,048 bytes:
+
+```json
+{"client": "claude", "session_id": "<hook session_id>",
+ "workspace": {"repo_url": "https://github.com/o/r.git", "branch": "feature/x"}}
+```
+
+| 200 `status` | Meaning | Hook output | Asked again |
+| --- | --- | --- | --- |
+| `listed` | Other saved conversations anchored to that repository and branch | `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "<the service's text>"}}` | Never in this window |
+| `empty` | Grounded, nothing on that branch | `{}` | Never in this window |
+| `unavailable` | No company chosen yet, a service hold, or recall failed | `{}` | After 60 seconds |
+
+Any other status, an invalid body, no answer or a timeout counts as
+`unavailable`. The hook rebuilds the output from `additionalContext` alone,
+since Codex refuses unknown output fields; both hosts add PostToolUse
+`additionalContext` to the model's context after the tool result (Codex as
+developer context, under its `additionalContextLimit`).
+
+The recall state is `<client>-<session>.recall.json` beside the briefing state:
+a private file holding up to 20 `{repo_url, branch}` pairs, each with its status
+and when it was asked, written under its own lock. `unavailable` is recorded
+before the request is sent, so a hook the host kills mid-request backs off for
+the same minute. A command finding the lock held asks nothing,
+so parallel commands never inject the list twice. SessionStart (startup,
+resume, clear or compact) deletes it, so a new or compacted window is told
+again. Nothing is asked for a detached HEAD, outside a work tree with `origin`,
+before the briefing hook has connected the installation, or with less than half
+a second of the hook's 4-second budget left after anchors; an unasked branch is
+asked by the next command. Recall reads only: it needs no transcript sharing
+and, like the briefing, still runs while saving is paused. Any error fails open
+and never changes or delays the command.
 
 ## Hook registration and sharing
 

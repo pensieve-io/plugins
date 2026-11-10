@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -56,8 +57,11 @@ def private_directory(path: Path) -> None:
 
 
 @contextmanager
-def private_lock(path: Path):
-    """Serialise hook/setup writers without waiting inside a host hook deadline."""
+def private_lock(path: Path, wait: float = 0):
+    """Serialise hook/setup writers; BlockingIOError once `wait` seconds have not freed it.
+
+    The default never waits, so nothing queues inside a host hook deadline.
+    """
     private_directory(path.parent)
     fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
@@ -68,7 +72,15 @@ def private_lock(path: Path):
             or stat.S_IMODE(info.st_mode) != 0o600
         ):
             raise ValueError("capture lock must be an owned private file")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
         yield
     finally:
         os.close(fd)
