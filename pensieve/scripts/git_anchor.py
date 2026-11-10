@@ -320,6 +320,7 @@ def run_hook(
         return []
 
     from anchor_queue import post_anchor, queue_anchor, retryable
+    from capture_adapters import capture_id
     from capture_pause import is_paused
 
     if is_paused(state_root):
@@ -337,6 +338,9 @@ def run_hook(
     key = key_for(profiles(config, client), owner, context)
     if key is None:
         return []
+    # The captured tool call carries this id too, so recall can open the
+    # conversation at the turn that ran this command.
+    tool_call_id = capture_id(payload.get("tool_use_id"))
     deadline = time.monotonic() + HOOK_BUDGET_SECONDS
     output = output_text(response)
     sent = []
@@ -345,7 +349,13 @@ def run_hook(
         remaining = deadline - time.monotonic()
         if fields is None or remaining < 0.05:
             continue
-        body = {"client": client, "host_conversation_id": session, "context_id": context, **fields}
+        body = {
+            "client": client,
+            "host_conversation_id": session,
+            "context_id": context,
+            **fields,
+            "tool_call_id": tool_call_id,
+        }
         if len(json.dumps(body, separators=(",", ":")).encode()) > MAX_REQUEST_BYTES:
             continue
         if not saved:

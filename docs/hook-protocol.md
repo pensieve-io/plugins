@@ -217,10 +217,13 @@ endpoint plus `/anchors`, with the same loopback-only fixture override) with
 ```json
 {"client": "claude", "host_conversation_id": "<hook session_id>", "context_id": 497,
  "kind": "commit", "repo_url": "https://github.com/o/r.git", "branch": "main",
- "commit_sha": "<40 hex>", "pr_number": null, "pr_url": null}
+ "commit_sha": "<40 hex>", "pr_number": null, "pr_url": null, "tool_call_id": "toolu_…"}
 ```
 
-Every field is always present; `repo_url` and `branch` follow the
+Every field is always present; `tool_call_id` is the hook's `tool_use_id` (null
+when absent or not a capture id), the same id the captured tool call carries, so
+branch recall can open the conversation at the turn that ran the command.
+`repo_url` and `branch` follow the
 [repository identity](#repository-identity) rules, and a request over 2,048
 bytes is not sent. 200
 (`{anchor_id, conversation_id, created}`) is idempotent. Each request has a

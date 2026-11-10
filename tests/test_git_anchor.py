@@ -215,6 +215,7 @@ def test_a_commit_anchors_the_hooks_own_saved_conversation(tmp_path, saved, anch
         "commit_sha": head(repo),
         "pr_number": None,
         "pr_url": None,
+        "tool_call_id": "toolu_1",
     }
     assert size <= git_anchor.MAX_REQUEST_BYTES
     assert "secret-token" not in json.dumps(body)
@@ -418,3 +419,13 @@ def test_upload_key_cannot_be_sent_elsewhere(endpoint):
 def test_capture_scope_is_the_saved_conversations_owner_and_context(saved):
     _cfg, root, _run = saved
     assert git_anchor.capture_scope(root, "claude", SESSION, None) == (OWNER, 497, True)
+
+
+@pytest.mark.parametrize("tool_use_id", [None, "", "has space", 7, "x" * 256])
+def test_an_unusable_tool_call_id_is_sent_as_null(tmp_path, saved, anchor_service, tool_use_id):
+    repo = repository(tmp_path)
+    git(repo, "commit", "-q", "--allow-empty", "-m", "agent change")
+    payload = event(repo, "git commit -m 'agent change'")
+    payload["tool_use_id"] = tool_use_id
+    assert anchor(saved, anchor_service, payload) == [("commit", 200)]
+    assert anchor_service["requests"][0][2]["tool_call_id"] is None
