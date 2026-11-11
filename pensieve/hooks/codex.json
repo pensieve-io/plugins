@@ -55,7 +55,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client codex",
-            "timeout": 1
+            "timeout": 3
           }
         ]
       }

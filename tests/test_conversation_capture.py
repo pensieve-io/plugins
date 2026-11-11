@@ -3083,3 +3083,23 @@ def test_codex_tool_definitions_do_not_hide_inherited_messages(tmp_path, monkeyp
     run("Stop")
     assert not events(calls)
     assert capture.spool_status(state, "codex", SESSION)["blocked_reason"] == "unproven_history"
+
+
+@pytest.mark.parametrize("client,roomy", [("codex", True), ("claude", False)])
+def test_session_end_budget_fits_a_hosted_receipt_on_codex_only(
+    tmp_path, monkeypatch, client, roomy
+):
+    path, _, _, _, run = setup(tmp_path, monkeypatch, client=client)
+    budgets = []
+
+    def send(batch, key, endpoint, timeout):
+        budgets.append(timeout)
+        return ACCEPTED
+
+    monkeypatch.setattr(capture, "upload", send)
+    append(path, user(client=client), hook_record(client=client), assistant(client=client))
+    run("SessionEnd")
+    # Hosted receipts take about half a second; Codex's completion record
+    # lands after Stop, so only this hook can send it before the process exits.
+    assert budgets and (budgets[0] > 2) is roomy
+    assert budgets[0] < (2.5 if roomy else 0.9)

@@ -165,7 +165,7 @@ helper does not treat a quoted marker as authorization.
 
 Command capture hooks establish a baseline at `SessionStart`, checkpoint at
 `UserPromptSubmit` and `Stop`, and attempt a bounded flush at `SessionEnd`.
-The last hook has a one-second configured timeout. Same-event handlers may
+The last hook has a one-second configured timeout on Claude and three seconds on Codex. Same-event handlers may
 run concurrently, so a checkpoint can be completed by the following hook.
 
 Uploads use `POST https://mcp.pensieve.uk/hooks/conversations` with the key in

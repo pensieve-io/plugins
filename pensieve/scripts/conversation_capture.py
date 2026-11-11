@@ -957,7 +957,9 @@ def run_hook(
     if session is None:
         return {}
     event = payload["hook_event_name"]
-    deadline = time.monotonic() + (0.9 if event == "SessionEnd" else 2.5)
+    # Claude's SessionEnd shares a 1.5s total. Codex writes a turn's completion
+    # after Stop, so its SessionEnd (a 3s hook) must have room to send it.
+    deadline = time.monotonic() + (0.9 if event == "SessionEnd" and client == "claude" else 2.5)
     if pause_state(state_root) is not None:
         return paused_hook(payload, client, session, state_root)
     configured = profiles(config, client)
@@ -973,8 +975,8 @@ def run_hook(
         # The client-wide credential observation fences every spool, including
         # dormant sessions beyond this hook's bounded recovery page.
         return {}
-    # Plugin SessionEnd runs inside Claude's default 1.5s total budget and
-    # Codex's 3s cap. Durability comes from earlier checkpoints, not this flush.
+    # SessionEnd is a best-effort flush with no cross-session recovery.
+    # Durability comes from earlier checkpoints.
     ordinary = event != "SessionEnd"
     source_error = capture_session(
         client,

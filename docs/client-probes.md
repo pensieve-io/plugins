@@ -161,7 +161,7 @@ names. Matchers, inputs, timeouts and command syntax stay unchanged. The separat
 manifest probe verifies discovery; the runtime probe executes the adapters.
 The process deadline allows Codex's two 45-second shutdown waits after a
 completed turn. Grounding/receipt hooks retain five-second deadlines; capture
-uses a shorter budget, including a one-second `SessionEnd` adapter. A timeout
+uses a shorter budget, including a three-second `SessionEnd` adapter. A timeout
 preserves `events.jsonl` and `stderr.txt` for distinguishing delivery from exit.
 
 ### Optional capture runtime
