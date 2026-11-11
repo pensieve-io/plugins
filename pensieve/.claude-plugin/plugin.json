@@ -9,6 +9,7 @@
   },
   "homepage": "https://docs.pensieve.uk/mcp-server/clients",
   "repository": "https://github.com/pensieve-io/plugins",
+  "privacyPolicyUrl": "https://pensieve.uk/privacy",
   "license": "Proprietary",
   "keywords": [
     "pensieve",
