@@ -179,6 +179,50 @@ Approve/Deny page; **Data → Connectors in the context** manages sharing after 
 skill, credential download or terminal command is needed. New visible work
 belongs to the conversation's context for team handoffs. Previous chats are not imported.
 
+## What the plugin sends, and where
+
+The plugin runs local command hooks and a header helper (Python scripts in
+`pensieve/scripts`). They talk to one destination: Pensieve's hosted service at
+`https://mcp.pensieve.uk`, the same service the MCP tools use. The sharing
+choice opens a page on `https://app.pensieve.uk` in your browser. Nothing is
+sent to any other party. Our [privacy policy](https://pensieve.uk/privacy)
+covers how Pensieve handles what it receives.
+
+**Sent once you sign in, whether or not you share conversations:**
+
+| What | When | Contents |
+| --- | --- | --- |
+| Installation proof | Each MCP connection | A random value created on your machine, sent as the `X-Pensieve-Plugin` header beside the client's own OAuth sign-in |
+| Briefing request | Session start and each prompt | Client name, the client's session id, the hook event name and a delivery id. No prompt text and no file contents |
+| Delivery receipt | After a briefing is shown | An opaque token from that briefing |
+| Tool binding (Claude Code) | Before each Pensieve tool call | The session id and that call's tool-use id |
+| Branch recall | After a shell command on a branch new to the conversation | The repository's remote URL, with any embedded credentials removed, and the branch name |
+
+**Sent only after you approve sharing, which is off until you choose:**
+
+| What | When | Contents |
+| --- | --- | --- |
+| Work conversation | At prompt, stop and session-end hooks | Visible user and assistant messages, tool names, tool inputs and visible text results, and references to artifacts. Reasoning, system instructions and hook payloads are left out; configured credentials and common secret patterns are redacted, though ordinary prose can still contain a secret |
+| Conversation anchors | After `git commit`, `git push` or `gh pr create` | Repository URL, branch, commit SHA and pull request number and URL. No transcript text |
+
+Saved conversations are visible to the members of the Pensieve context they
+belong to, and stay until deleted. To read them, the capture hook reads the
+client's own transcript file for the current conversation; it opens no other
+files, and attachments are noted without being opened.
+
+**Kept on your machine:** the installation proof and connection profile in
+`~/.config/pensieve` (directory `0700`, files `0600`), and a bounded queue of
+unsent conversation events with upload status in `~/.local/state/pensieve/capture`.
+The scripts never read the client's OAuth tokens, and company content is not
+cached locally.
+
+**Your controls:** approve or decline sharing per context and client on the
+Approve/Deny page, and change it later in **Data → Connectors**. Revoking the
+installation in Pensieve stops the
+hooks; removing the plugin removes them. Delete a saved conversation from
+Sources. [Conversation capture](docs/conversation-capture.md) and the
+[hook protocol](docs/hook-protocol.md) give the full detail.
+
 ## Reset a connection
 
 Revoked installations stay revoked. To connect again or switch Pensieve accounts,
