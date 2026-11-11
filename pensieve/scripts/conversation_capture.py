@@ -150,6 +150,14 @@ def has_prior_history(handle, size: int, client: str, session: str) -> bool:
             if record.get("type") == "compacted":
                 return True
             if record.get("type") == "response_item" and isinstance(payload, dict):
+                if (
+                    payload.get("type") == "additional_tools"
+                    and payload.get("role") == "developer"
+                    and isinstance(payload.get("tools"), list)
+                ):
+                    # Codex injects tool definitions before the first turn.
+                    # Like its startup instructions, these are not prior work.
+                    continue
                 metadata = payload.get("internal_chat_message_metadata_passthrough") or {}
                 kinds = metadata.get("content_item_kinds", []) if isinstance(metadata, dict) else []
                 if (
@@ -810,8 +818,13 @@ def capture_session(
     ):
         db.execute("BEGIN IMMEDIATE")
         state = load_state(db)
-        if state["offset"] is None and not state.get("path") and not allow_new_file:
-            if not recover and not state.get("capture_stopped"):
+        if (
+            not state.get("capture_stopped")
+            and state["offset"] is None
+            and not state.get("path")
+            and not allow_new_file
+        ):
+            if not recover:
                 record_health(state_root, client, "unproven_start")
             discard_conversation(db, state, "unproven_start")
         if state.get("capture_stopped"):
@@ -1020,6 +1033,8 @@ def paused_hook(payload: dict, client: str, session: str, state_root: Path) -> d
 NOTICES = {
     "unproven_start": "the plugin's hooks did not see this conversation start, so its earlier "
     "turns cannot be proven to belong to one company; a new conversation saves again",
+    "unproven_history": "the plugin could not verify this conversation's starting history, "
+    "so saving stopped; use a new conversation",
     "conversation_stopped": "Pensieve stopped saving it, for example after a second company "
     "or an account change; a new conversation saves again",
     "service_hold": "this context's Pensieve service is paused; queued turns are kept and "
@@ -1036,7 +1051,11 @@ FAILING_UPLOADS = 3
 def notice_reason(db, state: dict, health: dict | None) -> str | None:
     if state.get("capture_stopped"):
         reason = state.get("blocked_reason")
-        return reason if reason in {"unproven_start", "conversation_stopped"} else None
+        return (
+            reason
+            if reason in {"unproven_start", "unproven_history", "conversation_stopped"}
+            else None
+        )
     latest = db.execute(
         "SELECT status FROM delivery ORDER BY last_attempt_at DESC LIMIT 1"
     ).fetchone()
