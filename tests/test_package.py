@@ -113,4 +113,6 @@ def test_host_adapters_use_command_briefing_and_preserve_capture(client, filenam
     assert "git_anchor.py" in anchor["command"]
     for script in ("context_briefing", "context_receipt", "conversation_capture", "git_anchor"):
         assert (PLUGIN / "scripts" / (script + ".py")).is_file()
-    assert all(hook["timeout"] == 1 for group in hooks["SessionEnd"] for hook in group["hooks"])
+    # Codex records a turn's completion after Stop, so its last hook needs upload room.
+    limit = 1 if client == "claude" else 3
+    assert all(hook["timeout"] == limit for group in hooks["SessionEnd"] for hook in group["hooks"])

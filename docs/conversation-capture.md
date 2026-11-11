@@ -207,10 +207,11 @@ SessionEnd attempts a short best-effort flush. Immutable events and exact-byte
 receipts tolerate retries, resume and out-of-order delivery. There are no
 message edit revisions or active/inactive updates. The private SQLite spool is
 bounded at 16 MiB per conversation, retaining valid unacknowledged work when
-full. Ordinary hooks reserve 0.6 seconds of their existing 2.5-second budget to retry up to eight other same-client spools, using a private round-robin cursor. Recovery uses only stored paths and native session identities; it never discovers host history. Missing or replaced transcript files cannot prevent already durable batches from uploading, while unseen content still requires the original file. Busy or damaged spools are skipped. SessionEnd keeps its 0.9-second budget and performs no cross-session recovery. There is no background daemon; recovery needs another hook on the same device.
+full. Ordinary hooks reserve 0.6 seconds of their existing 2.5-second budget to retry up to eight other same-client spools, using a private round-robin cursor. Recovery uses only stored paths and native session identities; it never discovers host history. Missing or replaced transcript files cannot prevent already durable batches from uploading, while unseen content still requires the original file. Busy or damaged spools are skipped. SessionEnd performs no cross-session recovery; it keeps a 0.9-second budget on Claude and uses the full 2.5 seconds on Codex, whose turn-completion record is written after Stop and would otherwise wait for a later conversation. There is no background daemon; recovery needs another hook on the same device.
 Each upload may use the remaining hook budget, so ordinary hosted receipt
 latency does not pin the queue to an already accepted batch. The host deadlines
-remain unchanged; SessionEnd still uses its shorter best-effort budget.
+remain unchanged apart from Codex's SessionEnd, which has three seconds; Claude's
+SessionEnd still uses its shorter best-effort budget.
 
 Saved transcripts remain **until explicitly deleted**; they do not expire after
 90 days. Deletion erases raw content and keeps content-free tombstones against retry
