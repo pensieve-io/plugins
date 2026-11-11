@@ -3033,3 +3033,53 @@ def test_codex_native_startup_instructions_are_not_prior_turns(tmp_path, monkeyp
     append(path, user(), hook_record(), assistant())
     run()
     assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+
+
+@pytest.mark.parametrize("tools", [[], [{"type": "function", "name": "fixture_tool"}]])
+def test_codex_startup_tool_definitions_do_not_stop_capture(tmp_path, monkeypatch, tools):
+    definitions = {
+        "type": "response_item",
+        "payload": {"type": "additional_tools", "role": "developer", "tools": tools},
+    }
+    path, _, state, calls, run = setup(tmp_path, monkeypatch, prior=[definitions])
+    append(path, user(), hook_record(), assistant())
+    run("UserPromptSubmit")
+    run("Stop")
+    assert [event["content"] for event in events(calls)] == ["Visible question", "Visible answer"]
+    assert not capture.spool_status(state, "codex", SESSION).get("stopped")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "additional_tools", "role": "user", "tools": []},
+        {"type": "additional_tools", "role": "assistant", "tools": []},
+        {"type": "additional_tools", "role": "developer", "tools": "unknown history"},
+    ],
+)
+def test_unrecognised_startup_records_stay_blocked_with_original_reason(
+    tmp_path, monkeypatch, payload
+):
+    path, _, state, calls, run = setup(
+        tmp_path, monkeypatch, prior=[{"type": "response_item", "payload": payload}]
+    )
+    assert capture.spool_status(state, "codex", SESSION)["blocked_reason"] == "unproven_history"
+    append(path, user(), hook_record(), assistant())
+    run("UserPromptSubmit")
+    run("Stop")
+    assert not events(calls)
+    assert capture.spool_status(state, "codex", SESSION)["blocked_reason"] == "unproven_history"
+
+
+def test_codex_tool_definitions_do_not_hide_inherited_messages(tmp_path, monkeypatch):
+    definitions = {
+        "type": "response_item",
+        "payload": {"type": "additional_tools", "role": "developer", "tools": []},
+    }
+    path, _, state, calls, run = setup(
+        tmp_path, monkeypatch, prior=[definitions, assistant("Another company's history")]
+    )
+    append(path, user(), hook_record(), assistant())
+    run("Stop")
+    assert not events(calls)
+    assert capture.spool_status(state, "codex", SESSION)["blocked_reason"] == "unproven_history"

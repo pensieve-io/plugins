@@ -1,5 +1,32 @@
 # Client hook probes
 
+## Codex startup definitions regression — 11 November 2026
+
+Codex can persist a developer `response_item` of type `additional_tools` before
+the first user turn. Those tool definitions are startup configuration, like its
+system/developer instructions and labelled AGENTS/environment messages. The
+capture baseline accepts that exact record shape; ordinary user/assistant work,
+unknown record shapes, forks and inherited history still fail closed. Tool
+definitions are never captured as visible conversation events.
+
+The installed helper rejected the initial 12-record, 259,447-byte prefix of a
+fresh Codex 0.167.1 conversation because of this record. Its next prompt then
+overwrote `unproven_history` with `unproven_start`, falsely suggesting the startup
+hook had been missed. Preserve the first terminal reason on subsequent hooks.
+The same actual prefix passes the corrected baseline check; regression tests
+cover successful first-turn capture and retained rejection of inherited work and
+malformed definitions. These checks do not claim a deployed desktop upload.
+
+The package suite passed 603 tests, with Ruff lint and formatting clean. The
+native Codex 0.167.1 CLI capture fixture exited zero with all ten capture checks
+passing (including exact-byte retry and completion), using synthetic local
+services. The test subprocess set `SUPERWHISPER_CODEX_HOOK=/usr/bin/true` to
+isolate the unrelated global voice hook; no installed settings were changed.
+
+Existing stopped conversations remain stopped: the fix neither clears private
+spools nor uploads historical work. Verify a fresh real conversation after the
+updated plugin is installed, through an accepted upload receipt and member read.
+
 ## Subagent capture and plugin tool preference — 15 October 2026
 
 The combined plugins #20/#21 candidate passed the packaged Claude Code 2.1.300
