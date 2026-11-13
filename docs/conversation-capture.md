@@ -100,6 +100,36 @@ ambiguous/unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
 
+### Turns before the first company
+
+A member of several contexts starts a conversation with no destination: the
+marker's `context_id` stays null until the conversation first reads or uses a
+company. Those turns are not lost. Each turn whose own authenticated marker
+names no destination yet is held in the private spool, unsent, and joins the
+conversation's segment when a later marker names the first company with sharing
+on. The segment then starts at the conversation's first held turn, in order,
+with that turn's prompt as its title.
+
+The same wait applies while the member has not yet answered the sharing page
+for that company (the hook's consent marker reports `unknown`): approving saves
+the conversation from its first held turn. A declined choice, or a marker with
+no readable choice, retains nothing and discards what was held.
+
+Held turns are discarded, never saved, when:
+
+- the next marker belongs to another account;
+- a second company appears, which stops the conversation as before;
+- an upload key is removed, changed or reset, or saving is paused on the machine;
+- any boundary that already blocks capture occurs (an unmarked turn's output,
+  an oversized record, an unknown boundary);
+- they exceed 2 MiB, after which that conversation holds nothing further.
+
+A turn with no marker of its own is still never held or backfilled. Nothing
+leaves the machine before a destination and an enabled consent generation
+exist, and the server checks both again on upload. Held turns upload at the
+first prompt after the conversation names its company, so a conversation that
+ends in the turn that first used the company saves nothing.
+
 ### One context per conversation
 
 A conversation is saved to one context: the first company whose briefing or
@@ -226,7 +256,8 @@ Cowork, ordinary chat tabs, Windows and ephemeral sessions without a local
 transcript require separate verification. MCP connectivity does not prove capture.
 
 Package tests cover credential import, private storage, client/consent boundaries,
-retry, deletion, indefinite retention and no-backfill behavior. Synthetic installed-client probes are
+retry, deletion, indefinite retention, held turns before the first company and
+no-backfill of unmarked or disabled work. Synthetic installed-client probes are
 in [client-probes.md](client-probes.md). Live MCP sign-in registration, the sharing page, Connector settings, fresh installation, updates and
 resumed sessions remain release checks.
 The guarded helper may be merged before the companion application release:
@@ -240,8 +271,8 @@ write links, extraction and naming remain application responsibilities.
 ### Capture state and saving status
 
 `capture_adapters.py` converts native records into one typed event stream;
-`capture_state.py` owns the four phases `ready`, `awaiting_attribution`, `capturing`
-and `blocked`. Native tool/turn bookkeeping is separate from file positions,
+`capture_state.py` owns the five phases `ready`, `awaiting_attribution`, `holding`,
+`capturing` and `blocked`. Native tool/turn bookkeeping is separate from file positions,
 credential cutovers and durable SQLite events/batches. Local legacy flags are
 migrated without rewriting queued bytes or identities.
 
@@ -276,7 +307,9 @@ python3 pensieve/scripts/conversation_capture.py --client codex --status SESSION
 ```
 
 The result contains per-segment context, queued count, last attempted delivery
-status and last validated acknowledgement time (up to 100 segments). A stopped
+status and last validated acknowledgement time (up to 100 segments).
+`held_turns` counts marked turns waiting for the conversation's first company
+(see [turns before the first company](#turns-before-the-first-company)). A stopped
 or blocked conversation adds `stopped` and `blocked_reason` (for example
 `unproven_start`, `conversation_stopped` or `multiple_contexts`), `health`
 carries the client's upload health below, and `paused` / `paused_at` report a

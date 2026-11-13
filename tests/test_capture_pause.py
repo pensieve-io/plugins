@@ -117,6 +117,32 @@ def test_work_queued_before_the_pause_waits_and_uploads_after_resume(tmp_path, m
     assert pending(root) == 0
 
 
+def test_turns_held_for_a_first_company_do_not_survive_a_pause(tmp_path, monkeypatch):
+    path, _cfg, root, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user("Before any company"),
+        hook_record(context=None, generation=None),
+        assistant("Early answer"),
+    )
+    run()
+    assert pending(root) == 2
+    flag = pause(root)
+    run()
+    flag.unlink()
+    run()
+    # Unlike queued work, a held turn was never attributed to a company the
+    # member shares with, so a pause ends its wait.
+    assert pending(root) == 0
+    append(path, user("After"), hook_record(), assistant("After answer"))
+    run("UserPromptSubmit")
+    append(path, user("Later"), hook_record(), assistant("Later answer"))
+    run()
+    saved = [e["content"] for e in events(calls)]
+    assert "Before any company" not in saved and "Early answer" not in saved
+    assert saved[-2:] == ["Later", "Later answer"]
+
+
 def test_a_conversation_started_while_paused_creates_no_spool(tmp_path, monkeypatch):
     cfg = config(tmp_path)
     root = tmp_path / "spool"
