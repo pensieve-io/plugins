@@ -156,6 +156,9 @@ one terminal, non-secret marker in accepted hook context:
 `context_id` is the conversation's capture destination, never its briefing
 context: null before capture locks to the first company briefing or tool
 exposure, and null for the rest of the conversation once they use a second.
+The helper holds turns marked null before any company, unsent, and saves them
+with the first enabled marker that names one; see
+[turns before the first company](conversation-capture.md#turns-before-the-first-company).
 `capture_generation` is null when disabled
 or consent lookup is unavailable. False → true starts a new generation. `turn_id` is nullable; Codex supplies its
 native turn ID, while the Claude adapter currently uses null. `prompt` is the

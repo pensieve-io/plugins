@@ -14,6 +14,10 @@ from capture_protocol import MAX_EVENT_CHARS
 # Local exposure coverage, independent of the upload protocol. Increment when
 # previously consumed parent records could contain newly recognised exposure.
 CONTEXT_BOUNDARY_VERSION = 3
+# Turns held for a conversation's first company stay in the private spool. Past
+# this many bytes the conversation stops holding, so one that never names a
+# company cannot fill the spool that queued uploads share.
+HELD_LIMIT_BYTES = 2 * 1024 * 1024
 
 INTERNAL_MARKER = re.compile(
     r"<!-- pensieve-(?:capture-context|capture-consent|capture-setup|delivery)\b.*?-->", re.DOTALL
@@ -45,9 +49,47 @@ def clean_content(text: str, keys: list[str]) -> tuple[str, bool]:
     return text, False
 
 
+def drop_held(db, state: dict, *, abandon: bool = False) -> None:
+    """Forget every turn held for this conversation's first company.
+
+    `abandon` also stops the conversation holding later turns.
+    """
+    for turn in state.pop("held_turns", []):
+        db.execute(
+            "DELETE FROM events WHERE segment IS NULL AND turn_group=?",
+            (turn["group"],),
+        )
+    state.pop("held_bytes", None)
+    state.pop("held_title", None)
+    if state.get("phase") == "holding":
+        state["phase"] = "ready"
+    if abandon:
+        state["hold_abandoned"] = True
+
+
+def may_hold(state: dict, configured: dict, marker: dict) -> bool:
+    """Whether this marked turn may wait for the conversation's first company.
+
+    A marker without a destination is held only before any company was used,
+    never after a second. One naming a company with sharing off is held only
+    while the member has not yet answered the sharing page: a declined or
+    unreadable choice retains nothing.
+    """
+    owner, context = marker["user_id"], marker["context_id"]
+    if state.get("hold_abandoned") or key_for(configured, owner, context) is None:
+        return False
+    if any(turn["owner"] != owner for turn in state.get("held_turns", [])):
+        return False
+    if context is None:
+        return not state.get("contexts_used")
+    return marker["capture_generation"] is None and marker.get("consent") == "unknown"
+
+
 def block(db, state: dict, reason: str) -> None:
     """A fresh attributed prompt is required; keep immutable queued work."""
     db.execute("DELETE FROM events WHERE segment IS NULL")
+    for field in ("held_turns", "held_bytes", "held_title"):
+        state.pop(field, None)
     state.update(
         phase="blocked",
         blocked_reason=reason,
@@ -167,8 +209,14 @@ def apply_item(
         if state.get("phase") == "awaiting_attribution":
             state["tail"] = None
             state["fork_parent"] = None
-        # A later turn can never authorise an earlier unmarked one.
-        db.execute("DELETE FROM events WHERE segment IS NULL")
+        # A later turn can never authorise an earlier unmarked one. Turns held
+        # for the conversation's first company each carried their own marker.
+        held = [turn["group"] for turn in state.get("held_turns", [])]
+        db.execute(
+            "DELETE FROM events WHERE segment IS NULL"
+            " AND (turn_group IS NULL OR turn_group NOT IN (%s))" % ",".join("?" * len(held)),
+            held,
+        )
         state.update(
             candidate_segment=state.get("segment"),
             candidate_scope=state.get("scope"),
@@ -206,13 +254,32 @@ def apply_item(
         previous_segment = state.get("candidate_segment")
         state.update(phase="ready", candidate_segment=None, candidate_scope=None)
         state["scope"] = [owner, context, generation]
+        turn_offset = state.get("turn_source_offset", source_offset)
         if (
             context is None
             or generation is None
-            or not scope_authorised(
-                state, configured, owner, context, state.get("turn_source_offset", source_offset)
-            )
+            or not scope_authorised(state, configured, owner, context, turn_offset)
         ):
+            if may_hold(state, configured, marker):
+                # The destination is not known yet. Keep this marked turn in
+                # the private spool until the conversation's first company
+                # names one with sharing on; nothing uploads before then.
+                state.setdefault("held_turns", []).append(
+                    {"group": state.get("turn_group"), "owner": owner, "offset": turn_offset}
+                )
+                state.setdefault("held_title", state.get("title", ""))
+                state["held_bytes"] = state.get("held_bytes", 0) + sum(
+                    len(body)
+                    for (body,) in db.execute(
+                        "SELECT body FROM events WHERE segment IS NULL AND turn_group=?",
+                        (state.get("turn_group"),),
+                    )
+                )
+                state.update(phase="holding", segment=None, tail=None, fork_parent=None)
+                return
+            # Sharing is off, the account changed or the key did: none of the
+            # held turns can be attributed either.
+            drop_held(db, state)
             state.update(segment=None, tail=None, fork_parent=None, title="", title_segment=None)
             # An explicit disabled scope is not an upload backlog. Only its
             # current provisional user row is removed, never acknowledged work.
@@ -235,18 +302,34 @@ def apply_item(
         if retired and retired[0]:
             block(db, state, "segment_retired")
             return
+        held = state.get("held_turns", [])
+        if any(
+            turn["owner"] != owner
+            or not scope_authorised(state, configured, owner, context, turn["offset"])
+            for turn in held
+        ):
+            # Another account, or a key changed since: these turns stay unsaved.
+            drop_held(db, state)
+            held = []
+        title = state.pop("held_title", None) if held else None
+        state.pop("held_turns", None)
+        state.pop("held_bytes", None)
         state["phase"] = "capturing"
         state["segment"] = segment
         state["title_segment"] = segment
         db.execute(
             "INSERT OR IGNORE INTO segments(id,owner,context,generation,title) VALUES (?,?,?,?,?)",
-            (segment, owner, context, generation, state.get("title", "")),
+            (segment, owner, context, generation, title or state.get("title", "")),
         )
-        # Only a provisional, never-uploaded prompt can be completed here.
-        # Existing queued events and exact-byte batches are immutable.
+        # Only never-uploaded work can be completed here: this turn's
+        # provisional prompt, and the marked turns held since the conversation
+        # began. Existing queued events and exact-byte batches are immutable.
+        groups = [turn["group"] for turn in held] + [state.get("turn_group")]
+        marks = ",".join("?" * len(groups))
         rows = db.execute(
-            "SELECT id,body FROM events WHERE segment IS NULL AND turn_group=? ORDER BY sequence",
-            (state.get("turn_group"),),
+            "SELECT id,body FROM events WHERE segment IS NULL AND turn_group IN (%s) "
+            "ORDER BY sequence" % marks,
+            groups,
         ).fetchall()
         for row in rows:
             event = json.loads(row["body"])
@@ -257,8 +340,8 @@ def apply_item(
                 )
                 db.execute("UPDATE anchors SET segment=? WHERE event_id=?", (segment, row["id"]))
         db.execute(
-            "UPDATE events SET segment=? WHERE segment IS NULL AND turn_group=?",
-            (segment, state.get("turn_group")),
+            "UPDATE events SET segment=? WHERE segment IS NULL AND turn_group IN (%s)" % marks,
+            [segment, *groups],
         )
         return
     scope = state.get("scope")
@@ -266,11 +349,13 @@ def apply_item(
         block(db, state, "credential_changed")
     if item["kind"] != "user" and state.get("phase") == "awaiting_attribution":
         block(db, state, "missing_attribution")
-    if state.get("phase") not in {"capturing", "awaiting_attribution"}:
+    if state.get("phase") not in {"capturing", "awaiting_attribution", "holding"}:
         return
     # Only the current user prompt may wait provisionally for its own receipt.
-    # Known disabled scopes never retain transcript text.
-    if state.get("scope") is not None and state.get("segment") is None:
+    # Known disabled scopes never retain transcript text; a turn held for the
+    # conversation's first company is the one marked exception.
+    holding = state.get("phase") == "holding"
+    if state.get("scope") is not None and state.get("segment") is None and not holding:
         return
     text, truncated = clean_content(item["content"], list(configured.values()))
     if item["kind"] == "turn_end":
@@ -298,6 +383,7 @@ def apply_item(
             state["turn_closed"] = True
         if state.get("segment"):
             link_event(state, event, state["segment"], session)
+    body = encoded(event).decode()
     db.execute(
         "INSERT OR IGNORE INTO events(id,sequence,turn_group,segment,body,host_timestamp) VALUES (?,?,?,?,?,?)",
         (
@@ -305,10 +391,15 @@ def apply_item(
             state["sequence"],
             state.get("turn_group"),
             state.get("segment"),
-            encoded(event).decode(),
+            body,
             int(host_timestamp),
         ),
     )
+    if holding:
+        state["held_bytes"] = state.get("held_bytes", 0) + len(body)
+        if state["held_bytes"] > HELD_LIMIT_BYTES:
+            drop_held(db, state, abandon=True)
+            return
     if item["kind"] == "user":
         state["title"] = text[:200]
         state["title_segment"] = None

@@ -3103,3 +3103,213 @@ def test_session_end_budget_fits_a_hosted_receipt_on_codex_only(
     # lands after Stop, so only this hook can send it before the process exits.
     assert budgets and (budgets[0] > 2) is roomy
     assert budgets[0] < (2.5 if roomy else 0.9)
+
+
+def consent_record(client, status, context=497, generation=None, owner=OWNER):
+    """A prompt hook record carrying the sharing choice beside its marker."""
+    record = hook_record(client, owner=owner, context=context, generation=generation)
+    consent = (
+        "<!-- pensieve-capture-consent "
+        + json.dumps(
+            {
+                "user_id": owner,
+                "client": client,
+                "context_id": context,
+                "conversation_id": SESSION,
+                "status": status,
+            },
+            separators=(",", ":"),
+        )
+        + " -->\n"
+    )
+    if client == "claude":
+        record["attachment"]["content"][0] = consent + record["attachment"]["content"][0]
+    else:
+        text = record["payload"]["content"][0]
+        text["text"] = consent + text["text"]
+    return record
+
+
+def contents(calls):
+    return [event["content"] for event in events(calls)]
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_turns_before_the_first_company_save_once_it_is_named(tmp_path, monkeypatch, client):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("Before any company", client),
+        hook_record(client, context=None, generation=None),
+        assistant("Early answer", client),
+        user("Still no company", client),
+        hook_record(client, context=None, generation=None),
+        assistant("Second early answer", client),
+    )
+    run()
+    # Held in the private spool: nothing leaves the machine without a destination.
+    assert not calls and pending(state) == 4
+    assert capture.spool_status(state, client, SESSION)["held_turns"] == 2
+    append(
+        path,
+        user("Now in a company", client),
+        hook_record(client),
+        assistant("Company answer", client),
+    )
+    run()
+    assert contents(calls) == [
+        "Before any company",
+        "Early answer",
+        "Still no company",
+        "Second early answer",
+        "Now in a company",
+        "Company answer",
+    ]
+    saved = events(calls)
+    bodies = [json.loads(batch["body"]) for batch, _ in calls]
+    assert {body["context_id"] for body in bodies} == {497}
+    assert len({body["segment_id"] for body in bodies}) == 1
+    assert bodies[0]["title"] == "Before any company"
+    # One unbroken chain from the conversation's first event.
+    assert "parent" not in saved[0]["capture"]
+    assert [event["capture"]["parent"]["event_id"] for event in saved[1:]] == [
+        event["event_id"] for event in saved[:-1]
+    ]
+    assert pending(state) == 0
+    assert "held_turns" not in capture.spool_status(state, client, SESSION)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_an_unmarked_turn_is_never_held(tmp_path, monkeypatch, client):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(path, user("No marker", client), assistant("Unmarked answer", client))
+    append(
+        path,
+        user("Marked without company", client),
+        hook_record(client, context=None, generation=None),
+        assistant("Held answer", client),
+        user("In a company", client),
+        hook_record(client),
+        assistant("Company answer", client),
+    )
+    run()
+    assert contents(calls) == [
+        "Marked without company",
+        "Held answer",
+        "In a company",
+        "Company answer",
+    ]
+
+
+@pytest.mark.parametrize("status,kept", [("unknown", True), ("declined", False), (None, False)])
+def test_held_turns_follow_the_sharing_choice(tmp_path, monkeypatch, status, kept):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user("Before any company"),
+        hook_record(context=None, generation=None),
+        assistant("Early answer"),
+        user("Company named, sharing not on"),
+        consent_record("codex", status) if status else hook_record(generation=None),
+        assistant("Unshared answer"),
+    )
+    run()
+    # An undecided member's turns wait for their answer; a declined or
+    # unreadable choice retains nothing, including what was already held.
+    assert not calls and pending(state) == (4 if kept else 0)
+    append(path, user("Sharing on"), hook_record(), assistant("Shared answer"))
+    run()
+    held = [
+        "Before any company",
+        "Early answer",
+        "Company named, sharing not on",
+        "Unshared answer",
+    ]
+    assert contents(calls) == (held if kept else []) + ["Sharing on", "Shared answer"]
+
+
+def test_held_turns_never_follow_another_account(tmp_path, monkeypatch):
+    profiles = [
+        {"user_id": OWNER, "upload_key": KEY},
+        {"user_id": OTHER_OWNER, "upload_key": OTHER_KEY},
+    ]
+    path, _, state, calls, run = setup(tmp_path, monkeypatch, profiles=profiles)
+    append(
+        path,
+        user("First account"),
+        hook_record(context=None, generation=None),
+        assistant("First account answer"),
+        user("Second account"),
+        hook_record(owner=OTHER_OWNER),
+        assistant("Second account answer"),
+    )
+    run()
+    assert contents(calls) == ["Second account", "Second account answer"]
+    assert all(key == OTHER_KEY for _, key in calls) and pending(state) == 0
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_a_second_company_discards_held_turns(tmp_path, monkeypatch, client):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch, client)
+    append(
+        path,
+        user("Before any company", client),
+        hook_record(client, context=None, generation=None),
+        pensieve_call(client, "call-1", 497),
+        pensieve_result(client, "call-1", "First company"),
+        pensieve_call(client, "call-2", 12),
+        pensieve_result(client, "call-2", "Second company"),
+        assistant("Mixed answer", client),
+        user("Back in the first", client),
+        hook_record(client),
+        assistant("Later answer", client),
+    )
+    run()
+    assert not calls and pending(state) == 0
+    assert capture.spool_status(state, client, SESSION)["blocked_reason"] == "multiple_contexts"
+
+
+def test_a_removed_key_discards_held_turns(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user("Before any company"),
+        hook_record(context=None, generation=None),
+        assistant("Early answer"),
+    )
+    run()
+    assert pending(state) == 2
+    original = cfg.read_text()
+    cfg.write_text(json.dumps({"version": 2, "profiles": []}))
+    run()
+    cfg.write_text(original)
+    cfg.chmod(0o600)
+    append(path, user("Key restored"), hook_record(), assistant("Restored answer"))
+    run()
+    assert "Before any company" not in contents(calls) and "Early answer" not in contents(calls)
+    assert pending(state) == 0
+
+
+def test_a_conversation_that_never_names_a_company_stops_holding(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_state, "HELD_LIMIT_BYTES", 4096)
+    path, _, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user("Long work with no company"),
+        hook_record(context=None, generation=None),
+        assistant("x" * 8000),
+    )
+    run()
+    assert pending(state) == 0
+    append(
+        path,
+        user("More of the same"),
+        hook_record(context=None, generation=None),
+        assistant("Short answer"),
+    )
+    run()
+    # Once over the limit the conversation holds nothing further.
+    assert pending(state) == 0 and "held_turns" not in capture.spool_status(state, "codex", SESSION)
+    append(path, user("In a company"), hook_record(), assistant("Company answer"))
+    run()
+    assert contents(calls) == ["In a company", "Company answer"]
