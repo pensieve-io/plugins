@@ -10,8 +10,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Python 3.9 builds stop at Ubuntu 24.04, and macOS still ships 3.9 as its
+    # system Python, so the oldest supported runtime keeps a pinned runner.
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.9", "3.12"]
     steps:
