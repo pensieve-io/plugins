@@ -46,9 +46,11 @@ from capture_state import (
     discard_conversation,
     migrate_state,
     record_context_use,
+    remask_event,
     scope_revoked,
 )
 from context_receipt import conversation_id, json_object
+from secret_masking import mask_secrets
 
 UPLOAD_ENDPOINT = "https://mcp.pensieve.uk/hooks/conversations"
 CONFIG_PATH = Path.home() / ".config/pensieve/capture.json"
@@ -495,6 +497,8 @@ def next_batch(db, segment, client, session):
     ).fetchall()
     if not rows:
         return None
+    # The upload boundary rechecks queued work: events captured by an older
+    # helper are masked with today's rules before their first batch is built.
     body = {
         "batch_id": str(uuid.uuid4()),
         "client": client,
@@ -503,11 +507,13 @@ def next_batch(db, segment, client, session):
         "context_id": segment["context"],
         "events": [],
         "capture_generation": segment["generation"],
-        "title": segment["title"],
+        "title": mask_secrets(segment["title"])[:200],
     }
     selected = []
     for row in rows:
         event = json.loads(row["body"])
+        if remask_event(event):
+            db.execute("UPDATE events SET body=? WHERE id=?", (encoded(event).decode(), row["id"]))
         body["events"].append(event)
         if len(encoded(body)) > MAX_BATCH_BYTES:
             body["events"].pop()
