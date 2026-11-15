@@ -25,8 +25,9 @@ def clean_content(text: str, keys: list[str]) -> tuple[str, bool]:
     text = INTERNAL_MARKER.sub("", text)
     for key in keys:
         text = text.replace(key, MASK)
-    # Do not upload inline binary attachments.
-    text = re.sub(r"data:[^\s]+;base64,[A-Za-z0-9+/=]+", "[Inline attachment omitted]", text)
+    # Do not upload inline binary attachments. The media type is bounded so a
+    # long run of `data:` cannot make the hook rescan it.
+    text = re.sub(r"data:[^\s,]{0,200};base64,[A-Za-z0-9+/=]+", "[Inline attachment omitted]", text)
     return bounded(mask_secrets(text))
 
 

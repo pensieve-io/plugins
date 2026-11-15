@@ -17,49 +17,68 @@ MASK = "[REDACTED_SECRET]"
 # Encoded tool results can nest JSON inside JSON strings. Past this depth the
 # whole value is withheld rather than sent unmasked.
 MAX_DEPTH = 256
+# ASCII word boundaries, as in OpenCrawl's JavaScript: Python's Unicode `\b`
+# would miss a key written straight after accented or CJK text.
+A = re.ASCII
 
 CREDENTIALS = [
+    # A private key; an unterminated one is withheld up to the end of its body.
     re.compile(
-        r"-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----.*?"
-        r"(?:-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----|\Z)",
-        re.IGNORECASE | re.DOTALL,
+        r"-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----"
+        r"(?:.*?-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----|[A-Za-z0-9+/=\s]*)",
+        A | re.IGNORECASE | re.DOTALL,
     ),
-    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{16,255}|github_pat_[A-Za-z0-9_]{82})"),
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,255}"),
-    re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA|A3T[A-Z0-9])[A-Z0-9]{16}\b"),
-    re.compile(r"\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])"),
-    re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{16,255}|github_pat_[A-Za-z0-9_]{82})", A),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,255}", A),
+    re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA|A3T[A-Z0-9])[A-Z0-9]{16}\b", A),
+    re.compile(r"\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])", A),
+    re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}", A),
     # OpenAI, Anthropic and OpenRouter keys all start `sk-`.
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
-    re.compile(r"\b(?:sk|rk)_(?:live|test|prod)_[A-Za-z0-9]{10,}"),
-    re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{20,}"),
-    re.compile(r"\bxapp-\d-[A-Za-z0-9-]{20,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}", A),
+    re.compile(r"\b(?:sk|rk)_(?:live|test|prod)_[A-Za-z0-9]{10,}", A),
+    re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{20,}", A),
+    re.compile(r"\bxapp-\d-[A-Za-z0-9-]{20,}", A),
     re.compile(
-        r"(?:https?://)?hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/+_-]{20,}"
+        r"(?:https?://)?hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/+_-]{20,}", A
     ),
-    re.compile(r"\bnpm_[A-Za-z0-9]{36}(?![A-Za-z0-9])"),
-    re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}"),
-    re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
-    re.compile(r"\bkey-[a-f0-9]{32}\b"),
-    re.compile(r"\b(?:hvs|hvb)\.[A-Za-z0-9_-]{20,}"),
-    re.compile(r"\b(?:dop|doo|dor)_v1_[a-f0-9]{64}\b"),
+    re.compile(r"\bnpm_[A-Za-z0-9]{36}(?![A-Za-z0-9])", A),
+    re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}", A),
+    re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])", A),
+    re.compile(r"\bkey-[a-f0-9]{32}\b", A),
+    re.compile(r"\b(?:hvs|hvb)\.[A-Za-z0-9_-]{20,}", A),
+    re.compile(r"\b(?:dop|doo|dor)_v1_[a-f0-9]{64}\b", A),
     re.compile(
-        r"\b(?:hf_[A-Za-z0-9]{34}|AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58})\b"
+        r"\b(?:hf_[A-Za-z0-9]{34}|AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58})\b", A
     ),
-    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}={0,2}"),
+    # A JWT starts only where a run of token characters starts; `\b` would let
+    # every `-eyJ` inside one long run rescan it, which is quadratic.
+    re.compile(
+        r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}={0,2}",
+        A,
+    ),
     # Formats in Pensieve's own stack: capture upload keys, Doppler, Supabase, PostHog.
-    re.compile(r"\bpcap_[A-Za-z0-9_-]{32,}"),
-    re.compile(r"\bdp\.(?:pt|st|ct|sa|scim|audit)\.[A-Za-z0-9_.-]{20,}"),
-    re.compile(r"\b(?:sbp_[a-f0-9]{40}\b|sb_secret_[A-Za-z0-9_-]{20,})"),
-    re.compile(r"\bphx_[A-Za-z0-9]{30,}"),
+    re.compile(r"\bpcap_[A-Za-z0-9_-]{32,}", A),
+    re.compile(r"\bdp\.(?:pt|st|ct|sa|scim|audit)\.[A-Za-z0-9_.-]{20,}", A),
+    re.compile(r"\b(?:sbp_[a-f0-9]{40}\b|sb_secret_[A-Za-z0-9_-]{20,})", A),
+    re.compile(r"\bphx_[A-Za-z0-9]{30,}", A),
 ]
-AUTH_SCHEME = re.compile(r"(\b(?:Bearer|Basic)[ \t]+)([A-Za-z0-9._~+/-]{8,}=*)", re.IGNORECASE)
-URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.-]{0,31}://[^\s/@:]+:)[^\s/@]+(@)", re.IGNORECASE)
+AUTH_SCHEME = re.compile(r"(\b(?:Bearer|Basic)[ \t]+)([A-Za-z0-9._~+/-]{8,}=*)", A | re.IGNORECASE)
+# Whatever the scheme (`Token`, `Digest`, `SSWS`...), an Authorization header's
+# credential follows the scheme word.
+AUTH_HEADER = re.compile(
+    r"""(\b(?:proxy-)?authorization["']?[ \t]*[=:][ \t]*["']?[A-Za-z][A-Za-z0-9-]{0,31}[ \t]+)"""
+    r"""([^\s"',;]+)""",
+    A | re.IGNORECASE,
+)
+URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.-]{0,31}://[^\s/@:]+:)[^\s/@]+(@)", A | re.IGNORECASE)
 # JSON, env, shell and query-string assignments. Values stop at delimiters,
 # never at the next line, and a name is bounded so a long run cannot backtrack.
+# A bare value stops at `)` so a parameter's type, as in `password: string)`, is
+# read as the type.
 ASSIGNMENT = re.compile(
     r"""(\b([A-Za-z][A-Za-z0-9_-]{0,63})["']?[ \t]*[=:][ \t]*)"""
-    r"""(?:"((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)'|([^\s"'`,;&<>\[\]{}]+))"""
+    r"""(?:"((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)'|([^\s"'`,;&<>\[\]{})]+))""",
+    A,
 )
 SECRET_NAME = re.compile(
     r"(?:[a-z][a-z0-9]*[_-])*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token"
@@ -67,12 +86,47 @@ SECRET_NAME = re.compile(
     r"|upload[_-]?key)|authorization|x-api-key|x-amz-(?:signature|security-token)",
     re.IGNORECASE,
 )
-# Shell, template and environment references name a secret without holding it.
+# Shell, template, environment and settings references name a secret without
+# holding it.
 REFERENCE = re.compile(
-    r"^(?:\$|%[A-Z_]+%|\{\{|<|process\.env\.|(?:os\.)?environ\b|import\.meta\.env\.)"
-    r"|^(?:true|false|null|none|undefined)$",
-    re.IGNORECASE,
+    r"^(?:\$|%[A-Z_]+%|\{\{|<|(?:os\.)?environ\b|import\.meta\.env\.|process\.env\."
+    r"|(?:self|this|cls|settings|config|conf|cfg|env|options|opts|args|ctx|context|request"
+    r"|req|params|props|secrets|credentials|creds)\.)",
+    A | re.IGNORECASE,
 )
+# Words that name a type, keyword or auth scheme rather than hold a secret, as
+# in `password: string`, `token: Optional[str]` or `Authorization: Token ...`.
+NOT_A_VALUE = {
+    "true",
+    "false",
+    "null",
+    "none",
+    "undefined",
+    "string",
+    "number",
+    "boolean",
+    "bigint",
+    "object",
+    "unknown",
+    "never",
+    "void",
+    "float",
+    "bytes",
+    "bool",
+    "dict",
+    "list",
+    "optional",
+    "secretstr",
+    "promise",
+    "await",
+    "async",
+    "bearer",
+    "basic",
+    "token",
+    "digest",
+    "ssws",
+    "negotiate",
+}
 
 
 class TooDeep(ValueError):
@@ -80,7 +134,12 @@ class TooDeep(ValueError):
 
 
 def is_literal(value: str) -> bool:
-    return len(value) >= 4 and value != MASK and not REFERENCE.search(value)
+    return (
+        len(value) >= 4
+        and value != MASK
+        and value.lower() not in NOT_A_VALUE
+        and not REFERENCE.search(value)
+    )
 
 
 def mask_secrets(text: str, depth: int = 0) -> str:
@@ -112,20 +171,25 @@ def mask_value(value, depth: int):
     if isinstance(value, dict):
         return {
             mask_secrets(key, depth + 1): MASK
-            if isinstance(entry, str) and SECRET_NAME.fullmatch(key) and is_literal(entry)
+            if holds_secret(key, entry)
             else mask_value(entry, depth + 1)
             for key, entry in value.items()
         }
     return value
 
 
+def holds_secret(key: str, entry: object) -> bool:
+    """A credential-named field holding a literal, including a numeric PIN."""
+    if isinstance(entry, bool) or not isinstance(entry, (str, int, float)):
+        return False
+    return bool(SECRET_NAME.fullmatch(key)) and is_literal(str(entry))
+
+
 def mask_patterns(text: str) -> str:
     for pattern in CREDENTIALS:
         text = pattern.sub(MASK, text)
-    text = AUTH_SCHEME.sub(
-        lambda m: m[1] + (MASK if is_literal(m[2]) else m[2]),
-        text,
-    )
+    for pattern in (AUTH_SCHEME, AUTH_HEADER):
+        text = pattern.sub(lambda m: m[1] + (MASK if is_literal(m[2]) else m[2]), text)
     text = URL_PASSWORD.sub(lambda m: m[1] + MASK + m[2], text)
     return ASSIGNMENT.sub(mask_assignment, text)
 
@@ -138,7 +202,6 @@ def mask_assignment(match: re.Match) -> str:
     if (
         not SECRET_NAME.fullmatch(name)
         or not is_literal(value)
-        or value.lower() in {"bearer", "basic"}
         or (bare is not None and "(" in bare)
     ):
         return match[0]

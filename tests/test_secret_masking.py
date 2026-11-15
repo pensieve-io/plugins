@@ -6,6 +6,7 @@ import base64
 import json
 import time
 
+import capture_state
 import conversation_capture as capture
 import pytest
 from secret_masking import MASK, mask_secrets
@@ -79,6 +80,13 @@ def test_ordinary_identifiers_hashes_code_urls_and_references_survive():
         "token=None",
         "token = get_token(scope)",
         "password = prompt_for_password()",
+        "function login(username: string, password: string): Promise<Token> {",
+        "interface Session { accessToken: string; refreshToken?: string | null }",
+        "  token: Optional[str] = None",
+        "  api_key: SecretStr",
+        "const token = await getToken();",
+        "api_key = settings.OPENAI_API_KEY",
+        "token = self.token",
     ]
     for value in benign:
         assert mask_secrets(value) == value
@@ -141,6 +149,29 @@ def test_unfinished_private_key_is_withheld_to_the_end():
     assert mask_secrets(text) == f"before {MASK}"
 
 
+def test_a_private_key_header_in_code_does_not_hide_the_rest():
+    code = f"if line.startswith('-----BEGIN {KEY_MARKER}-----'):\n    parse(line)\nreturn result"
+    assert mask_secrets(code) == f"if line.startswith('{MASK}'):\n    parse(line)\nreturn result"
+
+
+@pytest.mark.parametrize("before", ["我的令牌是", "トークン", "é", "密码password="])
+def test_credentials_next_to_non_ascii_text_are_masked(before):
+    assert mask_secrets(before + SAMPLES[0]) == before + MASK
+
+
+@pytest.mark.parametrize("scheme", ["Token", "Digest", "SSWS"])
+def test_any_authorization_scheme_hides_its_credential(scheme):
+    assert mask_secrets(f"Authorization: {scheme} opaqueTOKEN123") == (
+        f"Authorization: {scheme} {MASK}"
+    )
+
+
+def test_numeric_credentials_are_masked_beside_other_changes():
+    value = {"password": 12345678, "headers": {"Authorization": "Bearer opaque-token-123"}}
+    masked = json.loads(mask_secrets(json.dumps(value)))
+    assert masked == {"password": MASK, "headers": {"Authorization": MASK}}
+
+
 def test_too_deep_nesting_fails_closed_and_long_text_stays_fast():
     nested: object = {"token": SAMPLES[0]}
     for _ in range(300):
@@ -150,6 +181,8 @@ def test_too_deep_nesting_fails_closed_and_long_text_stays_fast():
     started = time.monotonic()
     assert mask_secrets(text) == text
     assert mask_secrets("a-" * 16000) == "a-" * 16000
+    assert mask_secrets("-eyJ" * 64000) == "-eyJ" * 64000
+    assert capture_state.clean_content("data:" * 50000, [])[0].startswith("data:data:")
     assert time.monotonic() - started < 5
 
 

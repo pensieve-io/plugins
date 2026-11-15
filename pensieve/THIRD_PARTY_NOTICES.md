@@ -3,11 +3,14 @@
 ## Secret recognition rules
 
 `scripts/secret_masking.py` adapts the capture redaction in OpenCrawl
-(https://github.com/getopencrawl/opencrawl-core, `cli/src/capture/redact.ts`),
-licensed under the Apache License, Version 2.0
-(https://www.apache.org/licenses/LICENSE-2.0). Changes: ported to Python, uses
-Pensieve's mask marker, keeps Pensieve's existing minimums for GitHub and `sk-`
-keys, and adds formats from Pensieve's own stack.
+(https://github.com/getopencrawl/opencrawl-core, `cli/src/capture/redact.ts` at
+commit `83b4e1b464cee9695f7f1ed96b91de03e25897b9`), licensed under the Apache
+License, Version 2.0. A copy of that licence is in `licenses/Apache-2.0.txt`.
+Changes: ported to Python with ASCII word boundaries, uses Pensieve's mask
+marker, keeps Pensieve's existing minimums for GitHub and `sk-` keys, adds
+formats from Pensieve's own stack, masks credentials after any `Authorization`
+scheme and numeric credential fields, and leaves type names, settings
+references and calls unmasked.
 
 OpenCrawl's credential formats are adapted from Gitleaks v8.30.0
 (https://github.com/gitleaks/gitleaks/tree/v8.30.0).
