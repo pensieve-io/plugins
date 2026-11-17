@@ -3347,3 +3347,39 @@ def test_held_turns_wait_a_week_for_the_next_marked_turn(tmp_path, monkeypatch, 
         "In a company",
         "Company answer",
     ]
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_a_key_changed_before_a_turn_is_read_is_never_held(tmp_path, monkeypatch, removed):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch)
+    original = cfg.read_text()
+    append(path, user("Before the change"), hook_record(context=None, generation=None))
+    # The change is seen by a scan that ends at this turn's marker, before
+    # anything was held for it to drop.
+    profiles = [] if removed else [{"user_id": OWNER, "upload_key": OTHER_KEY}]
+    cfg.write_text(json.dumps({"version": 2, "profiles": profiles}))
+    cfg.chmod(0o600)
+    run()
+    if removed:
+        cfg.write_text(original)
+        cfg.chmod(0o600)
+        run()
+    assert pending(state) == 0
+    append(path, assistant("Early answer"))
+    run()
+    append(path, user("In a company"), hook_record(), assistant("Company answer"))
+    run()
+    assert contents(calls) == ["In a company", "Company answer"]
+
+
+def test_the_held_limit_counts_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_state, "HELD_LIMIT_BYTES", 4096)
+    path, _, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user("Before any company"),
+        hook_record(context=None, generation=None),
+        assistant("\u4e2d" * 3000),
+    )
+    run()
+    assert pending(state) == 0

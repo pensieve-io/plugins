@@ -72,18 +72,19 @@ def drop_held(db, state: dict, *, abandon: bool = False) -> None:
         state["hold_abandoned"] = True
 
 
-def may_hold(state: dict, configured: dict, marker: dict) -> bool:
+def may_hold(state: dict, configured: dict, marker: dict, offset: int) -> bool:
     """Whether this marked turn may wait for the conversation's first company.
 
     A marker without a destination is held only before any company was used,
     never after a second. One naming a company with sharing off is held only
     while the member has not yet answered the sharing page: a declined or
-    unreadable choice retains nothing.
+    unreadable choice retains nothing. Like any turn, it needs a key unchanged
+    since it was written: every later change drops what is held.
     """
     owner, context = marker["user_id"], marker["context_id"]
-    if state.get("hold_abandoned") or key_for(configured, owner, context) is None:
-        return False
-    if any(turn["owner"] != owner for turn in state.get("held_turns", [])):
+    if state.get("hold_abandoned") or not scope_authorised(
+        state, configured, owner, context, offset
+    ):
         return False
     if context is None:
         return not state.get("contexts_used")
@@ -92,9 +93,8 @@ def may_hold(state: dict, configured: dict, marker: dict) -> bool:
 
 def block(db, state: dict, reason: str) -> None:
     """A fresh attributed prompt is required; keep immutable queued work."""
+    drop_held(db, state)
     db.execute("DELETE FROM events WHERE segment IS NULL")
-    for field in ("held_turns", "held_bytes", "held_title"):
-        state.pop(field, None)
     state.update(
         phase="blocked",
         blocked_reason=reason,
@@ -263,41 +263,38 @@ def apply_item(
         # The prompt's own time where the host recorded one, else this marker's.
         turn_at = state.get("turn_occurred_at") or occurred_at
         held = state.get("held_turns")
-        if (
-            held
-            and datetime.fromisoformat(turn_at) - datetime.fromisoformat(held[-1]["at"])
+        if held and (
+            held[-1]["owner"] != owner
+            or datetime.fromisoformat(turn_at) - datetime.fromisoformat(held[-1]["at"])
             > HELD_MAX_AGE
         ):
+            # Another account's turns, or a conversation resumed too late.
             drop_held(db, state)
         if (
             context is None
             or generation is None
             or not scope_authorised(state, configured, owner, context, turn_offset)
         ):
-            if may_hold(state, configured, marker):
+            if may_hold(state, configured, marker, turn_offset):
                 # The destination is not known yet. Keep this marked turn in
                 # the private spool until the conversation's first company
                 # names one with sharing on; nothing uploads before then.
                 state.setdefault("held_turns", []).append(
-                    {
-                        "group": state.get("turn_group"),
-                        "owner": owner,
-                        "offset": turn_offset,
-                        "at": turn_at,
-                    }
+                    {"group": state.get("turn_group"), "owner": owner, "at": turn_at}
                 )
                 state.setdefault("held_title", state.get("title", ""))
-                state["held_bytes"] = state.get("held_bytes", 0) + sum(
-                    len(body)
-                    for (body,) in db.execute(
-                        "SELECT body FROM events WHERE segment IS NULL AND turn_group=?",
+                state["held_bytes"] = (
+                    state.get("held_bytes", 0)
+                    + db.execute(
+                        "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))),0) FROM events"
+                        " WHERE segment IS NULL AND turn_group=?",
                         (state.get("turn_group"),),
-                    )
+                    ).fetchone()[0]
                 )
                 state.update(phase="holding", segment=None, tail=None, fork_parent=None)
                 return
-            # Sharing is off, the account changed or the key did: none of the
-            # held turns can be attributed either.
+            # Sharing is off or the key changed: none of the held turns can
+            # be attributed either.
             drop_held(db, state)
             state.update(segment=None, tail=None, fork_parent=None, title="", title_segment=None)
             # An explicit disabled scope is not an upload backlog. Only its
@@ -321,17 +318,9 @@ def apply_item(
         if retired and retired[0]:
             block(db, state, "segment_retired")
             return
-        held = state.get("held_turns", [])
-        if any(
-            turn["owner"] != owner
-            or not scope_authorised(state, configured, owner, context, turn["offset"])
-            for turn in held
-        ):
-            # Another account, or a key changed since: these turns stay unsaved.
-            drop_held(db, state)
-            held = []
-        title = state.pop("held_title", None) if held else None
-        state.pop("held_turns", None)
+        # What is still held is this owner's, under a key unchanged since.
+        held = state.pop("held_turns", [])
+        title = state.pop("held_title", None)
         state.pop("held_bytes", None)
         state["phase"] = "capturing"
         state["segment"] = segment
@@ -415,7 +404,7 @@ def apply_item(
         ),
     )
     if holding:
-        state["held_bytes"] = state.get("held_bytes", 0) + len(body)
+        state["held_bytes"] = state.get("held_bytes", 0) + len(body.encode())
         if state["held_bytes"] > HELD_LIMIT_BYTES:
             drop_held(db, state, abandon=True)
             return
