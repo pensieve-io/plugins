@@ -48,7 +48,7 @@ BRIEFING_ENDPOINT = "https://mcp.pensieve.uk/hooks/briefing"
 RECALL_ENDPOINT = "https://mcp.pensieve.uk/hooks/recall"
 # Bumped whenever hook behaviour the service relies on changes, so a briefing
 # can ask an older installation to update its plugin.
-HOOK_REVISION = 1
+HOOK_REVISION = 2
 # Fields an older service, whose request model forbids unknown fields, refuses.
 OPTIONAL_BRIEFING_FIELDS = ("hook_revision",)
 BINDING_ENDPOINT = "https://mcp.pensieve.uk/hooks/tool-binding"
@@ -262,6 +262,16 @@ def run_hook(
             )
         if code == 200 and isinstance(result, dict):
             available = result.pop("briefing_available", True) is True
+            # The saving context's name, kept on one line for the status command.
+            # Consumed here: a host may refuse hook output fields it does not know.
+            context = result.pop("context", None)
+            if (
+                isinstance(context, dict)
+                and type(context.get("id")) is int
+                and isinstance(context.get("name"), str)
+            ):
+                name = " ".join(context["name"].split())[:100]
+                state["context"] = {"id": context["id"], "name": name}
             output = result.get("hookSpecificOutput")
             if result == {} or (
                 isinstance(output, dict)

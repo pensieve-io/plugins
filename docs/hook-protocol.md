@@ -39,7 +39,10 @@ when less than half a second remains.
 The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
 and `hookSpecificOutput.additionalContext`. A root-rendering fallback also sets
 `briefing_available: false`; the script consumes that field before forwarding
-the hook JSON. Full and unchanged responses omit it. Before network work the
+the hook JSON. Full and unchanged responses omit it. A request naming
+`hook_revision` 2 or later may also be answered with `context`, `{"id", "name"}`
+for the context the conversation saves to; the script consumes it too and keeps
+it in the conversation's briefing state for the status command. Before network work the
 script records an unfinished refresh. Failure, interruption or unavailable root
 keeps that flag, forcing the next successful briefing to replace the unavailable
 notice even when an older briefing was acknowledged. Success clears the flag.
@@ -170,6 +173,10 @@ Command capture hooks establish a baseline at `SessionStart`, checkpoint at
 `UserPromptSubmit` and `Stop`, and attempt a bounded flush at `SessionEnd`.
 The last hook has a one-second configured timeout on Claude and three seconds on Codex. Same-event handlers may
 run concurrently, so a checkpoint can be completed by the following hook.
+The same script answers the member's own pause commands, on Claude's
+`UserPromptExpansion` and Codex's `UserPromptSubmit`, by blocking the prompt
+with a `reason`; see
+[pausing one conversation](conversation-capture.md#pausing-one-conversation).
 
 Uploads use `POST https://mcp.pensieve.uk/hooks/conversations` with the key in
 `Authorization: Bearer`. A batch carries `batch_id`, `client`,
@@ -278,8 +285,8 @@ same repository is never attributed to it. Nothing is sent unless:
   and a key is configured for that scope. Anything else is dropped, not queued.
 
 While saving is paused on the machine (`paused.json`, see
-[the capture guide](conversation-capture.md#pausing-on-this-machine)), the hook
-posts nothing and queues nothing. The spool is read read-only without its lock;
+[the capture guide](conversation-capture.md#pausing-on-this-machine)) or for
+this conversation, the hook posts nothing and queues nothing. The spool is read read-only without its lock;
 any error, timeout or unreachable service fails open. Anchors never add model
 context: the hook's only output is [branch recall](#branch-recall), and `{}`
 otherwise.

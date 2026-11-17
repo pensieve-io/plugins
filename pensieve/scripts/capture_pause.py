@@ -1,11 +1,17 @@
-"""The machine-wide saving pause, shared with the `pensieve` CLI.
+"""The two ways a member pauses saving. Standard library, Python 3.9+.
 
-`pensieve pause` writes `paused.json` beside the capture spools, holding
-`{"paused_at": "<ISO-8601 UTC>"}`, and `pensieve resume` deletes it. While the
-file exists, no client on this machine saves transcripts or anchors. Its
-presence is what counts: a file that cannot be read or parsed still pauses
-saving, because failing open here would upload what the member chose to keep
-local. Standard library, Python 3.9+.
+**One conversation.** The plugin's `pause`, `resume` and `status` skills give
+each host a command it completes: `/pensieve:pause` in Claude Code,
+`$pensieve:pause` in Codex. `conversation_command` recognises one in a hook
+payload; the capture hook then acts on it and answers in the model's place, so
+no agent is involved.
+
+**The whole machine.** `pensieve pause` writes `paused.json` beside the capture
+spools, holding `{"paused_at": "<ISO-8601 UTC>"}`, and `pensieve resume`
+deletes it. While the file exists, no client on this machine saves transcripts
+or anchors. Its presence is what counts: a file that cannot be read or parsed
+still pauses saving, because failing open here would upload what the member
+chose to keep local.
 """
 
 from __future__ import annotations
@@ -18,6 +24,32 @@ from pathlib import Path
 
 PAUSE_FILE = "paused.json"
 MAX_PAUSE_BYTES = 4096
+# Skill names as each host reports them, and the command each one is.
+CONVERSATION_COMMANDS = {
+    "pensieve:pause": "pause",
+    "pensieve:resume": "resume",
+    "pensieve:status": "status",
+}
+
+
+def conversation_command(payload: dict, client: str) -> str | None:
+    """`pause`, `resume` or `status` for this conversation, None for any other hook.
+
+    Claude Code names the plugin command a typed line expands to, so its bare
+    `/pause` alias is recognised and another plugin's `/pause` is not. Codex has
+    no such event: a skill mention arrives as the prompt's own text, and only a
+    prompt that is nothing but the mention counts.
+    """
+    event = payload.get("hook_event_name")
+    if client == "claude" and event == "UserPromptExpansion":
+        name = payload.get("command_name")
+    elif client == "codex" and event == "UserPromptSubmit":
+        prompt = payload.get("prompt")
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
+        name = prompt[1:] if prompt.startswith("$") else None
+    else:
+        return None
+    return CONVERSATION_COMMANDS.get(name) if isinstance(name, str) else None
 
 
 def recorded_time(value: object) -> str | None:

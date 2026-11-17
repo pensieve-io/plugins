@@ -33,6 +33,18 @@
         ]
       }
     ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "^pensieve:(pause|resume|status)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conversation_capture.py\" --client claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

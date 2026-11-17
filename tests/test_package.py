@@ -80,17 +80,43 @@ def test_skills_have_valid_identity_and_a_visible_readme_entry():
         assert name == path.parent.name
         assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) and len(name) <= 64
         assert 0 < len(metadata["description"]) <= 1024
-        assert metadata["metadata"]["role"]
         assert len(metadata["metadata"].get("summary", "")) <= 200
-        assert f"`{name}`" in readme
+        if "control" in metadata["metadata"]:
+            # A command the capture hook answers; its file is only read on failure.
+            assert metadata["metadata"]["control"] == name
+            assert metadata["disable-model-invocation"] is True
+            assert "role" not in metadata["metadata"]
+            assert f"`/pensieve:{name}`" in readme and f"`$pensieve:{name}`" in readme
+            assert "**not**" in source
+        else:
+            assert metadata["metadata"]["role"]
+            assert f"`{name}`" in readme
+
+
+def test_the_pause_commands_are_the_skills_the_hook_recognises():
+    import capture_pause
+
+    controls = {
+        path.parent.name
+        for path in (PLUGIN / "skills").glob("*/SKILL.md")
+        if "\n  control: " in path.read_text()
+    }
+    assert {"pensieve:" + name for name in controls} == set(capture_pause.CONVERSATION_COMMANDS)
+    [expansion] = read_json(PLUGIN / "hooks/hooks.json")["hooks"]["UserPromptExpansion"]
+    for command in capture_pause.CONVERSATION_COMMANDS:
+        assert re.fullmatch(expansion["matcher"], command)
+    assert not re.fullmatch(expansion["matcher"], "pensieve:chief-of-staff")
+    [hook] = expansion["hooks"]
+    assert "conversation_capture.py" in hook["command"]
 
 
 @pytest.mark.parametrize("client,filename", [("claude", "hooks.json"), ("codex", "codex.json")])
 def test_host_adapters_use_command_briefing_and_preserve_capture(client, filename):
     hooks = read_json(PLUGIN / "hooks" / filename)["hooks"]
     expected = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+    # Claude names an expanded command in its own event; Codex has none.
     assert set(hooks) == expected | {"PostToolUse"} | (
-        {"PreToolUse"} if client == "claude" else set()
+        {"PreToolUse", "UserPromptExpansion"} if client == "claude" else set()
     )
     flattened = [hook for entries in hooks.values() for entry in entries for hook in entry["hooks"]]
     assert all(hook["type"] == "command" for hook in flattened)
