@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import uuid
+from datetime import datetime, timedelta
 
 from capture_adapters import CaptureEvent, capture_id
 from capture_config import encoded, key_for
@@ -18,6 +19,10 @@ CONTEXT_BOUNDARY_VERSION = 3
 # this many bytes the conversation stops holding, so one that never names a
 # company cannot fill the spool that queued uploads share.
 HELD_LIMIT_BYTES = 2 * 1024 * 1024
+# A held turn waits this long for the next marked turn. An abandoned
+# conversation raises no event, so only the gap can show that one resumed later
+# is no longer the conversation in progress.
+HELD_MAX_AGE = timedelta(days=7)
 
 INTERNAL_MARKER = re.compile(
     r"<!-- pensieve-(?:capture-context|capture-consent|capture-setup|delivery)\b.*?-->", re.DOTALL
@@ -255,6 +260,15 @@ def apply_item(
         state.update(phase="ready", candidate_segment=None, candidate_scope=None)
         state["scope"] = [owner, context, generation]
         turn_offset = state.get("turn_source_offset", source_offset)
+        # The prompt's own time where the host recorded one, else this marker's.
+        turn_at = state.get("turn_occurred_at") or occurred_at
+        held = state.get("held_turns")
+        if (
+            held
+            and datetime.fromisoformat(turn_at) - datetime.fromisoformat(held[-1]["at"])
+            > HELD_MAX_AGE
+        ):
+            drop_held(db, state)
         if (
             context is None
             or generation is None
@@ -265,7 +279,12 @@ def apply_item(
                 # the private spool until the conversation's first company
                 # names one with sharing on; nothing uploads before then.
                 state.setdefault("held_turns", []).append(
-                    {"group": state.get("turn_group"), "owner": owner, "offset": turn_offset}
+                    {
+                        "group": state.get("turn_group"),
+                        "owner": owner,
+                        "offset": turn_offset,
+                        "at": turn_at,
+                    }
                 )
                 state.setdefault("held_title", state.get("title", ""))
                 state["held_bytes"] = state.get("held_bytes", 0) + sum(

@@ -122,7 +122,9 @@ Held turns are discarded, never saved, when:
 - an upload key is removed, changed or reset, or saving is paused on the machine;
 - any boundary that already blocks capture occurs (an unmarked turn's output,
   an oversized record, an unknown boundary);
-- they exceed 2 MiB, after which that conversation holds nothing further.
+- they exceed 2 MiB, after which that conversation holds nothing further;
+- the conversation's next marked turn comes more than seven days after the
+  newest held one. Later turns may be held again.
 
 A turn with no marker of its own is still never held or backfilled. Nothing
 leaves the machine before a destination and an enabled consent generation

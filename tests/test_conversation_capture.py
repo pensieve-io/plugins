@@ -11,6 +11,7 @@ import stat
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 
@@ -3313,3 +3314,36 @@ def test_a_conversation_that_never_names_a_company_stops_holding(tmp_path, monke
     append(path, user("In a company"), hook_record(), assistant("Company answer"))
     run()
     assert contents(calls) == ["In a company", "Company answer"]
+
+
+@pytest.mark.parametrize("days,kept", [(6, True), (8, False)])
+def test_held_turns_wait_a_week_for_the_next_marked_turn(tmp_path, monkeypatch, days, kept):
+    path, _, state, calls, run = setup(tmp_path, monkeypatch)
+    append(
+        path,
+        user("Before any company"),
+        hook_record(context=None, generation=None),
+        assistant("Early answer"),
+    )
+    run()
+    assert pending(state) == 2
+    later = (datetime.fromisoformat(NOW) + timedelta(days=days)).isoformat()
+    append(
+        path,
+        at(user("Resumed without a company"), later),
+        at(hook_record(context=None, generation=None), later),
+        at(assistant("Resumed answer"), later),
+        at(user("In a company"), later),
+        at(hook_record(), later),
+        at(assistant("Company answer"), later),
+    )
+    run()
+    # A conversation resumed after a week is no longer the one in progress:
+    # its old start stays unsaved, and holding begins again from the resumption.
+    early = ["Before any company", "Early answer"] if kept else []
+    assert contents(calls) == early + [
+        "Resumed without a company",
+        "Resumed answer",
+        "In a company",
+        "Company answer",
+    ]
