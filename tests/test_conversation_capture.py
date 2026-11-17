@@ -1420,6 +1420,63 @@ def test_claude_prompt_with_provenance_is_never_an_interruption_notice(
     ]
 
 
+def claude_task_notification():
+    notice = user(
+        "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
+        "<result>Subagent report</result>\n</task-notification>",
+        "claude",
+    )
+    notice.update(
+        origin={"kind": "task-notification", "producer": "session-task"},
+        promptSource="system",
+        permissionMode="default",
+    )
+    return notice
+
+
+def test_claude_task_notification_opens_its_turn_without_a_user_message(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    append(path, user("First", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    append(
+        path,
+        claude_task_notification(),
+        hook_record("claude"),
+        assistant("Reply to the report", "claude"),
+    )
+    run()
+    saved = events(calls)
+    assert [(e["kind"], e["content"]) for e in saved] == [
+        ("user", "First"),
+        ("assistant", "Visible answer"),
+        ("assistant", "Reply to the report"),
+    ]
+    assert saved[2]["capture"]["turn_id"] != saved[0]["capture"]["turn_id"]
+    assert saved[2]["capture"]["parent"]["event_id"] == saved[1]["event_id"]
+    assert {json.loads(batch["body"])["segment_id"] for batch, _ in calls} == {
+        json.loads(calls[0][0]["body"])["segment_id"]
+    }
+    assert pending(state) == 0
+
+
+def test_claude_task_notification_reply_needs_its_own_receipt(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    append(path, user("First", "claude"), hook_record("claude"), assistant(client="claude"))
+    run()
+    append(path, claude_task_notification(), assistant("Unattributed reply", "claude"))
+    run()
+    assert [e["content"] for e in events(calls)] == ["First", "Visible answer"]
+
+
+def test_claude_pasted_task_notification_is_still_a_prompt(tmp_path, monkeypatch):
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude")
+    pasted = claude_task_notification()
+    del pasted["origin"]
+    append(path, pasted, hook_record("claude"), assistant(client="claude"))
+    run()
+    assert [e["kind"] for e in events(calls)] == ["user", "assistant"]
+
+
 def test_claude_invoked_skill_without_provenance_opens_its_turn(tmp_path, monkeypatch):
     # Real skill invocations carry no prompt provenance; only the synthetic
     # prefixes may be skipped, or the reply would join the previous turn.

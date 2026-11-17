@@ -516,6 +516,12 @@ def normalise(
     ]
     if not tool_results:
         text = visible_text(content)
+        origin = record.get("origin")
+        if isinstance(origin, dict) and origin.get("kind") == "task-notification":
+            # A background task's completion notice starts a model turn with
+            # its own hook receipt, but nobody typed it. Open the turn so the
+            # reply is attributed afresh, and keep the notice itself local.
+            return [prompt(state, "", record.get("uuid"))]
         if (
             "permissionMode" not in record
             and "promptSource" not in record
