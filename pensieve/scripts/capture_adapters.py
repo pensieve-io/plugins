@@ -40,6 +40,7 @@ class CaptureEvent(EventFields):
 
 
 CONTEXT_MARKER = re.compile(r"<!-- pensieve-capture-context (\{[^\r\n]*?\}) -->")
+CONSENT_MARKER = re.compile(r"<!-- pensieve-capture-consent (\{[^\r\n]*?\}) -->")
 # The retired briefing tool, still excluded if an old server exposes it.
 HOOK_TOOL_NAMES = {
     "mcp__pensieve__context_briefing",
@@ -64,6 +65,24 @@ COMPANY_TOOLS = {
     "merge_pages",
     "set_lock",
 }
+
+
+def sharing_choice(text: str, marker: dict) -> str | None:
+    """The member's sharing choice for the marker's company, if the same hook stated it."""
+    matches = CONSENT_MARKER.findall(text)
+    if len(matches) != 1:
+        return None
+    try:
+        consent = json.loads(matches[0])
+    except ValueError:
+        return None
+    if not isinstance(consent, dict) or any(
+        consent.get(field) != marker[field]
+        for field in ("user_id", "client", "context_id", "conversation_id")
+    ):
+        return None
+    status = consent.get("status")
+    return status if status in {"approved", "declined", "unknown"} else None
 
 
 def parse_marker(text: str, client: str, session: str) -> dict | None:
@@ -313,6 +332,9 @@ def normalise(
     for text in accepted_contexts(record, session, session, client):
         marker = parse_marker(text, client, session)
         if marker:
+            # The choice only decides whether an unshared turn may wait; it is
+            # never an upload scope, which stays the marker's own generation.
+            marker = dict(marker, consent=sharing_choice(text, marker))
             result.append({"kind": "attribution", "marker": marker})
     if result:
         return result
