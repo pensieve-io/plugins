@@ -1152,8 +1152,8 @@ def conversation_status(
     unsaved = not_saved(payload, client, session, status, status["paused"])
     segments = status["segments"]
     newest = segments[-1]["status"] if segments else None
-    if unsaved is None and newest in {"service_hold", "capture_disabled"}:
-        # The service refused the newest upload: held, or sharing turned off since.
+    if unsaved is None and newest in REFUSED_STATUSES:
+        # The service refused the newest upload: held, key refused, or sharing off since.
         unsaved = NOTICES[newest]
     saved = [s for s in segments if s["last_saved_at"]]
     queued = sum(s["queued_events"] for s in segments)
@@ -1244,11 +1244,16 @@ NOTICES = {
     "upload once it resumes",
     "capture_disabled": "transcript sharing is off for this context; turning it on in "
     "Pensieve under Data → Connectors saves new turns",
+    "forbidden": "Pensieve refused this context's upload key, for example after the plugin "
+    "connection was revoked; https://github.com/pensieve-io/plugins#reset-a-connection "
+    "reconnects it",
     "upload_failing": "the last {failures} uploads failed; queued turns are kept and retried "
     "automatically",
     "paused": "saving is paused on this machine; `pensieve resume` turns it back on",
 }
 FAILING_UPLOADS = 3
+# Delivery statuses where the service answered for this context, each with its own notice.
+REFUSED_STATUSES = {"service_hold", "capture_disabled", "forbidden"}
 
 
 def notice_reason(db, state: dict, health: dict | None) -> str | None:
@@ -1264,7 +1269,7 @@ def notice_reason(db, state: dict, health: dict | None) -> str | None:
     ).fetchone()
     if latest is None or latest["status"] == "accepted":
         return None
-    if latest["status"] in {"service_hold", "capture_disabled"}:
+    if latest["status"] in REFUSED_STATUSES:
         return latest["status"]
     failures = (health or {}).get("consecutive_failures")
     if type(failures) is int and failures >= FAILING_UPLOADS:

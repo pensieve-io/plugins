@@ -130,6 +130,7 @@ def prompt(run):
     [
         ({"status": "service_hold"}, "service is paused"),
         ({"status": "capture_disabled"}, "sharing is off"),
+        ("forbidden", "refused this context's upload key"),
         ({"status": "capture_disabled", "conversation_stopped": True}, "stopped saving"),
     ],
 )
@@ -162,15 +163,37 @@ def test_repeated_upload_failures_are_noticed_once(tmp_path, monkeypatch):
     assert prompt(run) is None
 
 
-@pytest.mark.parametrize("status", ["service_hold", "capture_disabled"])
-def test_a_held_context_does_not_count_as_failing_uploads(tmp_path, monkeypatch, status):
+@pytest.mark.parametrize(
+    "outcome,recorded",
+    [
+        ({"status": "service_hold"}, "service_hold"),
+        ("forbidden", "forbidden"),
+        ({"status": "capture_disabled"}, "capture_disabled"),
+        ({"status": "deleted"}, "deleted"),
+        ({"status": "capture_disabled", "conversation_stopped": True}, "conversation_stopped"),
+    ],
+)
+def test_an_answer_about_one_context_does_not_count_as_failing_uploads(
+    tmp_path, monkeypatch, outcome, recorded
+):
     path, _cfg, root, _calls, run = setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(capture, "upload", lambda *a: {"status": status})
-    append(path, user(), hook_record(), assistant())
+    monkeypatch.setattr(capture, "upload", lambda *a: outcome)
     for _ in range(capture.FAILING_UPLOADS + 1):
-        run()  # Each pass retries the queued turns.
-    recorded = health(root)
-    assert recorded["last_outcome"] == status and recorded["consecutive_failures"] == 0
+        append(path, user(), hook_record(), assistant())
+        run()  # A held context or a refused key is retried on every pass.
+    assert health(root)["last_outcome"] == recorded
+    assert health(root)["consecutive_failures"] == 0
+    assert "uploads failed" not in (prompt(run) or "")
+
+
+def test_a_refused_context_leaves_a_real_failure_count_standing(tmp_path, monkeypatch):
+    path, _cfg, root, _calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *a: capture.unavailable("http_503"))
+    append(path, user(), hook_record(), assistant())
+    run()
+    monkeypatch.setattr(capture, "upload", lambda *a: {"status": "service_hold"})
+    run()
+    assert health(root)["consecutive_failures"] == 1
 
 
 def test_a_conversation_already_saved_needs_no_notice(tmp_path, monkeypatch):
