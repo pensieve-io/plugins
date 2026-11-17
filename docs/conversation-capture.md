@@ -197,7 +197,10 @@ remain incomplete. Claude's `[Request interrupted by user…]` notice, like its
 local `/compact` and `/clear` output, is recognised by its prefix on a record
 without prompt provenance and never opens a new turn, so an interruption keeps
 the conversation in one segment. An invoked skill (`<command-message>`) also
-lacks provenance but still opens its turn. Native terminal records can be written **after** Stop;
+lacks provenance but still opens its turn. A background task's completion
+notice (`origin.kind` of `task-notification`) is written as a user record
+nobody typed: it opens its turn, so the reply needs its own receipt, and its
+text is never captured. Native terminal records can be written **after** Stop;
 their marker uploads at a later checkpoint (including bounded recovery from another chat), while visible
 content still uploads at Stop. There is no polling process to eliminate that
 delay.
