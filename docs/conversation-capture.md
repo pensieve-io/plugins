@@ -334,9 +334,14 @@ Every upload attempt records `health-<client>.json` beside the spools
 
 `last_outcome` is `uploaded`, `service_hold`, `capture_disabled`, `deleted`,
 `conversation_stopped`, `forbidden`, `incompatible`, `invalid_receipt`,
-`network_error` or `http_<code>`, or the local refusal `unproven_start`. Any
-outcome but `uploaded` adds one to `consecutive_failures`, except the local
-refusal, which says nothing about the service; `uploaded` resets it. The file is
+`network_error` or `http_<code>`, or the local refusal `unproven_start`.
+`consecutive_failures` counts attempts in a row where the service itself failed:
+`incompatible`, `invalid_receipt`, `network_error` and `http_<code>` add one, and
+`uploaded` resets it. The local refusal and the service's answers about one
+context or conversation (`service_hold`, `forbidden`, `capture_disabled`,
+`deleted`, `conversation_stopped`) leave it alone: each has its own notice, and a
+held context or a refused key is retried on every recovery pass, which would
+otherwise run up the count for every conversation on the machine. The file is
 per client, covering recovery of other conversations too, and holds outcome
 names and times only: no transcript content, key or conversation identity. A
 busy health file is skipped rather than delaying an upload.
@@ -353,6 +358,7 @@ notice saying why, how to fix it and the `--status` command above:
 | `conversation_stopped` | The service stopped the conversation (a second company or an account change) |
 | `service_hold` | The latest upload was held because the context's service is paused |
 | `capture_disabled` | The latest upload was refused because sharing is off |
+| `forbidden` | The latest upload was refused because the service did not accept the context's upload key |
 | `upload_failing` | The latest upload failed and at least three in a row have |
 | `paused` | Saving is paused on this machine, and the conversation's newest marker shows sharing on |
 

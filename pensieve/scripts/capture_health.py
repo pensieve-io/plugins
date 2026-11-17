@@ -1,7 +1,7 @@
 """Per-client upload health beside the capture spools. Standard library only.
 
 `health-<client>.json` records how the newest upload attempt ended, when one
-last succeeded and how many attempts in a row have not. It holds outcome names
+last succeeded and how many attempts in a row the service failed. It holds outcome names
 and times only: never transcript content, a key or a conversation identity.
 """
 
@@ -20,9 +20,19 @@ from capture_config import (
 )
 
 FIELDS = ("last_attempt_at", "last_outcome", "last_success_at", "consecutive_failures")
-# Local refusals stop a conversation without an upload; they say nothing about
-# whether the service is reachable, so they leave the failure count alone.
-LOCAL_OUTCOMES = {"unproven_start"}
+# Outcomes that say nothing about whether uploads work, so they leave the
+# failure count alone: the local refusal, and the service's answer about one
+# context or conversation. Each has its own notice, and the count is per client:
+# a held context or a refused key is retried on every recovery pass, which would
+# bury every other conversation's count.
+SCOPED_OUTCOMES = {
+    "unproven_start",
+    "service_hold",
+    "forbidden",
+    "capture_disabled",
+    "deleted",
+    "conversation_stopped",
+}
 LOCK_WAIT_SECONDS = 0.1
 
 
@@ -56,7 +66,7 @@ def record_health(root: Path, client: str, outcome: str) -> None:
             failures = failures if type(failures) is int and failures >= 0 else 0
             if outcome == "uploaded":
                 failures = 0
-            elif outcome not in LOCAL_OUTCOMES:
+            elif outcome not in SCOPED_OUTCOMES:
                 failures += 1
             save_private_json(
                 path,
