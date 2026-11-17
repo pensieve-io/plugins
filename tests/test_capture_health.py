@@ -162,6 +162,17 @@ def test_repeated_upload_failures_are_noticed_once(tmp_path, monkeypatch):
     assert prompt(run) is None
 
 
+@pytest.mark.parametrize("status", ["service_hold", "capture_disabled"])
+def test_a_held_context_does_not_count_as_failing_uploads(tmp_path, monkeypatch, status):
+    path, _cfg, root, _calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *a: {"status": status})
+    append(path, user(), hook_record(), assistant())
+    for _ in range(capture.FAILING_UPLOADS + 1):
+        run()  # Each pass retries the queued turns.
+    recorded = health(root)
+    assert recorded["last_outcome"] == status and recorded["consecutive_failures"] == 0
+
+
 def test_a_conversation_already_saved_needs_no_notice(tmp_path, monkeypatch):
     path, _cfg, root, _calls, run = setup(tmp_path, monkeypatch)
     append(path, user(), hook_record(), assistant())

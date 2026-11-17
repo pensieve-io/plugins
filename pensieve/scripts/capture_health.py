@@ -20,9 +20,11 @@ from capture_config import (
 )
 
 FIELDS = ("last_attempt_at", "last_outcome", "last_success_at", "consecutive_failures")
-# Local refusals stop a conversation without an upload; they say nothing about
-# whether the service is reachable, so they leave the failure count alone.
-LOCAL_OUTCOMES = {"unproven_start"}
+# Outcomes that are not an upload failing, so they leave the failure count
+# alone. A local refusal stops a conversation without an upload. A held or
+# sharing-off context is the service answering, and its queued turns are retried
+# on every recovery pass, which would bury every other conversation's count.
+UNCOUNTED_OUTCOMES = {"unproven_start", "service_hold", "capture_disabled"}
 LOCK_WAIT_SECONDS = 0.1
 
 
@@ -56,7 +58,7 @@ def record_health(root: Path, client: str, outcome: str) -> None:
             failures = failures if type(failures) is int and failures >= 0 else 0
             if outcome == "uploaded":
                 failures = 0
-            elif outcome not in LOCAL_OUTCOMES:
+            elif outcome not in UNCOUNTED_OUTCOMES:
                 failures += 1
             save_private_json(
                 path,

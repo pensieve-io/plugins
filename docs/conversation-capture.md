@@ -336,7 +336,9 @@ Every upload attempt records `health-<client>.json` beside the spools
 `conversation_stopped`, `forbidden`, `incompatible`, `invalid_receipt`,
 `network_error` or `http_<code>`, or the local refusal `unproven_start`. Any
 outcome but `uploaded` adds one to `consecutive_failures`, except the local
-refusal, which says nothing about the service; `uploaded` resets it. The file is
+refusal, which says nothing about the service, and `service_hold` and
+`capture_disabled`, where the service answered and the queued turns are retried
+on every recovery pass; `uploaded` resets it. The file is
 per client, covering recovery of other conversations too, and holds outcome
 names and times only: no transcript content, key or conversation identity. A
 busy health file is skipped rather than delaying an upload.
