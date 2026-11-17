@@ -187,6 +187,10 @@ To stop saving part of a conversation, send the pause command on its own:
 as you type them. The plugin's hook answers them itself, so no agent runs and
 the reply you read confirms what was done.
 
+`/pensieve:status` or `$pensieve:status` says whether this conversation is
+being saved, to which context, when it last saved and, if it is not, why. Once
+something is saved it also gives the link to the saved transcript.
+
 A pause covers this conversation only and looks forward only. Turns before it
 stay saved; to remove those, delete the conversation in Pensieve. Nothing
 written while paused is saved, even after you resume. If an agent replies to

@@ -39,7 +39,10 @@ when less than half a second remains.
 The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
 and `hookSpecificOutput.additionalContext`. A root-rendering fallback also sets
 `briefing_available: false`; the script consumes that field before forwarding
-the hook JSON. Full and unchanged responses omit it. Before network work the
+the hook JSON. Full and unchanged responses omit it. A request naming
+`hook_revision` 2 or later may also be answered with `context`, `{"id", "name"}`
+for the context the conversation saves to; the script consumes it too and keeps
+it in the conversation's briefing state for the status command. Before network work the
 script records an unfinished refresh. Failure, interruption or unavailable root
 keeps that flag, forcing the next successful briefing to replace the unavailable
 notice even when an older briefing was acknowledged. Success clears the flag.

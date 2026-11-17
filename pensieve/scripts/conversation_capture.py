@@ -964,15 +964,17 @@ def run_hook(
 ) -> dict:
     if client not in {"codex", "claude"}:
         return {}
-    pause = conversation_command(payload, client)
-    if pause is None and payload.get("hook_event_name") not in HOST_EVENTS:
+    command = conversation_command(payload, client)
+    if command is None and payload.get("hook_event_name") not in HOST_EVENTS:
         return {}
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return {}
-    if pause is not None:
+    if command == "status":
+        return conversation_status(payload, client, session, config, state_root)
+    if command is not None:
         return set_conversation_saving(
-            pause, payload, client, session, config, state_root, endpoint
+            command == "pause", payload, client, session, config, state_root, endpoint
         )
     event = payload["hook_event_name"]
     # Claude's SessionEnd shares a 1.5s total. Codex writes a turn's completion
@@ -1082,16 +1084,7 @@ def set_conversation_saving(
         db.commit()
     if not pause:
         read()
-    from capture_onboarding import sharing_enabled
-
-    if held:
-        unsaved = "saving is paused on this machine"
-    elif spool_status(state_root, client, session).get("stopped"):
-        unsaved = "Pensieve stopped saving it earlier"
-    elif not sharing_enabled(payload.get("transcript_path"), client, session):
-        unsaved = "transcript sharing is not on for it"
-    else:
-        unsaved = None
+    unsaved = not_saved(payload, client, session, spool_status(state_root, client, session), held)
     resume = ("/" if client == "claude" else "$") + "pensieve:resume"
     if pause and unsaved is None:
         reason = (
@@ -1112,7 +1105,25 @@ def set_conversation_saving(
         )
     else:
         reason = f"the pause is lifted, but this conversation is still not saved: {unsaved}."
-    output = {"decision": "block", "reason": "Pensieve: " + reason}
+    return command_answer(payload, client, "Pensieve: " + reason)
+
+
+def not_saved(payload: dict, client: str, session: str, spool: dict, held: bool) -> str | None:
+    """Why this conversation is not saved, its own pause aside; None when it is."""
+    from capture_onboarding import sharing_enabled
+
+    if held:
+        return "saving is paused on this machine"
+    if spool.get("stopped"):
+        return NOTICES.get(spool.get("blocked_reason"), "Pensieve stopped saving it earlier")
+    if not sharing_enabled(payload.get("transcript_path"), client, session):
+        return "transcript sharing is not on for it"
+    return None
+
+
+def command_answer(payload: dict, client: str, reason: str) -> dict:
+    """Block the member's command and show them `reason` in the model's place."""
+    output = {"decision": "block", "reason": reason}
     if client == "claude":
         # Keep the typed command out of the block message Claude Code shows.
         output["hookSpecificOutput"] = {
@@ -1120,6 +1131,72 @@ def set_conversation_saving(
             "suppressOriginalPrompt": True,
         }
     return output
+
+
+def conversation_status(
+    payload: dict, client: str, session: str, config: Path, state_root: Path
+) -> dict:
+    """Tell the member whether this conversation is being saved, in the model's place.
+
+    Local state only: the transcript's newest marker and the spool are read,
+    nothing is scanned, changed or sent, so the times are those of the last
+    capture hook. A failure raises, and the prompt reaches the model as the
+    skill, whose text says the status was not read.
+    """
+    status = saving_status(state_root, client, session)
+    unsaved = not_saved(payload, client, session, status, status["paused"])
+    segments = status["segments"]
+    newest = segments[-1]["status"] if segments else None
+    if unsaved is None and newest in {"service_hold", "capture_disabled"}:
+        # The service refused the newest upload: held, or sharing turned off since.
+        unsaved = NOTICES[newest]
+    saved = [s for s in segments if s["last_saved_at"]]
+    queued = sum(s["queued_events"] for s in segments)
+    failures = (status["health"] or {}).get("consecutive_failures")
+    paused = status.get("conversation_paused")
+    lines = {"Saving": "paused for this conversation" if paused else "off" if unsaved else "on"}
+    if unsaved:
+        lines["Reason"] = unsaved
+    if paused:
+        lines["Resume"] = ("/" if client == "claude" else "$") + "pensieve:resume"
+    if segments:
+        lines["Context"] = context_label(config, client, session, segments[-1]["context"])
+    if saved:
+        newest_save = datetime.fromisoformat(max(s["last_saved_at"] for s in saved))
+        lines["Last saved"] = newest_save.strftime("%Y-%m-%d %H:%M UTC")
+    if queued:
+        lines["Queued"] = f"{queued} {'entry' if queued == 1 else 'entries'}"
+    # Health counts every conversation's uploads; only this one's failing is news here.
+    if (
+        not unsaved
+        and newest not in {None, "accepted"}
+        and type(failures) is int
+        and failures >= FAILING_UPLOADS
+    ):
+        lines["Uploads"] = NOTICES["upload_failing"].format(failures=failures)
+    if saved:
+        # Whatever the state now, what was saved earlier is still in Pensieve.
+        lines["Transcript"] = TRANSCRIPT_URL.format(context=saved[-1]["context"], session=session)
+    title = "Pensieve transcript status"
+    rows = "\n".join(f"{k}: {v}" for k, v in lines.items())
+    return command_answer(payload, client, f"{title}\n{'─' * len(title)}\n{rows}")
+
+
+def context_label(config: Path, client: str, session: str, context: int) -> str:
+    """`Name - id` when the briefing hook stored this context's name, else the id alone."""
+    from context_briefing import read_state, state_path
+
+    try:
+        named = read_state(state_path(config, client, session)).get("context")
+    except (OSError, ValueError):
+        named = None
+    if isinstance(named, dict) and named.get("id") == context:
+        return f"{named.get('name')} - {context}"
+    return str(context)
+
+
+# The application's stable link to one saved conversation (`build_conversation_url`).
+TRANSCRIPT_URL = "https://app.pensieve.uk/r/{context}/conversation/{session}"
 
 
 def hook_output(event: str, notice: str | None) -> dict:

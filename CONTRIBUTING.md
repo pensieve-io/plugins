@@ -14,8 +14,8 @@ This repository owns the installable plugin. Edit the files here directly:
 - `pensieve/scripts/capture_adapters.py` and `capture_state.py`: native parsing and shared capture phases.
 - `pensieve/scripts/capture_protocol.py`: public compatibility guard before private requests. See
   [conversation-capture.md](docs/conversation-capture.md).
-- `pensieve/scripts/capture_pause.py` with `pensieve/skills/pause` and `resume`: the per-conversation
-  pause commands. The skills exist so each host completes the command; the capture hook answers it.
+- `pensieve/scripts/capture_pause.py` with `pensieve/skills/pause`, `resume` and `status`: the
+  per-conversation pause and status commands. The skills exist so each host completes the command; the capture hook answers it.
   They carry `metadata.control`, not `metadata.role`, and are not role skills: keep them out of the
   hosted skill catalogue when importing a revision into the application repository.
 - `pensieve/scripts/capture_onboarding.py`: asks once, on an Approve/Deny page, whether to share transcripts; preferences are managed in Data → Connectors.

@@ -391,11 +391,28 @@ def test_session_start_forgets_the_branch_recall_it_was_given(setup):
     assert not state.exists()
 
 
+def test_the_context_name_is_kept_for_status_and_never_reaches_the_host(setup, monkeypatch):
+    path, _calls = setup
+    reply = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""}}
+    named = {"context": {"id": 497, "name": "Acme\nLtd"}}
+    monkeypatch.setattr(briefing, "request", lambda *a, **k: (200, reply | named))
+    # Codex refuses hook output fields it does not know.
+    assert briefing.run_hook(payload(), "codex", path) == reply
+    state = briefing.read_state(briefing.state_path(path, "codex", SESSION))
+    assert state["context"] == {"id": 497, "name": "Acme Ltd"}  # Status shows it on one line.
+    monkeypatch.setattr(briefing, "request", lambda *a, **k: (200, reply | {"context": "Acme"}))
+    assert briefing.run_hook(payload(), "codex", path) == reply
+    assert briefing.read_state(briefing.state_path(path, "codex", SESSION))["context"] == {
+        "id": 497,
+        "name": "Acme Ltd",
+    }
+
+
 @pytest.mark.parametrize("event", ["SessionStart", "UserPromptSubmit"])
 def test_every_briefing_names_the_hook_revision(setup, event):
     path, calls = setup
     briefing.run_hook(payload(event), "codex", path)
-    assert calls[-1][3]["hook_revision"] == briefing.HOOK_REVISION == 1
+    assert calls[-1][3]["hook_revision"] == briefing.HOOK_REVISION == 2
 
 
 def test_an_older_service_is_asked_again_without_the_fields_it_refuses(setup, monkeypatch):

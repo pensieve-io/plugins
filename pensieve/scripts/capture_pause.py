@@ -1,9 +1,10 @@
 """The two ways a member pauses saving. Standard library, Python 3.9+.
 
-**One conversation.** The plugin's `pause` and `resume` skills give each host a
-command it completes: `/pensieve:pause` in Claude Code, `$pensieve:pause` in
-Codex. `conversation_command` recognises one in a hook payload; the capture
-hook then acts on it and answers in the model's place, so no agent is involved.
+**One conversation.** The plugin's `pause`, `resume` and `status` skills give
+each host a command it completes: `/pensieve:pause` in Claude Code,
+`$pensieve:pause` in Codex. `conversation_command` recognises one in a hook
+payload; the capture hook then acts on it and answers in the model's place, so
+no agent is involved.
 
 **The whole machine.** `pensieve pause` writes `paused.json` beside the capture
 spools, holding `{"paused_at": "<ISO-8601 UTC>"}`, and `pensieve resume`
@@ -23,12 +24,16 @@ from pathlib import Path
 
 PAUSE_FILE = "paused.json"
 MAX_PAUSE_BYTES = 4096
-# Skill names as each host reports them, and whether they pause.
-CONVERSATION_COMMANDS = {"pensieve:pause": True, "pensieve:resume": False}
+# Skill names as each host reports them, and the command each one is.
+CONVERSATION_COMMANDS = {
+    "pensieve:pause": "pause",
+    "pensieve:resume": "resume",
+    "pensieve:status": "status",
+}
 
 
-def conversation_command(payload: dict, client: str) -> bool | None:
-    """True to pause this conversation, False to resume it, None for any other hook.
+def conversation_command(payload: dict, client: str) -> str | None:
+    """`pause`, `resume` or `status` for this conversation, None for any other hook.
 
     Claude Code names the plugin command a typed line expands to, so its bare
     `/pause` alias is recognised and another plugin's `/pause` is not. Codex has

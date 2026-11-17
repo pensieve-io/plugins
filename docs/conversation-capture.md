@@ -334,8 +334,8 @@ is called and the confirmation comes from the script that made the change.
 
 | Host | Hook | How the command is recognised |
 | --- | --- | --- |
-| Claude Code | `UserPromptExpansion`, matched on `^pensieve:(pause\|resume)$` | `command_name`, which Claude resolves, so the bare `/pause` alias counts and another plugin's `/pause` does not |
-| Codex | `UserPromptSubmit` | A prompt that is nothing but `$pensieve:pause` or `$pensieve:resume`. Codex has no custom slash commands and no expansion event; a skill mention reaches the hook as the prompt's text |
+| Claude Code | `UserPromptExpansion`, matched on `^pensieve:(pause\|resume\|status)$` | `command_name`, which Claude resolves, so the bare `/pause` alias counts and another plugin's `/pause` does not |
+| Codex | `UserPromptSubmit` | A prompt that is nothing but `$pensieve:pause`, `$pensieve:resume` or `$pensieve:status`. Codex has no custom slash commands and no expansion event; a skill mention reaches the hook as the prompt's text |
 
 A failure to record the change raises instead of confirming it. The prompt is
 then not blocked and reaches the model as the skill, whose whole text says
@@ -366,6 +366,21 @@ the conversation in Pensieve does. `--status` reports `conversation_paused:
 true` while it holds. The reply also says when the conversation was not being
 saved anyway (sharing off, stopped earlier, or paused on the machine), so
 "paused" is never read as "was saving until now".
+
+`/pensieve:status` or `$pensieve:status` is a third command (skill
+`pensieve/skills/status`), recognised and answered the same way, that changes
+nothing. Its reply is a title, `Pensieve transcript status`, then one `Name: value` line
+per fact: `Saving` (`on`, `off` or
+`paused for this conversation`), then only those that apply: `Reason` (paused
+on this machine, stopped earlier, sharing off, or the service holding or
+refusing uploads), `Resume`, `Context` (`Name - id`, or the id alone until a
+briefing has delivered the name; see [hook-protocol.md](hook-protocol.md)), `Last saved`, `Queued`, `Uploads` (a
+run of failed uploads) and `Transcript`, the conversation's link in Pensieve,
+shown once anything has been saved whatever its state now. It
+reads the same local state as `--status` and the transcript's newest marker,
+scans and sends nothing, so its times are those of the last capture hook. If it
+cannot read that state it raises, and the skill's text says the status was not
+read.
 
 Neither the command nor its answer can be saved. Claude Code records a blocked
 command as a `queue-operation` and an informational `system` record, neither of

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import anchor_queue
 import capture_adapters
@@ -10,7 +11,7 @@ import capture_pause
 import conversation_capture as capture
 import git_anchor
 import pytest
-from capture_config import private_lock, profiles
+from capture_config import private_lock, profiles, save_private_json
 from test_conversation_capture import (
     ACCEPTED,
     SESSION,
@@ -229,8 +230,13 @@ def turn(path, text, client):
 @pytest.mark.parametrize(
     "client,payload,expected",
     [
-        ("codex", {"hook_event_name": "UserPromptSubmit", "prompt": "$pensieve:pause"}, True),
-        ("codex", {"hook_event_name": "UserPromptSubmit", "prompt": " $pensieve:resume\n"}, False),
+        ("codex", {"hook_event_name": "UserPromptSubmit", "prompt": "$pensieve:pause"}, "pause"),
+        (
+            "codex",
+            {"hook_event_name": "UserPromptSubmit", "prompt": " $pensieve:resume\n"},
+            "resume",
+        ),
+        ("codex", {"hook_event_name": "UserPromptSubmit", "prompt": "$pensieve:status"}, "status"),
         ("codex", {"hook_event_name": "UserPromptSubmit", "prompt": "$pensieve:pause now"}, None),
         ("codex", {"hook_event_name": "UserPromptSubmit", "prompt": "run $pensieve:pause"}, None),
         ("codex", {"hook_event_name": "UserPromptSubmit", "prompt": "pensieve:pause"}, None),
@@ -240,12 +246,17 @@ def turn(path, text, client):
         (
             "claude",
             {"hook_event_name": "UserPromptExpansion", "command_name": "pensieve:pause"},
-            True,
+            "pause",
         ),
         (
             "claude",
             {"hook_event_name": "UserPromptExpansion", "command_name": "pensieve:resume"},
-            False,
+            "resume",
+        ),
+        (
+            "claude",
+            {"hook_event_name": "UserPromptExpansion", "command_name": "pensieve:status"},
+            "status",
         ),
         ("claude", {"hook_event_name": "UserPromptExpansion", "command_name": "other:pause"}, None),
         ("claude", {"hook_event_name": "UserPromptExpansion", "command_name": "pause"}, None),
@@ -373,6 +384,91 @@ def test_a_conversation_pause_under_a_machine_pause_reads_nothing(tmp_path, monk
     flag.unlink()
     run()
     assert calls == []  # Still paused for this conversation.
+
+
+def status_lines(client, path, cfg, root):
+    answer = command("status", client, path, cfg, root)
+    assert answer["decision"] == "block"
+    title, rule, *lines = answer["reason"].split("\n")
+    assert title == "Pensieve transcript status" and rule == "─" * len(title)
+    return dict(line.split(": ", 1) for line in lines)
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+def test_status_says_what_is_saved_and_changes_nothing(tmp_path, monkeypatch, client):
+    path, cfg, root, calls, run = setup(tmp_path, monkeypatch, client=client)
+    turn(path, "Open", client)
+    assert status_lines(client, path, cfg, root) == {"Saving": "on"}
+    assert ("hookSpecificOutput" in command("status", client, path, cfg, root)) is (
+        client == "claude"
+    )
+    assert calls == []  # Status reads the transcript's marker and sends nothing.
+    run()
+    link = f"https://app.pensieve.uk/r/497/conversation/{SESSION}"
+    lines = status_lines(client, path, cfg, root)
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d UTC", lines.pop("Last saved"))
+    assert lines == {"Saving": "on", "Context": "497", "Transcript": link}
+    command("pause", client, path, cfg, root)
+    lines = status_lines(client, path, cfg, root)
+    assert lines["Saving"] == "paused for this conversation"
+    assert lines["Resume"] == ("/" if client == "claude" else "$") + "pensieve:resume"
+    assert lines["Transcript"] == link and "Reason" not in lines
+    assert capture.saving_status(root, client, SESSION)["conversation_paused"] is True
+
+
+def test_status_says_why_a_conversation_is_not_saved(tmp_path, monkeypatch):
+    path, cfg, root, _calls, run = setup(tmp_path, monkeypatch)
+    append(path, user(), hook_record(generation=None), assistant())
+    run()
+    assert status_lines("codex", path, cfg, root) == {
+        "Saving": "off",
+        "Reason": "transcript sharing is not on for it",
+    }
+    flag = pause(root)
+    assert status_lines("codex", path, cfg, root)["Reason"] == "saving is paused on this machine"
+    command("pause", "codex", path, cfg, root)
+    lines = status_lines("codex", path, cfg, root)
+    assert lines["Saving"] == "paused for this conversation"
+    assert lines["Reason"] == "saving is paused on this machine"
+    flag.unlink()
+
+
+def test_status_reports_queued_work_and_failing_uploads(tmp_path, monkeypatch):
+    path, cfg, root, _calls, run = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(capture, "upload", lambda *a: "unavailable")
+    turn(path, "Open", "codex")
+    for _ in range(capture.FAILING_UPLOADS):
+        run()
+    assert status_lines("codex", path, cfg, root) == {
+        "Saving": "on",
+        "Context": "497",
+        "Queued": "2 entries",
+        "Uploads": "the last 3 uploads failed; queued turns are kept and retried automatically",
+    }
+
+
+def test_status_names_the_context_the_briefing_hook_stored(tmp_path, monkeypatch):
+    import context_briefing
+
+    path, cfg, root, _calls, run = setup(tmp_path, monkeypatch)
+    turn(path, "Open", "codex")
+    run()
+    stored = context_briefing.state_path(cfg, "codex", SESSION)
+    save_private_json(stored, {"context": {"id": 497, "name": "Acme Ltd"}})
+    assert status_lines("codex", path, cfg, root)["Context"] == "Acme Ltd - 497"
+    # A name stored for another company is not this conversation's.
+    save_private_json(stored, {"context": {"id": 501, "name": "Other"}})
+    assert status_lines("codex", path, cfg, root)["Context"] == "497"
+
+
+def test_a_status_that_cannot_be_read_is_not_answered(tmp_path, monkeypatch):
+    path, cfg, root, _calls, run = setup(tmp_path, monkeypatch)
+    turn(path, "Open", "codex")
+    run()
+    next(root.glob("*.sqlite3")).chmod(0o644)
+    # Raising leaves the prompt unblocked, so the skill's text says the status was not read.
+    with pytest.raises(ValueError):
+        command("status", "codex", path, cfg, root)
 
 
 def test_a_pause_that_cannot_be_recorded_is_not_confirmed(tmp_path, monkeypatch):
