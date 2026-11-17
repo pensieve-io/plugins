@@ -44,6 +44,7 @@ from capture_state import (
     apply_item,
     block,
     discard_conversation,
+    drop_held,
     migrate_state,
     record_context_use,
     scope_revoked,
@@ -282,6 +283,9 @@ def scan(
                 ],
             }
             state.setdefault("revocation_cutovers", []).append(cutover)
+            # A turn held for the conversation's first company predates this
+            # removal or pause; restoring the key must not save it.
+            drop_held(db, state)
             scope = state.get("scope") or state.get("candidate_scope")
             if scope and scope_revoked(cutover, scope[0], scope[1]):
                 block(db, state, "credential_removed")
@@ -292,6 +296,7 @@ def scan(
             state.setdefault("profile_cutovers", []).append(
                 {"offset": details.st_size, "profiles": previous}
             )
+            drop_held(db, state)
             scope = state.get("scope") or state.get("candidate_scope")
             if scope and key_for(previous, scope[0], scope[1]) != key_for(
                 fingerprints, scope[0], scope[1]
@@ -1171,6 +1176,9 @@ def spool_status(root: Path, client: str, session: str) -> dict:
                WHERE s.retired=0 ORDER BY s.rowid LIMIT 101"""
         ).fetchall()
         result.update(segments=[dict(row) for row in rows[:100]], truncated=len(rows) > 100)
+        if isinstance(state, dict) and state.get("held_turns"):
+            # Marked turns waiting, unsent, for the conversation's first company.
+            result["held_turns"] = len(state["held_turns"])
         return result
     finally:
         db.close()
