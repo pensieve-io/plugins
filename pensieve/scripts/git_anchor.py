@@ -227,7 +227,7 @@ def capture_scope(
     current turn's owner, context and consent generation, even in a first turn
     the spool has yet to read; the spool's attributed scope stands in without
     one. The spool is read read-only and lock-free: the capture hooks own it. A
-    conversation with no spool, or stopped, disabled, held or refused, is not
+    conversation with no spool, or stopped, paused, disabled, held or refused, is not
     anchored. `saved` says whether an upload in that context was accepted.
     """
     from capture_onboarding import latest_attribution
@@ -248,7 +248,11 @@ def capture_scope(
     try:
         row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
         state = json.loads(row[0]) if row else None
-        if not isinstance(state, dict) or state.get("capture_stopped"):
+        if (
+            not isinstance(state, dict)
+            or state.get("capture_stopped")
+            or state.get("conversation_paused")
+        ):
             return None
         found = latest_attribution(transcript, client, session)
         if found is not None:

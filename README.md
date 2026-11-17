@@ -179,6 +179,20 @@ Approve/Deny page; **Data → Connectors in the context** manages sharing after 
 skill, credential download or terminal command is needed. New visible work
 belongs to the conversation's context for team handoffs. Previous chats are not imported.
 
+### Pausing one conversation
+
+To stop saving part of a conversation, send the pause command on its own:
+`/pensieve:pause` in Claude Code or `$pensieve:pause` in Codex. Send
+`/pensieve:resume` or `$pensieve:resume` to start saving again. Both complete
+as you type them. The plugin's hook answers them itself, so no agent runs and
+the reply you read confirms what was done.
+
+A pause covers this conversation only and looks forward only. Turns before it
+stay saved; to remove those, delete the conversation in Pensieve. Nothing
+written while paused is saved, even after you resume. If an agent replies to
+the command instead, saving was not paused: the hooks are not running in that
+client.
+
 ## What the plugin sends, and where
 
 The plugin runs local command hooks and a header helper (Python scripts in

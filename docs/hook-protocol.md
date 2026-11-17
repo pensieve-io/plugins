@@ -167,6 +167,10 @@ Command capture hooks establish a baseline at `SessionStart`, checkpoint at
 `UserPromptSubmit` and `Stop`, and attempt a bounded flush at `SessionEnd`.
 The last hook has a one-second configured timeout on Claude and three seconds on Codex. Same-event handlers may
 run concurrently, so a checkpoint can be completed by the following hook.
+The same script answers the member's own pause commands, on Claude's
+`UserPromptExpansion` and Codex's `UserPromptSubmit`, by blocking the prompt
+with a `reason`; see
+[pausing one conversation](conversation-capture.md#pausing-one-conversation).
 
 Uploads use `POST https://mcp.pensieve.uk/hooks/conversations` with the key in
 `Authorization: Bearer`. A batch carries `batch_id`, `client`,
@@ -275,8 +279,8 @@ same repository is never attributed to it. Nothing is sent unless:
   and a key is configured for that scope. Anything else is dropped, not queued.
 
 While saving is paused on the machine (`paused.json`, see
-[the capture guide](conversation-capture.md#pausing-on-this-machine)), the hook
-posts nothing and queues nothing. The spool is read read-only without its lock;
+[the capture guide](conversation-capture.md#pausing-on-this-machine)) or for
+this conversation, the hook posts nothing and queues nothing. The spool is read read-only without its lock;
 any error, timeout or unreachable service fails open. Anchors never add model
 context: the hook's only output is [branch recall](#branch-recall), and `{}`
 otherwise.

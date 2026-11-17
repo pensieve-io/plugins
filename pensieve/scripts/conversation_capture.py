@@ -37,7 +37,7 @@ from capture_config import (
     profiles,
 )
 from capture_health import read_health, record_health
-from capture_pause import pause_state
+from capture_pause import conversation_command, pause_state
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
 from capture_state import (
     CONTEXT_BOUNDARY_VERSION,
@@ -286,6 +286,14 @@ def scan(
             if scope and scope_revoked(cutover, scope[0], scope[1]):
                 block(db, state, "credential_removed")
         state["observed_revocations"] = revocations
+        if state.pop("resume_fence", False) and state["offset"] is not None:
+            # The member resumed this conversation. What was written while it was
+            # paused is still read, since a company named there counts, but none
+            # of it is kept, and the next prompt needs a marker of its own.
+            state.setdefault("revocation_cutovers", []).append(
+                {"offset": details.st_size, "scopes": ["*"]}
+            )
+            block(db, state, "conversation_paused")
         if state["offset"] is not None and previous is not None and previous != fingerprints:
             # Only changed credentials start a new capture interval. Keep scanning
             # unread work for unaffected scopes, including across bounded scans.
@@ -827,7 +835,10 @@ def capture_session(
             if not recover:
                 record_health(state_root, client, "unproven_start")
             discard_conversation(db, state, "unproven_start")
-        if state.get("capture_stopped"):
+        if state.get("capture_stopped") or state.get("conversation_paused"):
+            # Stopped, or paused by its member: nothing more is read. Turns
+            # queued before a pause were saved with their consent and still
+            # upload, because a paused conversation may never be resumed.
             save_state(db, state)
             db.commit()
             flush(db, configured, client, session, endpoint, deadline)
@@ -951,11 +962,18 @@ def run_hook(
     state_root: Path = STATE_PATH,
     endpoint: str = UPLOAD_ENDPOINT,
 ) -> dict:
-    if client not in {"codex", "claude"} or payload.get("hook_event_name") not in HOST_EVENTS:
+    if client not in {"codex", "claude"}:
+        return {}
+    pause = conversation_command(payload, client)
+    if pause is None and payload.get("hook_event_name") not in HOST_EVENTS:
         return {}
     session = conversation_id(payload.get("session_id"))
     if session is None:
         return {}
+    if pause is not None:
+        return set_conversation_saving(
+            pause, payload, client, session, config, state_root, endpoint
+        )
     event = payload["hook_event_name"]
     # Claude's SessionEnd shares a 1.5s total. Codex writes a turn's completion
     # after Stop, so its SessionEnd (a 3s hook) must have room to send it.
@@ -1001,6 +1019,107 @@ def run_hook(
     if source_error is not None:
         raise source_error
     return hook_output(event, notice)
+
+
+def set_conversation_saving(
+    pause: bool,
+    payload: dict,
+    client: str,
+    session: str,
+    config: Path,
+    state_root: Path,
+    endpoint: str,
+) -> dict:
+    """Pause or resume saving for this one conversation, and answer in the model's place.
+
+    The prompt is blocked, so the reply the member reads comes from the script
+    that changed the state, after it changed. Any failure raises instead: the
+    prompt then reaches the model as the skill, whose text says saving was not
+    changed. A pause first reads what was written before it, so earlier turns
+    stay whole. A resume reads at once, which puts the fence at this point.
+    """
+    deadline = time.monotonic() + 2.0
+    held = pause_state(state_root) is not None
+    configured = {}
+    if not held:
+        try:
+            configured = profiles(config, client)
+            observe_credentials(state_root, client, configured)
+        except (OSError, ValueError):
+            configured = {}  # An unreadable config saves nothing; the pause still applies.
+
+    def read():
+        if not configured:
+            return
+        try:
+            capture_session(
+                client,
+                session,
+                payload.get("transcript_path"),
+                configured,
+                state_root,
+                endpoint,
+                deadline - 0.6,
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            pass  # The change itself must not depend on this read.
+
+    if pause:
+        read()
+    with (
+        private_lock(state_root / f"{client}-{session}.lock", wait=0.5),
+        closing(connect_state(state_root, client, session)) as db,
+    ):
+        db.execute("BEGIN IMMEDIATE")
+        state = load_state(db)
+        was_paused = state.get("conversation_paused") is True
+        if pause:
+            state["conversation_paused"] = True
+        elif was_paused:
+            del state["conversation_paused"]
+            state["resume_fence"] = True
+        save_state(db, state)
+        db.commit()
+    if not pause:
+        read()
+    from capture_onboarding import sharing_enabled
+
+    if held:
+        unsaved = "saving is paused on this machine"
+    elif spool_status(state_root, client, session).get("stopped"):
+        unsaved = "Pensieve stopped saving it earlier"
+    elif not sharing_enabled(payload.get("transcript_path"), client, session):
+        unsaved = "transcript sharing is not on for it"
+    else:
+        unsaved = None
+    resume = ("/" if client == "claude" else "$") + "pensieve:resume"
+    if pause and unsaved is None:
+        reason = (
+            "saving is paused for this conversation. Nothing from here on is saved, even "
+            f"after you resume; earlier turns stay saved. {resume} turns saving back on."
+        )
+    elif pause:
+        reason = (
+            "saving is paused for this conversation. It was not being saved before this "
+            f"either: {unsaved}. {resume} lifts the pause."
+        )
+    elif not was_paused:
+        reason = "saving was not paused for this conversation."
+    elif unsaved is None:
+        reason = (
+            "saving is back on for this conversation, from your next message. Nothing "
+            "written while it was paused is saved."
+        )
+    else:
+        reason = f"the pause is lifted, but this conversation is still not saved: {unsaved}."
+    output = {"decision": "block", "reason": "Pensieve: " + reason}
+    if client == "claude":
+        # Keep the typed command out of the block message Claude Code shows.
+        output["hookSpecificOutput"] = {
+            "hookEventName": payload["hook_event_name"],
+            "suppressOriginalPrompt": True,
+        }
+    return output
 
 
 def hook_output(event: str, notice: str | None) -> dict:
@@ -1164,6 +1283,8 @@ def spool_status(root: Path, client: str, session: str) -> dict:
                 stopped=state.get("capture_stopped") is True,
                 blocked_reason=state.get("blocked_reason"),
             )
+        if isinstance(state, dict) and state.get("conversation_paused"):
+            result["conversation_paused"] = True
         rows = db.execute(
             """SELECT s.context,d.status,d.last_attempt_at,d.last_saved_at,
                       (SELECT count(*) FROM events e WHERE e.segment=s.id) AS queued_events

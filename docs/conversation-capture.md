@@ -281,7 +281,8 @@ or blocked conversation adds `stopped` and `blocked_reason` (for example
 `unproven_start`, `conversation_stopped` or `multiple_contexts`), `health`
 carries the client's upload health below, and `paused` / `paused_at` report a
 pause on this machine (`paused_at` is null when the pause file holds no valid
-time). It never prints transcript text or
+time); `conversation_paused` is present while the member has paused this
+conversation. It never prints transcript text or
 keys, creates a spool or infers saving from MCP login.
 
 #### Upload health
@@ -320,6 +321,59 @@ notice saying why, how to fix it and the `--status` command above:
 Each reason is shown at most once per conversation, recorded in that
 conversation's spool. A stop the conversation caused itself, such as using a
 second company, adds no notice.
+
+#### Pausing one conversation
+
+The member pauses the conversation they are in by sending a command on its own:
+`/pensieve:pause` in Claude Code, `$pensieve:pause` in Codex, and
+`/pensieve:resume` or `$pensieve:resume` to lift it. Each is a plugin skill
+(`pensieve/skills/pause`, `resume`), which is what makes the host complete it,
+but the skill never runs. The capture hook recognises the command, changes the
+state and blocks the prompt with a reason the host shows the member, so no model
+is called and the confirmation comes from the script that made the change.
+
+| Host | Hook | How the command is recognised |
+| --- | --- | --- |
+| Claude Code | `UserPromptExpansion`, matched on `^pensieve:(pause\|resume)$` | `command_name`, which Claude resolves, so the bare `/pause` alias counts and another plugin's `/pause` does not |
+| Codex | `UserPromptSubmit` | A prompt that is nothing but `$pensieve:pause` or `$pensieve:resume`. Codex has no custom slash commands and no expansion event; a skill mention reaches the hook as the prompt's text |
+
+A failure to record the change raises instead of confirming it. The prompt is
+then not blocked and reaches the model as the skill, whose whole text says
+saving was **not** changed. The same happens where the hooks do not run at all
+(an older Claude Code without `UserPromptExpansion`, a client without hooks, the
+skill installed alone), so an agent's reply to the command always means it did
+nothing. The skills set `disable-model-invocation`, so a Claude agent cannot
+call them itself.
+
+The pause is `conversation_paused` in that conversation's spool:
+
+- **At the pause**, the hook first reads the transcript as any capture hook
+  does, so turns written before it are whole. Turns already queued still
+  upload while paused, because a paused conversation may never be resumed and
+  they were saved with their consent. This differs from the machine-wide pause
+  below, which holds queued work until resume.
+- **While paused**, the capture hooks read nothing from the transcript, for
+  this conversation's own hooks and for another conversation's recovery pass.
+  The anchor hook sends and queues nothing for it. Briefings still load.
+- **At the resume**, the hook reads the transcript again with a fence at its
+  current end: everything written while paused is read for the companies it
+  names, so a second company there still stops saving for good, but none of it
+  is attributed, spooled or uploaded. Saving restarts with the next prompt,
+  which needs its own fresh marker.
+
+A pause is forward-only. It does not withdraw turns already uploaded; deleting
+the conversation in Pensieve does. `--status` reports `conversation_paused:
+true` while it holds. The reply also says when the conversation was not being
+saved anyway (sharing off, stopped earlier, or paused on the machine), so
+"paused" is never read as "was saving until now".
+
+Neither the command nor its answer can be saved. Claude Code records a blocked
+command as a `queue-operation` and an informational `system` record, neither of
+which the capture adapter reads, and writes no marker for it; Codex writes no
+prompt record at all (observed on Claude Code 2.1.326 and Codex 0.167.1).
+`suppressOriginalPrompt` keeps the typed command out of the block message
+Claude shows. Codex refuses hook output fields it does not know, so its answer
+carries `decision` and `reason` alone.
 
 #### Pausing on this machine
 
