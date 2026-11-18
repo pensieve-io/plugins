@@ -3440,3 +3440,86 @@ def test_the_held_limit_counts_bytes(tmp_path, monkeypatch):
     )
     run()
     assert pending(state) == 0
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic pixels"
+PNG_REFERENCE = f"![image](pensieve-image:{hashlib.sha256(PNG).hexdigest()})"
+OMITTED = "[Attachment omitted; original remains in the host conversation]"
+
+
+def claude_image(data=PNG):
+    import base64
+
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64.b64encode(data).decode(),
+        },
+    }
+
+
+def image_prompt(tmp_path, monkeypatch, send):
+    path, _cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    sent = []
+
+    def send_image(image, key, endpoint, timeout):
+        sent.append((image, key, endpoint))
+        return send()
+
+    monkeypatch.setattr(capture, "send_image", send_image)
+    prompt = user("unused", client="claude")
+    prompt["message"]["content"] = [{"type": "text", "text": "Why is this wrong?"}, claude_image()]
+    append(path, prompt, hook_record(client="claude"), assistant("Because.", client="claude"))
+    return state, calls, run, sent
+
+
+def test_a_prompt_image_is_named_in_its_text_and_sent_once_the_prompt_is_saved(
+    tmp_path, monkeypatch
+):
+    state, calls, run, sent = image_prompt(tmp_path, monkeypatch, lambda: 200)
+    run()
+    assert events(calls)[0]["content"] == "Why is this wrong?\n" + PNG_REFERENCE
+    assert sent == [(PNG, KEY, capture.UPLOAD_ENDPOINT + "/images?client=claude&context_id=497")]
+    run()
+    assert len(sent) == 1
+
+
+def test_an_image_the_service_cannot_take_yet_waits_and_a_refused_one_is_forgotten(
+    tmp_path, monkeypatch
+):
+    answers = [None, 404, 422]
+    state, calls, run, sent = image_prompt(tmp_path, monkeypatch, lambda: answers.pop(0))
+    for _ in range(4):
+        run()
+    assert len(sent) == 3 and not answers
+
+
+def test_an_image_is_never_sent_for_a_prompt_that_was_not_saved(tmp_path, monkeypatch):
+    state, calls, run, sent = image_prompt(tmp_path, monkeypatch, lambda: 200)
+    monkeypatch.setattr(capture, "upload", lambda *args: False)
+    run()
+    assert not sent
+
+
+def test_only_a_prompts_own_hostable_images_are_named(tmp_path):
+    local = tmp_path / "clipboard.png"
+    local.write_bytes(PNG)
+    assert capture_adapters.visible_text([claude_image()]) == OMITTED
+    assert capture_adapters.visible_text([claude_image(b"not an image")], images=True) == OMITTED
+    assert (
+        capture_adapters.visible_text(
+            [
+                {"type": "local_image", "path": str(local)},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+                {"type": "local_image", "path": str(tmp_path / "gone.png")},
+            ],
+            images=True,
+        )
+        == PNG_REFERENCE
+        + "\n![image](pensieve-image:"
+        + hashlib.sha256(b"\x89PNG\r\n\x1a\n").hexdigest()
+        + ")\n"
+        + OMITTED
+    )

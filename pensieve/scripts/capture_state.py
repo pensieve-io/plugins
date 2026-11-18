@@ -152,6 +152,7 @@ def discard_conversation(db, state: dict, reason: str) -> None:
     for table in ("events", "anchors", "batches"):
         db.execute(f"DELETE FROM {table}")
     db.execute("UPDATE segments SET retired=1,title=''")
+    state.pop("images", None)
     block(db, state, reason)
 
 

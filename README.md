@@ -220,13 +220,14 @@ covers how Pensieve handles what it receives.
 
 | What | When | Contents |
 | --- | --- | --- |
-| Work conversation | At prompt, stop and session-end hooks | Visible user and assistant messages, tool names, tool inputs and visible text results, and references to artifacts. Reasoning, system instructions and hook payloads are left out; configured credentials and common secret patterns are redacted, though ordinary prose can still contain a secret |
+| Work conversation | At prompt, stop and session-end hooks | Visible user and assistant messages, the images you put in your prompts, tool names, tool inputs and visible text results, and references to artifacts. Reasoning, system instructions and hook payloads are left out; configured credentials and common secret patterns are redacted, though ordinary prose can still contain a secret |
 | Conversation anchors | After `git commit`, `git push` or `gh pr create` | Repository URL, branch, commit SHA and pull request number and URL. No transcript text |
 
 Saved conversations are visible to the members of the Pensieve context they
 belong to, and stay until deleted. To read them, the capture hook reads the
-client's own transcript file for the current conversation; it opens no other
-files, and attachments are noted without being opened.
+client's own transcript file for the current conversation. The only other file
+it opens is an image you attached to a prompt, where the client recorded a path
+to it; every other attachment is noted without being opened.
 
 **Kept on your machine:** the installation proof and connection profile in
 `~/.config/pensieve` (directory `0700`, files `0600`), and a bounded queue of
