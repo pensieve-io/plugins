@@ -3531,26 +3531,30 @@ def test_a_pasted_image_is_named_where_it_was_pasted(tmp_path, monkeypatch):
     path, _cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
     monkeypatch.setattr(capture, "send_image", lambda *args: 200)
     prompt = user("unused", client="claude")
-    prompt["imagePasteIds"] = [4, 5, 6]
+    prompt["imagePasteIds"] = [4, 3, 5, 6]
     prompt["message"]["content"] = [
-        {"type": "text", "text": "[Image #4] Compare this [Image #5] with [Image #9]."},
+        {"type": "text", "text": "[Image #4] Compare [Image #3] this [Image #5] with [Image #9]."},
         claude_image(),
+        {"type": "document", "source": {"type": "base64", "data": ""}},
+        claude_image(b"not an image"),
         claude_image(second),
         claude_image(),
     ]
     append(path, prompt, hook_record(client="claude"), assistant("Done.", client="claude"))
     run()
-    # Each image takes its own placeholder; one without a placeholder follows
-    # the text, and a number no image carries stays as typed.
+    # Each image takes its own placeholder, counted over images alone. One the
+    # service would refuse keeps its placeholder and its notice; one without a
+    # placeholder follows the text, and a number no image carries stays as typed.
     assert events(calls)[0]["content"] == (
-        f"{PNG_REFERENCE} Compare this {second_name} with [Image #9].\n{PNG_REFERENCE}"
+        f"{PNG_REFERENCE} Compare [Image #3] this {second_name} with [Image #9]."
+        f"\n{OMITTED}\n{OMITTED}\n{PNG_REFERENCE}"
     )
     db = sqlite3.connect(next(state.glob("*.sqlite3")))
     try:
         assert (
             db.execute("SELECT title FROM segments")
             .fetchone()[0]
-            .startswith("[image] Compare this [image] with")
+            .startswith("[image] Compare [Image #3] this [image] with")
         )
     finally:
         db.close()

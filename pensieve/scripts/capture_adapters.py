@@ -199,14 +199,6 @@ def visible_text(content: object, *, images: bool = False, paste_ids: object = N
             item.get("text"), str
         ):
             parts.append(item["text"])
-        elif images and (data := image_bytes(item)) is not None:
-            name = f"![image](pensieve-image:{hashlib.sha256(data).hexdigest()})"
-            placeholder = f"[Image #{next(numbers, None)}]"
-            at = next((i for i, part in enumerate(parts) if placeholder in part), None)
-            if at is None:
-                parts.append(name)
-            else:
-                parts[at] = parts[at].replace(placeholder, name, 1)
         elif item.get("type") in {
             "image",
             "input_image",
@@ -215,8 +207,19 @@ def visible_text(content: object, *, images: bool = False, paste_ids: object = N
             "document",
             "audio",
         }:
-            next(numbers, None)
-            parts.append("[Attachment omitted; original remains in the host conversation]")
+            # Every pasted image has a number, whether or not it can be named.
+            number = next(numbers, None) if item.get("type") == "image" else None
+            data = image_bytes(item) if images else None
+            if data is None:
+                parts.append("[Attachment omitted; original remains in the host conversation]")
+                continue
+            name = f"![image](pensieve-image:{hashlib.sha256(data).hexdigest()})"
+            placeholder = f"[Image #{number}]"
+            at = next((i for i, part in enumerate(parts) if placeholder in part), None)
+            if at is None:
+                parts.append(name)
+            else:
+                parts[at] = parts[at].replace(placeholder, name, 1)
     return "\n".join(parts)
 
 
