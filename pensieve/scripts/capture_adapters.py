@@ -6,9 +6,13 @@ capture scope, file cursor, consent interval or upload batch.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, TypedDict
 from urllib.parse import parse_qs, urlsplit
 
@@ -122,12 +126,72 @@ def parse_marker(text: str, client: str, session: str) -> dict | None:
     return marker
 
 
-def visible_text(content: object) -> str:
+# The service hosts PNG, JPEG, GIF and WebP up to this size; anything else
+# keeps the omission notice rather than naming bytes it would refuse.
+IMAGE_MAX_BYTES = 8 * 1024 * 1024
+IMAGE_REFERENCE = re.compile(r"!\[image\]\(pensieve-image:([0-9a-f]{64})\)")
+
+
+def image_bytes(item: dict) -> bytes | None:
+    """The bytes of one image a member put in a prompt, in either host's shape."""
+    kind, data = item.get("type"), None
+    try:
+        if kind == "image" and isinstance(item.get("source"), dict):
+            if item["source"].get("type") == "base64":
+                data = base64.b64decode(item["source"].get("data") or "", validate=True)
+        elif kind == "input_image" and isinstance(item.get("image_url"), str):
+            header, _, encoded_image = item["image_url"].partition(";base64,")
+            if header.startswith("data:image/"):
+                data = base64.b64decode(encoded_image, validate=True)
+        elif kind == "local_image" and isinstance(item.get("path"), str):
+            path = Path(item["path"])
+            if path.is_file() and path.stat().st_size <= IMAGE_MAX_BYTES:
+                data = path.read_bytes()
+    except (OSError, ValueError, binascii.Error):
+        return None
+    if (
+        data
+        and len(data) <= IMAGE_MAX_BYTES
+        and (
+            data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"))
+            or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")
+        )
+    ):
+        return data
+    return None
+
+
+def prompt_images(record: dict, client: str) -> dict[str, bytes]:
+    """Each image in a prompt record by the digest its saved text names it by."""
+    holder = record.get("message") if client == "claude" else record.get("payload")
+    if client == "codex" and isinstance(holder, dict):
+        holder = holder.get("item")
+    content = holder.get("content") if isinstance(holder, dict) else None
+    images = {}
+    for item in content if isinstance(content, list) else []:
+        data = image_bytes(item) if isinstance(item, dict) else None
+        if data is not None:
+            images[hashlib.sha256(data).hexdigest()] = data
+    return images
+
+
+def visible_text(content: object, *, images: bool = False, paste_ids: object = None) -> str:
+    """Visible text; `images` names a prompt's images where they sat.
+
+    A named image is uploaded once its prompt is saved. Images anywhere else,
+    and every other attachment, keep the omission notice.
+
+    Claude Code leaves `[Image #N]` in the text where an image was pasted and
+    puts the image itself after the text, its number in the record's
+    `imagePasteIds` (`paste_ids`). A named image takes its placeholder's place;
+    one with no placeholder stays where its block sat.
+    """
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         return ""
     parts = []
+    numbers = iter(paste_ids if isinstance(paste_ids, list) else ())
     for item in content:
         if not isinstance(item, dict):
             continue
@@ -135,8 +199,27 @@ def visible_text(content: object) -> str:
             item.get("text"), str
         ):
             parts.append(item["text"])
-        elif item.get("type") in {"image", "input_image", "image_url", "document", "audio"}:
-            parts.append("[Attachment omitted; original remains in the host conversation]")
+        elif item.get("type") in {
+            "image",
+            "input_image",
+            "local_image",
+            "image_url",
+            "document",
+            "audio",
+        }:
+            # Every pasted image has a number, whether or not it can be named.
+            number = next(numbers, None) if item.get("type") == "image" else None
+            data = image_bytes(item) if images else None
+            if data is None:
+                parts.append("[Attachment omitted; original remains in the host conversation]")
+                continue
+            name = f"![image](pensieve-image:{hashlib.sha256(data).hexdigest()})"
+            placeholder = f"[Image #{number}]"
+            at = next((i for i, part in enumerate(parts) if placeholder in part), None)
+            if at is None:
+                parts.append(name)
+            else:
+                parts[at] = parts[at].replace(placeholder, name, 1)
     return "\n".join(parts)
 
 
@@ -420,7 +503,7 @@ def normalise(
                 and isinstance(payload.get("turn_id"), str)
             ):
                 state["turn_id"] = payload["turn_id"]
-                text = visible_text(item.get("content"))
+                text = visible_text(item.get("content"), images=True)
                 return [prompt(state, text, payload["turn_id"])] if text else []
         if record.get("type") != "response_item":
             return result
@@ -515,7 +598,7 @@ def normalise(
         item for item in blocks if isinstance(item, dict) and item.get("type") == "tool_result"
     ]
     if not tool_results:
-        text = visible_text(content)
+        text = visible_text(content, images=True, paste_ids=record.get("imagePasteIds"))
         origin = record.get("origin")
         if isinstance(origin, dict) and origin.get("kind") == "task-notification":
             # A background task's completion notice starts a model turn with

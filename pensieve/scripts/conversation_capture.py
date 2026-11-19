@@ -26,7 +26,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from capture_adapters import aware_time, claude_call_contexts, normalise
+from capture_adapters import (
+    IMAGE_REFERENCE,
+    aware_time,
+    claude_call_contexts,
+    normalise,
+    prompt_images,
+)
 from capture_config import (
     credential_revocations,
     encoded,
@@ -684,6 +690,7 @@ def retire_segment(db, segment_id):
     db.execute("DELETE FROM anchors WHERE segment=?", (segment_id,))
     db.execute("DELETE FROM batches WHERE segment=?", (segment_id,))
     db.execute("UPDATE segments SET retired=1,title='' WHERE id=?", (segment_id,))
+    state["images"] = [i for i in state.get("images", []) if i["segment"] != segment_id]
     if state.get("title_segment") == segment_id:
         state.update(title="", title_segment=None)
     if state.get("segment") == segment_id or state.get("candidate_segment") == segment_id:
@@ -706,6 +713,7 @@ def flush(db, configured, client, session, endpoint, deadline):
             return
     upload_batches(db, configured, client, session, endpoint, deadline)
     replay_anchors(db, configured, client, session, endpoint, deadline)
+    upload_images(db, configured, client, session, endpoint, deadline)
 
 
 def replay_anchors(db, configured, client, session, endpoint, deadline):
@@ -800,13 +808,94 @@ def upload_batches(db, configured, client, session, endpoint, deadline):
                 "UPDATE segments SET expires_at=? WHERE id=?",
                 (outcome["expires_at"], segment["id"]),
             )
+            named = []
             for identity in json.loads(batch["event_ids"]):
+                # An image follows its prompt: named only once that is saved.
+                row = db.execute("SELECT body FROM events WHERE id=?", (identity,)).fetchone()
+                event = json.loads(row["body"]) if row else {}
+                if event.get("kind") == "user":
+                    named += [
+                        {"digest": digest, "segment": segment["id"], "event_id": identity}
+                        for digest in IMAGE_REFERENCE.findall(event["content"])
+                    ]
                 db.execute("DELETE FROM events WHERE id=?", (identity,))
             db.execute("DELETE FROM batches WHERE id=?", (batch["id"],))
+            if named:
+                state = load_state(db)
+                state["images"] = state.get("images", []) + named
+                save_state(db, state)
             db.commit()
             progressed = True
         if not progressed:
             break
+
+
+def send_image(image: bytes, key: str, endpoint: str, timeout: float) -> int | None:
+    """The service's answer to one image, or None when it could not be reached."""
+    request = Request(
+        endpoint,
+        data=image,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Authorization": "Bearer " + key,
+            "User-Agent": "Pensieve-Plugin-Capture/1.0",
+            HEADER: str(VERSION),
+        },
+        method="POST",
+    )
+    opener = build_opener(ProxyHandler({}), NoRedirects())
+    try:
+        with opener.open(request, timeout=max(0.05, timeout)) as response:
+            return response.status
+    except HTTPError as error:
+        return error.code
+    except (OSError, URLError):
+        return None
+
+
+def upload_images(db, configured, client, session, endpoint, deadline):
+    """Send the images saved prompts name, read again from the host transcript.
+
+    The spool holds only which image a saved prompt named, never its bytes: an
+    event's identity is its record's offset in the host transcript, so the
+    bytes are read from there when there is time to send them. An image the
+    service refuses, or whose record is gone, is forgotten; the saved prompt
+    keeps its reference, which reads as an omitted attachment.
+    """
+    endpoint = checked_endpoint(endpoint)
+    row = db.execute("SELECT body FROM state WHERE id=1").fetchone()
+    state = json.loads(row[0]) if row else {}
+    for named in state.get("images", []):
+        segment = db.execute(
+            "SELECT owner,context FROM segments WHERE id=? AND retired=0", (named["segment"],)
+        ).fetchone()
+        key = segment and key_for(configured, segment["owner"], segment["context"])
+        remaining = deadline - time.monotonic()
+        if remaining < 0.2 or not key:
+            return
+        image = None
+        try:
+            with open(state["path"], "rb") as handle:
+                handle.seek(int(named["event_id"].rsplit(":", 2)[1]))
+                record = json.loads(handle.readline(MAX_RECORD_BYTES + 1))
+            image = prompt_images(record, client).get(named["digest"])
+        except (KeyError, OSError, TypeError, ValueError):
+            pass
+        if image is not None:
+            status = send_image(
+                image,
+                key,
+                f"{endpoint}/images?client={client}&context_id={segment['context']}",
+                remaining,
+            )
+            if status not in {200, 410, 413, 422}:
+                # Unreachable, held or not yet deployed: keep it for a later hook.
+                return
+        db.execute("BEGIN IMMEDIATE")
+        current = load_state(db)
+        current["images"] = [i for i in current.get("images", []) if i != named]
+        save_state(db, current)
+        db.commit()
 
 
 def capture_session(

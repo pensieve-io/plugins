@@ -78,7 +78,18 @@ extracted company knowledge remains.
 - Tool names, inputs and visible text results. Codex function arguments and
   custom-tool input, and Claude `tool_use.input`, pass through the same redaction
   and truncation as message bodies. Missing input is not inferred from results.
-- Artifact references and attachment omission notices, without opening files.
+- The images a member put in a prompt: PNG, JPEG, GIF or WebP up to 8 MiB. The
+  prompt's text names each by the SHA-256 of its bytes, as
+  `![image](pensieve-image:<digest>)`, where the image sat. Claude Code leaves
+  `[Image #N]` where an image was pasted and records the image after the text,
+  so the name takes that placeholder's place. Once the service has
+  accepted that prompt, the bytes are read again from the host transcript (or,
+  for Codex, the image file its record names) and sent to
+  `/hooks/conversations/images`; the spool holds the name, never the bytes. An
+  image the service cannot take yet waits for a later hook; one it refuses, or
+  whose record is gone, is forgotten and reads as an omitted attachment.
+- Artifact references and omission notices for every other attachment, and for
+  images in tool results or replies, without opening files.
 
 Reasoning, system/developer instructions, hook payloads and compaction internals
 are excluded. Configured credentials and common secret patterns, including

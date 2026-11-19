@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 
-from capture_adapters import CaptureEvent, capture_id
+from capture_adapters import IMAGE_REFERENCE, CaptureEvent, capture_id
 from capture_config import encoded, key_for
 from capture_protocol import MAX_EVENT_CHARS
 
@@ -152,6 +152,7 @@ def discard_conversation(db, state: dict, reason: str) -> None:
     for table in ("events", "anchors", "batches"):
         db.execute(f"DELETE FROM {table}")
     db.execute("UPDATE segments SET retired=1,title=''")
+    state.pop("images", None)
     block(db, state, reason)
 
 
@@ -409,7 +410,8 @@ def apply_item(
             drop_held(db, state, abandon=True)
             return
     if item["kind"] == "user":
-        state["title"] = text[:200]
+        # A title is read as words: an image's name is not one.
+        state["title"] = IMAGE_REFERENCE.sub("[image]", text)[:200]
         state["title_segment"] = None
     if state.get("segment"):
         db.execute(
