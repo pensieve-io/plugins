@@ -80,7 +80,9 @@ extracted company knowledge remains.
   and truncation as message bodies. Missing input is not inferred from results.
 - The images a member put in a prompt: PNG, JPEG, GIF or WebP up to 8 MiB. The
   prompt's text names each by the SHA-256 of its bytes, as
-  `![image](pensieve-image:<digest>)`, where the image sat. Once the service has
+  `![image](pensieve-image:<digest>)`, where the image sat. Claude Code leaves
+  `[Image #N]` where an image was pasted and records the image after the text,
+  so the name takes that placeholder's place. Once the service has
   accepted that prompt, the bytes are read again from the host transcript (or,
   for Codex, the image file its record names) and sent to
   `/hooks/conversations/images`; the spool holds the name, never the bytes. An

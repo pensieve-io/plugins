@@ -175,17 +175,23 @@ def prompt_images(record: dict, client: str) -> dict[str, bytes]:
     return images
 
 
-def visible_text(content: object, *, images: bool = False) -> str:
+def visible_text(content: object, *, images: bool = False, paste_ids: object = None) -> str:
     """Visible text; `images` names a prompt's images where they sat.
 
     A named image is uploaded once its prompt is saved. Images anywhere else,
     and every other attachment, keep the omission notice.
+
+    Claude Code leaves `[Image #N]` in the text where an image was pasted and
+    puts the image itself after the text, its number in the record's
+    `imagePasteIds` (`paste_ids`). A named image takes its placeholder's place;
+    one with no placeholder stays where its block sat.
     """
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         return ""
     parts = []
+    numbers = iter(paste_ids if isinstance(paste_ids, list) else ())
     for item in content:
         if not isinstance(item, dict):
             continue
@@ -194,7 +200,13 @@ def visible_text(content: object, *, images: bool = False) -> str:
         ):
             parts.append(item["text"])
         elif images and (data := image_bytes(item)) is not None:
-            parts.append(f"![image](pensieve-image:{hashlib.sha256(data).hexdigest()})")
+            name = f"![image](pensieve-image:{hashlib.sha256(data).hexdigest()})"
+            placeholder = f"[Image #{next(numbers, None)}]"
+            at = next((i for i, part in enumerate(parts) if placeholder in part), None)
+            if at is None:
+                parts.append(name)
+            else:
+                parts[at] = parts[at].replace(placeholder, name, 1)
         elif item.get("type") in {
             "image",
             "input_image",
@@ -203,6 +215,7 @@ def visible_text(content: object, *, images: bool = False) -> str:
             "document",
             "audio",
         }:
+            next(numbers, None)
             parts.append("[Attachment omitted; original remains in the host conversation]")
     return "\n".join(parts)
 
@@ -582,7 +595,7 @@ def normalise(
         item for item in blocks if isinstance(item, dict) and item.get("type") == "tool_result"
     ]
     if not tool_results:
-        text = visible_text(content, images=True)
+        text = visible_text(content, images=True, paste_ids=record.get("imagePasteIds"))
         origin = record.get("origin")
         if isinstance(origin, dict) and origin.get("kind") == "task-notification":
             # A background task's completion notice starts a model turn with

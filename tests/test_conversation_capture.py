@@ -3523,3 +3523,34 @@ def test_only_a_prompts_own_hostable_images_are_named(tmp_path):
         + ")\n"
         + OMITTED
     )
+
+
+def test_a_pasted_image_is_named_where_it_was_pasted(tmp_path, monkeypatch):
+    second = PNG + b"2"
+    second_name = f"![image](pensieve-image:{hashlib.sha256(second).hexdigest()})"
+    path, _cfg, state, calls, run = setup(tmp_path, monkeypatch, client="claude")
+    monkeypatch.setattr(capture, "send_image", lambda *args: 200)
+    prompt = user("unused", client="claude")
+    prompt["imagePasteIds"] = [4, 5, 6]
+    prompt["message"]["content"] = [
+        {"type": "text", "text": "[Image #4] Compare this [Image #5] with [Image #9]."},
+        claude_image(),
+        claude_image(second),
+        claude_image(),
+    ]
+    append(path, prompt, hook_record(client="claude"), assistant("Done.", client="claude"))
+    run()
+    # Each image takes its own placeholder; one without a placeholder follows
+    # the text, and a number no image carries stays as typed.
+    assert events(calls)[0]["content"] == (
+        f"{PNG_REFERENCE} Compare this {second_name} with [Image #9].\n{PNG_REFERENCE}"
+    )
+    db = sqlite3.connect(next(state.glob("*.sqlite3")))
+    try:
+        assert (
+            db.execute("SELECT title FROM segments")
+            .fetchone()[0]
+            .startswith("[image] Compare this [image] with")
+        )
+    finally:
+        db.close()
