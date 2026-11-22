@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from capture_adapters import IMAGE_REFERENCE, CaptureEvent, capture_id
 from capture_config import encoded, key_for
 from capture_protocol import MAX_EVENT_CHARS
+from secret_masking import MASK, mask_secrets
 
 # Local exposure coverage, independent of the upload protocol. Increment when
 # previously consumed parent records could contain newly recognised exposure.
@@ -27,27 +28,16 @@ HELD_MAX_AGE = timedelta(days=7)
 INTERNAL_MARKER = re.compile(
     r"<!-- pensieve-(?:capture-context|capture-consent|capture-setup|delivery)\b.*?-->", re.DOTALL
 )
-SECRET = re.compile(
-    r"(?i)(\b(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|"
-    r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})|"
-    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|upload[_-]?key|poll[_-]?secret)"
-    r"[\"']?\s*[=:]\s*[\"']?[^\s\"',}]+)"
-)
 
 
 def clean_content(text: str, keys: list[str]) -> tuple[str, bool]:
     text = INTERNAL_MARKER.sub("", text)
     for key in keys:
-        text = text.replace(key, "[REDACTED_SECRET]")
-    text = SECRET.sub("[REDACTED_SECRET]", text)
-    # Do not upload inline binary attachments or PEM private keys.
-    text = re.sub(r"data:[^\s]+;base64,[A-Za-z0-9+/=]+", "[Inline attachment omitted]", text)
-    text = re.sub(
-        r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
-        "[REDACTED_SECRET]",
-        text,
-        flags=re.DOTALL,
-    )
+        text = text.replace(key, MASK)
+    # Do not upload inline binary attachments. The media type is bounded so a
+    # long run of `data:` cannot make the hook rescan it.
+    text = re.sub(r"data:[^\s,]{0,200};base64,[A-Za-z0-9+/=]+", "[Inline attachment omitted]", text)
+    text = mask_secrets(text)
     if len(text) > MAX_EVENT_CHARS:
         suffix = "\n[Content truncated by Pensieve capture]"
         return text[: MAX_EVENT_CHARS - len(suffix)] + suffix, True
