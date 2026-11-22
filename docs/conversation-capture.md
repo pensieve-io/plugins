@@ -92,9 +92,14 @@ extracted company knowledge remains.
   images in tool results or replies, without opening files.
 
 Reasoning, system/developer instructions, hook payloads and compaction internals
-are excluded. Configured credentials and common secret patterns, including
-quoted JSON credential fields, are redacted; arbitrary prose can still contain
-secrets. Events are limited to 32,000 characters with explicit truncation;
+are excluded. Credentials are masked on the member's machine before anything
+is queued: configured upload keys, known provider formats (adapted from
+Gitleaks via OpenCrawl; see `pensieve/THIRD_PARTY_NOTICES.md`), private keys,
+JWTs, `Bearer`/`Basic` values, passwords in URLs, and values held by
+credential-named fields or flags, including inside JSON encoded in tool
+arguments. JSON nested too deeply to check is withheld whole. There is no
+entropy rule, so an unknown format in ordinary prose can still contain a
+secret. Events are limited to 32,000 characters with explicit truncation;
 batches hold at most 100 events / 256 KiB. Raw transcript records over 1 MiB
 are skipped without decoding their contents. The helper checkpoints that skip
 within its scan budget, even across hook runs, then waits for a fresh user prompt
