@@ -34,7 +34,9 @@ on a 422 the script asks once more in the same hook run without it, keeping
 `client`, `session_id`, `event`,
 `delivery_id`, `force_refresh`, `source` and `turn_id`. The retry uses the
 remainder of a 9-second budget inside the 10-second hook timeout, and is skipped
-when less than half a second remains.
+when less than half a second remains. The briefing request itself waits up to 6 seconds
+(`BRIEFING_TIMEOUT_SECONDS`), longer than the hook's other 3-second calls because
+it renders the company primer, and never past what that budget has left.
 
 The HTTP response is hook JSON containing `hookSpecificOutput.hookEventName`
 and `hookSpecificOutput.additionalContext`. A root-rendering fallback also sets

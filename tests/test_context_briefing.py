@@ -444,7 +444,7 @@ def test_an_older_service_is_asked_again_without_the_fields_it_refuses(setup, mo
         "turn_id",
     }
     assert all(retry[field] == first[field] for field in retry)
-    assert 0 < timeout <= briefing.HTTP_TIMEOUT_SECONDS
+    assert 0 < timeout <= briefing.BRIEFING_TIMEOUT_SECONDS
 
 
 def test_a_422_is_retried_once_and_only_within_the_hook_budget(setup, monkeypatch):
@@ -460,3 +460,24 @@ def test_a_422_is_retried_once_and_only_within_the_hook_budget(setup, monkeypatc
     monkeypatch.setattr(briefing, "HOOK_BUDGET_SECONDS", 0)
     briefing.run_hook(payload(), "codex", path)
     assert len(sent) == 1
+
+
+def test_the_briefing_waits_longer_than_other_calls_within_the_hook_budget(setup, monkeypatch):
+    path, _calls = setup
+    timeouts = []
+
+    def request(_endpoint, _key, body, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return 200, {
+            "hookSpecificOutput": {"hookEventName": body["event"], "additionalContext": ""}
+        }
+
+    monkeypatch.setattr(briefing, "request", request)
+    briefing.run_hook(payload(), "codex", path)
+    assert timeouts == [briefing.BRIEFING_TIMEOUT_SECONDS]
+    assert briefing.HTTP_TIMEOUT_SECONDS < briefing.BRIEFING_TIMEOUT_SECONDS
+    assert briefing.BRIEFING_TIMEOUT_SECONDS < briefing.HOOK_BUDGET_SECONDS
+    timeouts.clear()
+    monkeypatch.setattr(briefing, "HOOK_BUDGET_SECONDS", 0)
+    briefing.run_hook(payload(), "codex", path)
+    assert timeouts == [briefing.MIN_RETRY_SECONDS]

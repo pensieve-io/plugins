@@ -64,6 +64,11 @@ MAX_RESPONSE_BYTES = 32 * 1024
 HOOK_BUDGET_SECONDS = 9
 MIN_RETRY_SECONDS = 0.5
 HTTP_TIMEOUT_SECONDS = 3
+# The briefing renders the company primer, so it may take longer than the other
+# calls: on 24 November 2026 about 5% of production briefings were still running
+# at 3 seconds. It waits up to this long, within what the hook budget has left
+# after the connection lookup and receipt.
+BRIEFING_TIMEOUT_SECONDS = 6
 
 
 def checked_endpoint(value: str) -> str:
@@ -251,14 +256,20 @@ def run_hook(
         if turn:
             body["turn_id"] = turn
         body["hook_revision"] = HOOK_REVISION
-        code, result = request(endpoint, key, body)
+        remaining = started + HOOK_BUDGET_SECONDS - time.monotonic()
+        code, result = request(
+            endpoint,
+            key,
+            body,
+            timeout=min(BRIEFING_TIMEOUT_SECONDS, max(remaining, MIN_RETRY_SECONDS)),
+        )
         remaining = started + HOOK_BUDGET_SECONDS - time.monotonic()
         if code == 422 and remaining >= MIN_RETRY_SECONDS:
             # An older service refuses fields it does not know; ask once more
             # with only the fields every service accepts.
             body = {k: v for k, v in body.items() if k not in OPTIONAL_BRIEFING_FIELDS}
             code, result = request(
-                endpoint, key, body, timeout=min(HTTP_TIMEOUT_SECONDS, remaining)
+                endpoint, key, body, timeout=min(BRIEFING_TIMEOUT_SECONDS, remaining)
             )
         if code == 200 and isinstance(result, dict):
             available = result.pop("briefing_available", True) is True
