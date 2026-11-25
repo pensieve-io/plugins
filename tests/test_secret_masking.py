@@ -233,3 +233,8 @@ def test_the_shared_formats_file_names_and_compiles_every_rule():
 def test_shared_formats_mask_markdown_escaped_underscores():
     escaped = "sk\\_live\\_" + "h" * 24
     assert mask_secrets(f"key {escaped} here") == f"key {MASK} here"
+
+
+def test_a_full_stop_after_a_doppler_token_survives():
+    token = "dp.st.prd_backend." + "t" * 40
+    assert mask_secrets(f"Use {token}. Then rotate.") == f"Use {MASK}. Then rotate."
