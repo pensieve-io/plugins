@@ -111,10 +111,40 @@ keep their original bytes and attribution.
 Authenticated version-2 prompt markers carry account, client, conversation,
 context and current consent generation (or null when disabled). Only recognised
 native hook records supply attribution. Codex also matches its turn ID. Only an
-observed user prompt may wait provisionally for its own marker;
-ambiguous/unassignable work is discarded.
+observed user prompt may wait for its own marker: provisionally, or from
+Pensieve when its briefing failed (below). Other unassignable work is discarded.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
+
+### A turn whose briefing failed
+
+A prompt's marker arrives with its briefing. When the briefing fails (Pensieve
+was unreachable or too slow for the hook), the turn's answer comes before any
+marker. That turn is not discarded on the spot: its events wait in the private
+spool, unsent, while the capture hook asks `/hooks/marker` for the marker the
+briefing would have carried. It asks at the turn's `Stop` and, until Pensieve
+answers, at every later capture hook (an interrupted turn has no `Stop`), the
+last time just before the next prompt is read. The answer passes every check a
+prompt marker does, against the keys as they were when the turn began, so a key
+changed or removed since still refuses it. The route records nothing and names
+only a destination the conversation already has; a turn with none is held like
+any other (below).
+
+A late marker states sharing as it is when asked, not when the turn was
+written. One whose consent generation differs from the conversation's newest
+marker for the same account and company saves nothing and is not counted:
+sharing changed in between, perhaps while the turn was written. A
+conversation's first turn has no earlier marker to differ from.
+
+Only the turn awaiting it can take that marker. Codex asks with the turn's own
+ID, a marker written into the transcript after the turn's first answer is still
+ignored, and no later turn can attribute an earlier one. The turn is given up
+when Pensieve answers without a marker (or with another Codex turn's), when
+there is no installation proof to ask with, when the next prompt is read before
+an answer, past 2 MiB unsent, or when the spool lacks room. It is counted in
+the spool with any held turns dropped with it, `--status` reports it, and the
+next prompt carries one notice when the conversation's newest marker shows
+sharing on.
 
 ### Turns before the first company
 
@@ -136,13 +166,14 @@ Held turns are discarded, never saved, when:
 - the next marker belongs to another account;
 - a second company appears, which stops the conversation as before;
 - an upload key is removed, changed or reset, or saving is paused on the machine;
-- any boundary that already blocks capture occurs (an unmarked turn's output,
-  an oversized record, an unknown boundary);
+- any boundary that already blocks capture occurs (a turn given up because no
+  marker reached it, an oversized record, an unknown boundary);
 - they exceed 2 MiB, after which that conversation holds nothing further;
 - the conversation's next marked turn comes more than seven days after the
   newest held one. Later turns may be held again.
 
-A turn with no marker of its own is still never held or backfilled. Nothing
+A turn with no marker of its own is still never held or backfilled; one that
+Pensieve later gave the marker its briefing missed has one. Nothing
 leaves the machine before a destination and an enabled consent generation
 exist, and the server checks both again on upload. Held turns upload at the
 first prompt after the conversation names its company, so a conversation that
@@ -277,8 +308,9 @@ Cowork, ordinary chat tabs, Windows and ephemeral sessions without a local
 transcript require separate verification. MCP connectivity does not prove capture.
 
 Package tests cover credential import, private storage, client/consent boundaries,
-retry, deletion, indefinite retention, held turns before the first company and
-no-backfill of unmarked or disabled work. Synthetic installed-client probes are
+retry, deletion, indefinite retention, held turns before the first company,
+late markers for a failed briefing's turn and no backfill from a later turn's
+marker or of disabled work. Synthetic installed-client probes are
 in [client-probes.md](client-probes.md). Live MCP sign-in registration, the sharing page, Connector settings, fresh installation, updates and
 resumed sessions remain release checks.
 The guarded helper may be merged before the companion application release:
@@ -292,8 +324,9 @@ write links, extraction and naming remain application responsibilities.
 ### Capture state and saving status
 
 `capture_adapters.py` converts native records into one typed event stream;
-`capture_state.py` owns the five phases `ready`, `awaiting_attribution`, `holding`,
-`capturing` and `blocked`. Native tool/turn bookkeeping is separate from file positions,
+`capture_state.py` owns the six phases `ready`, `awaiting_attribution`, `unmarked`
+(answered before any marker, waiting for Pensieve to give one), `holding`, `capturing` and
+`blocked`. Native tool/turn bookkeeping is separate from file positions,
 credential cutovers and durable SQLite events/batches. Local legacy flags are
 migrated without rewriting queued bytes or identities.
 
@@ -330,7 +363,9 @@ python3 pensieve/scripts/conversation_capture.py --client codex --status SESSION
 The result contains per-segment context, queued count, last attempted delivery
 status and last validated acknowledgement time (up to 100 segments).
 `held_turns` counts marked turns waiting for the conversation's first company
-(see [turns before the first company](#turns-before-the-first-company)). A stopped
+(see [turns before the first company](#turns-before-the-first-company)), and
+`unsaved_turns` counts turns given up because no marker reached them (see
+[a turn whose briefing failed](#a-turn-whose-briefing-failed)). A stopped
 or blocked conversation adds `stopped` and `blocked_reason` (for example
 `unproven_start`, `conversation_stopped` or `multiple_contexts`), `health`
 carries the client's upload health below, and `paused` / `paused_at` report a
@@ -379,8 +414,11 @@ notice saying why, how to fix it and the `--status` command above:
 | `paused` | Saving is paused on this machine, and the conversation's newest marker shows sharing on |
 
 Each reason is shown at most once per conversation, recorded in that
-conversation's spool. A stop the conversation caused itself, such as using a
-second company, adds no notice.
+conversation's spool. When no reason applies but turns were given up since the
+last notice ([a turn whose briefing failed](#a-turn-whose-briefing-failed)), and
+the conversation's newest marker shows sharing on, the notice instead says how
+many earlier turns Pensieve could not be reached in time to save. A stop the
+conversation caused itself, such as using a second company, adds no notice.
 
 #### Pausing one conversation
 
@@ -434,7 +472,8 @@ per fact: `Saving` (`on`, `off` or
 `paused for this conversation`), then only those that apply: `Reason` (paused
 on this machine, stopped earlier, sharing off, or the service holding or
 refusing uploads), `Resume`, `Context` (`Name - id`, or the id alone until a
-briefing has delivered the name; see [hook-protocol.md](hook-protocol.md)), `Last saved`, `Queued`, `Uploads` (a
+briefing has delivered the name; see [hook-protocol.md](hook-protocol.md)), `Last saved`, `Queued`, `Not saved`
+(turns given up because Pensieve could not be reached in time), `Uploads` (a
 run of failed uploads) and `Transcript`, the conversation's link in Pensieve,
 shown once anything has been saved whatever its state now. It
 reads the same local state as `--status` and the transcript's newest marker,

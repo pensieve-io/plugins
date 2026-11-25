@@ -98,15 +98,14 @@ def due(branches: dict, branch: str, now: float) -> bool:
 def briefing_key(config: Path, client: str) -> str | None:
     """The installation's briefing credential, once its briefing hook has connected."""
     from capture_config import load_config
-    from plugin_connection import connected_profile
-    from plugin_headers import HEADER, header_path, read_headers
+    from plugin_connection import connected_profile, installation_proof
 
+    token = installation_proof(config, client)
     try:
-        token = read_headers(header_path(config, client), client)[HEADER].split(" ", 1)[1]
         profiles = load_config(config, client)["profiles"]
     except (OSError, ValueError, KeyError):
         return None
-    return token if connected_profile(profiles, client, token) else None
+    return token if token and connected_profile(profiles, client, token) else None
 
 
 def answer(code: int | str, result: object) -> tuple[str, dict | None]:

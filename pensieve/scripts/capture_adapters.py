@@ -126,6 +126,14 @@ def parse_marker(text: str, client: str, session: str) -> dict | None:
     return marker
 
 
+def marker_from_text(text: str, client: str, session: str) -> dict | None:
+    """A turn's marker, with the sharing choice stated beside it, from one hook's text."""
+    marker = parse_marker(text, client, session)
+    # The choice only decides whether an unshared turn may wait; it is never an
+    # upload scope, which stays the marker's own generation.
+    return dict(marker, consent=sharing_choice(text, marker)) if marker else None
+
+
 # The service hosts PNG, JPEG, GIF and WebP up to this size; anything else
 # keeps the omission notice rather than naming bytes it would refuse.
 IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -413,11 +421,7 @@ def normalise(
     # Context receipts require accepted hook provenance, never text quoted by
     # a user, assistant, tool, hook error, or nested compaction history.
     for text in accepted_contexts(record, session, session, client):
-        marker = parse_marker(text, client, session)
-        if marker:
-            # The choice only decides whether an unshared turn may wait; it is
-            # never an upload scope, which stays the marker's own generation.
-            marker = dict(marker, consent=sharing_choice(text, marker))
+        if marker := marker_from_text(text, client, session):
             result.append({"kind": "attribution", "marker": marker})
     if result:
         return result
