@@ -169,6 +169,17 @@ only marker kind; tool results never carry one. Markers reflect the
 authenticated snapshot of that exact call. They never contain credentials. The
 helper does not treat a quoted marker as authorization.
 
+A turn whose briefing failed asks again at its own `Stop`:
+`POST https://mcp.pensieve.uk/hooks/marker` with the installation proof as
+bearer and `{"client", "session_id", "turn_id"?}` (Codex sends its native turn
+ID when it is a UUID). HTTP 200 returns `{"marker": "..."}`, the same marker
+and consent comment a briefing would carry; 204 means none may be given (another
+account briefed the conversation, or it lies outside a scoped credential). The
+route records no exposure, ownership or delivery, so the marker's `context_id`
+names only a destination the conversation already has. Any other answer,
+including 404 from an older service, leaves the turn unsaved. See
+[a turn whose briefing failed](conversation-capture.md#a-turn-whose-briefing-failed).
+
 Command capture hooks establish a baseline at `SessionStart`, checkpoint at
 `UserPromptSubmit` and `Stop`, and attempt a bounded flush at `SessionEnd`.
 The last hook has a one-second configured timeout on Claude and three seconds on Codex. Same-event handlers may

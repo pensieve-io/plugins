@@ -23,13 +23,14 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from capture_adapters import (
     IMAGE_REFERENCE,
     aware_time,
     claude_call_contexts,
+    marker_from_text,
     normalise,
     prompt_images,
 )
@@ -47,7 +48,9 @@ from capture_pause import conversation_command, pause_state
 from capture_protocol import HEADER, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, VERSION, check
 from capture_state import (
     CONTEXT_BOUNDARY_VERSION,
+    abandon_unmarked,
     apply_item,
+    attribute_late,
     block,
     discard_conversation,
     drop_held,
@@ -68,6 +71,9 @@ MAX_SCAN_BYTES = 4 * 1024 * 1024
 SUBAGENT_IDENTITY_BYTES = 4096
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+# A turn whose briefing failed asks once, at its Stop, for the marker it missed.
+# Bounded below the Stop hook's budget so its uploads still have time.
+MARKER_TIMEOUT_SECONDS = 1.0
 
 
 def connect_state(root: Path, client: str, session: str) -> sqlite3.Connection:
@@ -380,12 +386,14 @@ def scan(
                 items = normalise(
                     record, client, session, state["adapter"], state.get("capture_turn_id")
                 )
-                discards_unmarked = (
-                    state.get("phase") == "awaiting_attribution"
+                # An answer before its prompt's marker: the turn waits, unsent,
+                # for the marker its Stop asks for (`settle_unmarked`).
+                unmarked = (
+                    state.get("phase") in {"awaiting_attribution", "unmarked"}
                     and any(item["kind"] not in {"attribution", "user"} for item in items)
                     and not any(item["kind"] == "attribution" for item in items)
                 )
-                if items and not discards_unmarked:
+                if items:
                     # Reserve room for the exact-byte HTTP outbox even when
                     # pending content has filled its budget. Otherwise creating
                     # the batch needed to drain the spool could itself fail.
@@ -396,7 +404,14 @@ def scan(
                     limit_pages = db.execute("PRAGMA max_page_count").fetchone()[0]
                     reserve = min(MAX_BATCH_BYTES * 2, limit_pages * 4096 // 3)
                     estimate = sum(len(encoded(item)) + 4096 for item in items)
-                    if used_pages * 4096 + estimate > limit_pages * 4096 - reserve:
+                    full = used_pages * 4096 + estimate > limit_pages * 4096 - reserve
+                    if full and unmarked:
+                        # A turn waiting for its marker never takes the room
+                        # queued uploads need: it is given up instead.
+                        if state.get("phase") == "awaiting_attribution":
+                            state.update(phase="unmarked", unmarked_bytes=0)
+                        abandon_unmarked(db, state)
+                    elif full:
                         state.clear()
                         state.update(previous_state)
                         if state["offset"] > initial_offset:
@@ -445,7 +460,9 @@ def scan(
                 for cutover in state.get(cutovers, [])
                 if cutover["offset"] > state["offset"]
                 or (
-                    state.get("phase") == "awaiting_attribution"
+                    # A turn still waiting for its marker, in the transcript or
+                    # at its Stop, is judged against keys as they were at its start.
+                    state.get("phase") in {"awaiting_attribution", "unmarked"}
                     and state.get("turn_source_offset", 0) < cutover["offset"]
                 )
             ]
@@ -660,6 +677,74 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | str:
     if not accepted:
         return unavailable("invalid_receipt")
     return {"status": "accepted", "expires_at": result["expires_at"]}
+
+
+def marker_endpoint(upload_endpoint: str) -> str:
+    """The marker route beside the upload route, so a loopback fixture serves both."""
+    return urlunsplit(urlsplit(checked_endpoint(upload_endpoint))._replace(path="/hooks/marker"))
+
+
+def marker_token(config: Path, client: str) -> str | None:
+    """The installation proof the briefing hook sends, read without ever creating one."""
+    from plugin_headers import HEADER as PLUGIN_HEADER
+    from plugin_headers import header_path, read_headers
+
+    try:
+        return read_headers(header_path(config, client), client)[PLUGIN_HEADER].split(" ", 1)[1]
+    except (OSError, ValueError):
+        return None
+
+
+def fetch_marker(
+    endpoint: str, token: str, client: str, session: str, turn_id: str | None, timeout: float
+) -> str | None:
+    """The marker this turn's briefing would have carried, or None when none is given."""
+    body = {"client": client, "session_id": session, **({"turn_id": turn_id} if turn_id else {})}
+    try:
+        request = Request(
+            marker_endpoint(endpoint),
+            data=json.dumps(body).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token,
+                "User-Agent": "Pensieve-Plugin-Capture/1.0",
+            },
+            method="POST",
+        )
+        opener = build_opener(ProxyHandler({}), NoRedirects())
+        with opener.open(request, timeout=timeout) as response:
+            # 204: this conversation may not be saved under this credential.
+            result = json.loads(response.read(8193)) if response.status == 200 else None
+    except (OSError, ValueError):
+        return None  # An outage, an older service without the route, or a refused key.
+    marker = result.get("marker") if isinstance(result, dict) else None
+    return marker if isinstance(marker, str) else None
+
+
+def settle_unmarked(db, state, client, session, configured, endpoint, token, deadline) -> None:
+    """At a turn's Stop, attribute it with the marker it missed, or give it up.
+
+    Nothing later may attribute it: the next prompt's marker belongs to the next
+    turn. So a turn whose briefing and Stop both failed to reach Pensieve is
+    counted as unsaved here rather than waiting for a marker that cannot come.
+    """
+    if state.get("phase") != "unmarked":
+        return
+    remaining = deadline - time.monotonic()
+    if token and remaining > 0.2:
+        turn = (state.get("adapter") or {}).get("turn_id") if client == "codex" else None
+        text = fetch_marker(
+            endpoint,
+            token,
+            client,
+            session,
+            conversation_id(turn),
+            min(MARKER_TIMEOUT_SECONDS, remaining / 2),
+        )
+        marker = marker_from_text(text, client, session) if text else None
+        if marker and attribute_late(db, state, marker, client, session, configured):
+            return
+    abandon_unmarked(db, state)
 
 
 def health_outcome(outcome: object) -> str:
@@ -909,8 +994,14 @@ def capture_session(
     *,
     allow_new_file=False,
     recover=False,
+    turn_ended=False,
+    marker_key=None,
 ):
-    """Resume one known spool, preserving its original ownership and identities."""
+    """Resume one known spool, preserving its original ownership and identities.
+
+    ``turn_ended`` is a Stop: the turn just read either takes the marker it
+    missed (``marker_key`` asks for it) or is given up.
+    """
     source_error = None
     # A second hook must not append unverified parent events between subagent
     # observation and batch creation. Recovery uses this same nonblocking lock.
@@ -963,6 +1054,10 @@ def capture_session(
                     deadline,
                     allow_new_file=allow_new_file,
                 )
+                if turn_ended:
+                    settle_unmarked(
+                        db, state, client, session, configured, endpoint, marker_key, deadline
+                    )
             except (OSError, ValueError, sqlite3.DatabaseError) as exc:
                 # Loss of the source must not strand already-durable uploads.
                 # Roll back this scan and flush only the previously committed
@@ -1102,6 +1197,8 @@ def run_hook(
         deadline - (0.6 if ordinary else 0),
         allow_new_file=event == "SessionStart"
         and payload.get("source") in {None, "startup", "clear"},
+        turn_ended=event == "Stop",
+        marker_key=marker_token(config, client) if event == "Stop" else None,
     )
     notice = None
     # A failed scan prints nothing, so its notice waits for a prompt that can show it.
@@ -1260,6 +1357,8 @@ def conversation_status(
         lines["Last saved"] = newest_save.strftime("%Y-%m-%d %H:%M UTC")
     if queued:
         lines["Queued"] = f"{queued} {'entry' if queued == 1 else 'entries'}"
+    if status.get("unsaved_turns"):
+        lines["Not saved"] = unsaved_turns_text(status["unsaved_turns"])
     # Health counts every conversation's uploads; only this one's failing is news here.
     if (
         not unsaved
@@ -1401,18 +1500,39 @@ def conversation_notice(
                 and not sharing_enabled(payload.get("transcript_path"), client, session)
             )
         ):
-            db.rollback()
-            return None
+            # Saving is on, but a turn since the last notice was given up.
+            unsaved = 0 if paused else state.get("unsaved_turns", 0)
+            missed = unsaved - state.get("unsaved_noticed", 0)
+            if missed <= 0:
+                db.rollback()
+                return None
+            state["unsaved_noticed"] = unsaved
+            save_state(db, state)
+            db.commit()
+            return (
+                f"Pensieve did not save {unsaved_turns_text(missed)}. Later turns are saved as "
+                f"usual. Tell the user if it matters to them; {status_hint(client, session)}."
+            )
         state["notices_shown"] = [*shown, reason]
         save_state(db, state)
         db.commit()
     why = NOTICES[reason].format(failures=(health or {}).get("consecutive_failures"))
-    script = Path(__file__).resolve()
     return (
         f"Pensieve is not saving this conversation's transcript: {why}. Tell the user if it "
-        f'matters to them; `python3 "{script}" --client {client} --status {session}` shows '
-        "the saving status."
+        f"matters to them; {status_hint(client, session)}."
     )
+
+
+def status_hint(client: str, session: str) -> str:
+    script = Path(__file__).resolve()
+    return f'`python3 "{script}" --client {client} --status {session}` shows the saving status'
+
+
+def unsaved_turns_text(count: int) -> str:
+    """Why turns were given up, for the notice and the status command alike."""
+    if count == 1:
+        return "1 earlier turn of this conversation: its briefing failed and could not be retried"
+    return f"{count} earlier turns of this conversation: their briefings failed and could not be retried"
 
 
 def saving_status(root: Path, client: str, session: str) -> dict:
@@ -1471,6 +1591,9 @@ def spool_status(root: Path, client: str, session: str) -> dict:
         if isinstance(state, dict) and state.get("held_turns"):
             # Marked turns waiting, unsent, for the conversation's first company.
             result["held_turns"] = len(state["held_turns"])
+        if isinstance(state, dict) and state.get("unsaved_turns"):
+            # Turns given up because Pensieve could not be reached before they ended.
+            result["unsaved_turns"] = state["unsaved_turns"]
         return result
     finally:
         db.close()

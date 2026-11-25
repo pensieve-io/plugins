@@ -113,6 +113,25 @@ context and current consent generation (or null when disabled). Only recognised
 native hook records supply attribution. Codex also matches its turn ID. Only an
 observed user prompt may wait provisionally for its own marker;
 ambiguous/unassignable work is discarded.
+
+### A turn whose briefing failed
+
+A prompt's marker arrives with its briefing. When the briefing fails (Pensieve
+was unreachable or too slow for the hook), the turn's answer comes before any
+marker. That turn is not discarded on the spot: its events wait in the private
+spool, unsent, and at the turn's own `Stop` the capture hook asks
+`/hooks/marker` for the marker the briefing would have carried. The answer
+passes every check a prompt marker does, against the keys as they were when the
+turn began, so a key changed or removed since still refuses it. The route
+records nothing and names only a destination the conversation already has; a
+turn with none is held like any other (below).
+
+Only the turn awaiting it can take that marker. A marker written into the
+transcript after the turn's first answer is still ignored, and no later turn
+can attribute an earlier one. A turn its `Stop` cannot attribute, one with no
+installation proof to ask with, or one past 2 MiB unsent is given up: it is
+counted in the spool, `--status` reports it, and the next prompt carries one
+notice.
 Codex code mode uses native completed MCP-call records and omits combined
 `exec`/`wait` output that could span contexts.
 
@@ -136,13 +155,14 @@ Held turns are discarded, never saved, when:
 - the next marker belongs to another account;
 - a second company appears, which stops the conversation as before;
 - an upload key is removed, changed or reset, or saving is paused on the machine;
-- any boundary that already blocks capture occurs (an unmarked turn's output,
-  an oversized record, an unknown boundary);
+- any boundary that already blocks capture occurs (a turn given up because no
+  marker reached it, an oversized record, an unknown boundary);
 - they exceed 2 MiB, after which that conversation holds nothing further;
 - the conversation's next marked turn comes more than seven days after the
   newest held one. Later turns may be held again.
 
-A turn with no marker of its own is still never held or backfilled. Nothing
+A turn with no marker of its own is still never held or backfilled; one whose
+`Stop` fetched the marker its briefing missed has one. Nothing
 leaves the machine before a destination and an enabled consent generation
 exist, and the server checks both again on upload. Held turns upload at the
 first prompt after the conversation names its company, so a conversation that
@@ -292,8 +312,9 @@ write links, extraction and naming remain application responsibilities.
 ### Capture state and saving status
 
 `capture_adapters.py` converts native records into one typed event stream;
-`capture_state.py` owns the five phases `ready`, `awaiting_attribution`, `holding`,
-`capturing` and `blocked`. Native tool/turn bookkeeping is separate from file positions,
+`capture_state.py` owns the six phases `ready`, `awaiting_attribution`, `unmarked`
+(answered before any marker, waiting for its `Stop`), `holding`, `capturing` and
+`blocked`. Native tool/turn bookkeeping is separate from file positions,
 credential cutovers and durable SQLite events/batches. Local legacy flags are
 migrated without rewriting queued bytes or identities.
 
@@ -330,7 +351,9 @@ python3 pensieve/scripts/conversation_capture.py --client codex --status SESSION
 The result contains per-segment context, queued count, last attempted delivery
 status and last validated acknowledgement time (up to 100 segments).
 `held_turns` counts marked turns waiting for the conversation's first company
-(see [turns before the first company](#turns-before-the-first-company)). A stopped
+(see [turns before the first company](#turns-before-the-first-company)), and
+`unsaved_turns` counts turns given up because no marker reached them (see
+[a turn whose briefing failed](#a-turn-whose-briefing-failed)). A stopped
 or blocked conversation adds `stopped` and `blocked_reason` (for example
 `unproven_start`, `conversation_stopped` or `multiple_contexts`), `health`
 carries the client's upload health below, and `paused` / `paused_at` report a
@@ -379,7 +402,9 @@ notice saying why, how to fix it and the `--status` command above:
 | `paused` | Saving is paused on this machine, and the conversation's newest marker shows sharing on |
 
 Each reason is shown at most once per conversation, recorded in that
-conversation's spool. A stop the conversation caused itself, such as using a
+conversation's spool. When saving is on but a turn was given up since the last
+notice ([a turn whose briefing failed](#a-turn-whose-briefing-failed)), the
+notice says how many earlier turns were not saved instead. A stop the conversation caused itself, such as using a
 second company, adds no notice.
 
 #### Pausing one conversation

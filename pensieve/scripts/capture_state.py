@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from capture_adapters import IMAGE_REFERENCE, CaptureEvent, capture_id
 from capture_config import encoded, key_for
@@ -24,6 +24,10 @@ HELD_LIMIT_BYTES = 2 * 1024 * 1024
 # conversation raises no event, so only the gap can show that one resumed later
 # is no longer the conversation in progress.
 HELD_MAX_AGE = timedelta(days=7)
+# A turn whose briefing never arrived keeps its events in the private spool
+# until its own Stop asks Pensieve for the marker it missed. Past this many
+# bytes it is given up early, so one long unmarked turn cannot fill the spool.
+UNMARKED_LIMIT_BYTES = 2 * 1024 * 1024
 
 INTERNAL_MARKER = re.compile(
     r"<!-- pensieve-(?:capture-context|capture-consent|capture-setup|delivery)\b.*?-->", re.DOTALL
@@ -97,6 +101,50 @@ def block(db, state: dict, reason: str) -> None:
         title="",
         title_segment=None,
     )
+
+
+def abandon_unmarked(db, state: dict) -> None:
+    """Give up a turn whose marker never came: count it, and require a fresh marker.
+
+    The count is what `--status` and the next prompt's notice report, since an
+    unsaved turn otherwise leaves no trace once later turns save again.
+    """
+    if state.get("phase") != "unmarked":
+        return
+    state.pop("unmarked_bytes", None)
+    state["unsaved_turns"] = state.get("unsaved_turns", 0) + 1
+    block(db, state, "missing_attribution")
+
+
+def attribute_late(db, state: dict, marker: dict, client, session, configured) -> bool:
+    """Attribute the unmarked turn with the marker Pensieve gave for it at its own Stop.
+
+    The marker passes every check a prompt's own marker does, against the
+    turn's starting position, so a key changed or removed since the prompt was
+    written still refuses it. Only the turn awaiting it can take it: a later
+    turn never authorises an earlier one, and a transcript marker that arrives
+    after the turn's first answer is still ignored.
+    """
+    if state.get("phase") != "unmarked" or state.get("capture_stopped"):
+        return False
+    waited = state.pop("unmarked_bytes", 0)
+    state["phase"] = "awaiting_attribution"
+    apply_item(
+        db,
+        state,
+        {"kind": "attribution", "marker": marker},
+        f"{state.get('turn_group')}:late",
+        datetime.now(timezone.utc).isoformat(),
+        client,
+        session,
+        configured,
+        False,
+        source_offset=state.get("turn_source_offset", 0),
+    )
+    if state.get("phase") == "awaiting_attribution":
+        state.update(phase="unmarked", unmarked_bytes=waited)
+        return False
+    return state.get("phase") in {"capturing", "holding"}
 
 
 def withdraw_turn(db, state: dict) -> None:
@@ -201,6 +249,8 @@ def apply_item(
         record_context_use(db, state, item["context_id"])
         return
     if item["kind"] == "user":
+        # The previous turn's Stop never attributed it: it is not saved.
+        abandon_unmarked(db, state)
         state.pop("blocked_reason", None)
         if state.get("phase") == "awaiting_attribution":
             state["tail"] = None
@@ -347,8 +397,10 @@ def apply_item(
     if scope and not scope_authorised(state, configured, scope[0], scope[1], source_offset):
         block(db, state, "credential_changed")
     if item["kind"] != "user" and state.get("phase") == "awaiting_attribution":
-        block(db, state, "missing_attribution")
-    if state.get("phase") not in {"capturing", "awaiting_attribution", "holding"}:
+        # The prompt's marker did not come before its answer, so its briefing
+        # failed. The turn waits, unsent, for the marker its Stop asks for.
+        state.update(phase="unmarked", unmarked_bytes=0)
+    if state.get("phase") not in {"capturing", "awaiting_attribution", "holding", "unmarked"}:
         return
     # Only the current user prompt may wait provisionally for its own receipt.
     # Known disabled scopes never retain transcript text; a turn held for the
@@ -398,6 +450,11 @@ def apply_item(
         state["held_bytes"] = state.get("held_bytes", 0) + len(body.encode())
         if state["held_bytes"] > HELD_LIMIT_BYTES:
             drop_held(db, state, abandon=True)
+            return
+    if state.get("phase") == "unmarked":
+        state["unmarked_bytes"] = state.get("unmarked_bytes", 0) + len(body.encode())
+        if state["unmarked_bytes"] > UNMARKED_LIMIT_BYTES:
+            abandon_unmarked(db, state)
             return
     if item["kind"] == "user":
         # A title is read as words: an image's name is not one.

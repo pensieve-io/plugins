@@ -152,6 +152,8 @@ def setup(tmp_path, monkeypatch, client="codex", prior=(), profiles=None):
         return ACCEPTED
 
     monkeypatch.setattr(capture, "upload", send)
+    # A Stop asks for a missed marker; by default Pensieve has none to give.
+    monkeypatch.setattr(capture, "fetch_marker", lambda *args: None)
 
     def run(event="Stop"):
         return capture.run_hook(
