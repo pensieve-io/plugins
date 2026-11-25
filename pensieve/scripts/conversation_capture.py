@@ -23,7 +23,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from capture_adapters import (
@@ -71,8 +71,9 @@ MAX_SCAN_BYTES = 4 * 1024 * 1024
 SUBAGENT_IDENTITY_BYTES = 4096
 MAX_STATE_PAGES = 4096  # 16 MiB with SQLite's 4096-byte pages; never evict an unacked event.
 HOST_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
-# A turn whose briefing failed asks once, at its Stop, for the marker it missed.
-# Bounded below the Stop hook's budget so its uploads still have time.
+# A turn whose briefing failed asks for the marker it missed at each capture
+# hook until Pensieve answers. One attempt takes at most this, and half the
+# hook's remaining budget, so its uploads still have time.
 MARKER_TIMEOUT_SECONDS = 1.0
 
 
@@ -206,6 +207,7 @@ def scan(
     deadline: float,
     *,
     allow_new_file: bool = False,
+    settle=None,
 ) -> None:
     # Anchors contain identities only and share the spool's size bounds.
     db.execute(
@@ -387,7 +389,7 @@ def scan(
                     record, client, session, state["adapter"], state.get("capture_turn_id")
                 )
                 # An answer before its prompt's marker: the turn waits, unsent,
-                # for the marker its Stop asks for (`settle_unmarked`).
+                # for Pensieve to give it one (`settle_unmarked`).
                 unmarked = (
                     state.get("phase") in {"awaiting_attribution", "unmarked"}
                     and any(item["kind"] not in {"attribution", "user"} for item in items)
@@ -422,6 +424,10 @@ def scan(
                         raise sqlite3.OperationalError(
                             "capture spool full; outbox reserve retained"
                         )
+                if settle and any(item["kind"] == "user" for item in items):
+                    # The next prompt gives up a turn still unmarked: it asks
+                    # once more while it is the current turn.
+                    settle()
                 for index, item in enumerate(items):
                     identity = f"{client}:{session}:{offset}:{index}"
                     original_time = aware_time(record.get("timestamp"))
@@ -681,70 +687,58 @@ def upload(batch: dict, key: str, endpoint: str, timeout: float) -> dict | str:
 
 def marker_endpoint(upload_endpoint: str) -> str:
     """The marker route beside the upload route, so a loopback fixture serves both."""
-    return urlunsplit(urlsplit(checked_endpoint(upload_endpoint))._replace(path="/hooks/marker"))
-
-
-def marker_token(config: Path, client: str) -> str | None:
-    """The installation proof the briefing hook sends, read without ever creating one."""
-    from plugin_headers import HEADER as PLUGIN_HEADER
-    from plugin_headers import header_path, read_headers
-
-    try:
-        return read_headers(header_path(config, client), client)[PLUGIN_HEADER].split(" ", 1)[1]
-    except (OSError, ValueError):
-        return None
+    return checked_endpoint(upload_endpoint).rsplit("/", 1)[0] + "/marker"
 
 
 def fetch_marker(
     endpoint: str, token: str, client: str, session: str, turn_id: str | None, timeout: float
-) -> str | None:
-    """The marker this turn's briefing would have carried, or None when none is given."""
+) -> tuple[bool, str | None]:
+    """Whether Pensieve answered for this turn, and the marker its briefing would have carried.
+
+    Without a marker, only an answer is final: 204 (none may be given), 401 or
+    403 (the proof is refused) and 404 (an older service). A timeout, an
+    outage, a server error or a malformed reply leaves the turn to ask again.
+    """
+    from context_briefing import request
+
     body = {"client": client, "session_id": session, **({"turn_id": turn_id} if turn_id else {})}
-    try:
-        request = Request(
-            marker_endpoint(endpoint),
-            data=json.dumps(body).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token,
-                "User-Agent": "Pensieve-Plugin-Capture/1.0",
-            },
-            method="POST",
-        )
-        opener = build_opener(ProxyHandler({}), NoRedirects())
-        with opener.open(request, timeout=timeout) as response:
-            # 204: this conversation may not be saved under this credential.
-            result = json.loads(response.read(8193)) if response.status == 200 else None
-    except (OSError, ValueError):
-        return None  # An outage, an older service without the route, or a refused key.
-    marker = result.get("marker") if isinstance(result, dict) else None
-    return marker if isinstance(marker, str) else None
+    code, result = request(marker_endpoint(endpoint), token, body, timeout)
+    marker = result.get("marker") if code == 200 and isinstance(result, dict) else None
+    if isinstance(marker, str):
+        return True, marker
+    return code in {204, 401, 403, 404}, None
 
 
-def settle_unmarked(db, state, client, session, configured, endpoint, token, deadline) -> None:
-    """At a turn's Stop, attribute it with the marker it missed, or give it up.
+def settle_unmarked(db, state, client, session, configured, endpoint, config, deadline) -> None:
+    """Attribute an unmarked turn with the marker it missed, or give it up.
 
-    Nothing later may attribute it: the next prompt's marker belongs to the next
-    turn. So a turn whose briefing and Stop both failed to reach Pensieve is
-    counted as unsaved here rather than waiting for a marker that cannot come.
+    Asked by each capture hook that finds the turn unmarked (its Stop, then the
+    next prompt or the session's end), and last as the scan reaches the next
+    prompt, which gives the turn up: that prompt's marker belongs to the next
+    turn. Pensieve answering with no marker, or no installation proof to ask
+    with, gives it up at once; without an answer it waits, unsent, for the next hook.
     """
     if state.get("phase") != "unmarked":
         return
+    from plugin_connection import installation_proof
+
+    token = installation_proof(config, client)
+    if token is None:
+        abandon_unmarked(db, state)
+        return
     remaining = deadline - time.monotonic()
-    if token and remaining > 0.2:
-        turn = (state.get("adapter") or {}).get("turn_id") if client == "codex" else None
-        text = fetch_marker(
-            endpoint,
-            token,
-            client,
-            session,
-            conversation_id(turn),
-            min(MARKER_TIMEOUT_SECONDS, remaining / 2),
-        )
-        marker = marker_from_text(text, client, session) if text else None
-        if marker and attribute_late(db, state, marker, client, session, configured):
-            return
-    abandon_unmarked(db, state)
+    if remaining <= 0.2:
+        return
+    # The turn's own ID: the transcript may already have reached the next turn.
+    turn = conversation_id(state.get("capture_turn_id")) if client == "codex" else None
+    answered, text = fetch_marker(
+        endpoint, token, client, session, turn, min(MARKER_TIMEOUT_SECONDS, remaining / 2)
+    )
+    marker = marker_from_text(text, client, session) if text else None
+    if marker:
+        attribute_late(db, state, marker, turn, client, session, configured)
+    elif answered:
+        abandon_unmarked(db, state)
 
 
 def health_outcome(outcome: object) -> str:
@@ -994,13 +988,12 @@ def capture_session(
     *,
     allow_new_file=False,
     recover=False,
-    turn_ended=False,
-    marker_key=None,
+    proof_config=None,
 ):
     """Resume one known spool, preserving its original ownership and identities.
 
-    ``turn_ended`` is a Stop: the turn just read either takes the marker it
-    missed (``marker_key`` asks for it) or is given up.
+    With ``proof_config``, a turn whose briefing failed asks Pensieve for the
+    marker it missed with that config's installation proof (`settle_unmarked`).
     """
     source_error = None
     # A second hook must not append unverified parent events between subagent
@@ -1042,6 +1035,13 @@ def capture_session(
             state.update(offset=None, discarding_record=False, adapter={}, capture_turn_id=None)
         if recover:
             path = state.get("path")
+
+        def settle():
+            if proof_config is not None:
+                settle_unmarked(
+                    db, state, client, session, configured, endpoint, proof_config, deadline
+                )
+
         if isinstance(path, str):
             try:
                 scan(
@@ -1053,11 +1053,9 @@ def capture_session(
                     configured,
                     deadline,
                     allow_new_file=allow_new_file,
+                    settle=settle,
                 )
-                if turn_ended:
-                    settle_unmarked(
-                        db, state, client, session, configured, endpoint, marker_key, deadline
-                    )
+                settle()
             except (OSError, ValueError, sqlite3.DatabaseError) as exc:
                 # Loss of the source must not strand already-durable uploads.
                 # Roll back this scan and flush only the previously committed
@@ -1197,8 +1195,7 @@ def run_hook(
         deadline - (0.6 if ordinary else 0),
         allow_new_file=event == "SessionStart"
         and payload.get("source") in {None, "startup", "clear"},
-        turn_ended=event == "Stop",
-        marker_key=marker_token(config, client) if event == "Stop" else None,
+        proof_config=config,
     )
     notice = None
     # A failed scan prints nothing, so its notice waits for a prompt that can show it.
@@ -1358,7 +1355,8 @@ def conversation_status(
     if queued:
         lines["Queued"] = f"{queued} {'entry' if queued == 1 else 'entries'}"
     if status.get("unsaved_turns"):
-        lines["Not saved"] = unsaved_turns_text(status["unsaved_turns"])
+        turns = unsaved_turns_text(status["unsaved_turns"])
+        lines["Not saved"] = f"{turns}, as Pensieve could not be reached in time"
     # Health counts every conversation's uploads; only this one's failing is news here.
     if (
         not unsaved
@@ -1500,7 +1498,7 @@ def conversation_notice(
                 and not sharing_enabled(payload.get("transcript_path"), client, session)
             )
         ):
-            # Saving is on, but a turn since the last notice was given up.
+            # No reason left to tell, but turns may have been given up since the last notice.
             unsaved = 0 if paused else state.get("unsaved_turns", 0)
             missed = unsaved - state.get("unsaved_noticed", 0)
             if missed <= 0:
@@ -1509,9 +1507,13 @@ def conversation_notice(
             state["unsaved_noticed"] = unsaved
             save_state(db, state)
             db.commit()
+            # As for `unproven_start`, only a member who shares transcripts lost anything.
+            if not sharing_enabled(payload.get("transcript_path"), client, session):
+                return None
             return (
-                f"Pensieve did not save {unsaved_turns_text(missed)}. Later turns are saved as "
-                f"usual. Tell the user if it matters to them; {status_hint(client, session)}."
+                f"Pensieve could not be reached in time to save {unsaved_turns_text(missed)} of "
+                f"this conversation. Tell the user if it matters to them; "
+                f"{status_hint(client, session)}."
             )
         state["notices_shown"] = [*shown, reason]
         save_state(db, state)
@@ -1529,10 +1531,8 @@ def status_hint(client: str, session: str) -> str:
 
 
 def unsaved_turns_text(count: int) -> str:
-    """Why turns were given up, for the notice and the status command alike."""
-    if count == 1:
-        return "1 earlier turn of this conversation: its briefing failed and could not be retried"
-    return f"{count} earlier turns of this conversation: their briefings failed and could not be retried"
+    """The turns given up, for the notice and the status command alike."""
+    return "1 earlier turn" if count == 1 else f"{count} earlier turns"
 
 
 def saving_status(root: Path, client: str, session: str) -> dict:
@@ -1592,7 +1592,7 @@ def spool_status(root: Path, client: str, session: str) -> dict:
             # Marked turns waiting, unsent, for the conversation's first company.
             result["held_turns"] = len(state["held_turns"])
         if isinstance(state, dict) and state.get("unsaved_turns"):
-            # Turns given up because Pensieve could not be reached before they ended.
+            # Turns given up because Pensieve could not be reached in time.
             result["unsaved_turns"] = state["unsaved_turns"]
         return result
     finally:

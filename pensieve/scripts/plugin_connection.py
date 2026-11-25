@@ -20,13 +20,21 @@ from capture_config import (
     save_private_json,
     valid_uuid,
 )
-from plugin_headers import HEADER, header_path, prepare_headers
+from plugin_headers import HEADER, header_path, prepare_headers, read_headers
 
 CONNECTION_ENDPOINT = "https://mcp.pensieve.uk/hooks/connection"
 
 
 def installation_token(config: Path, client: str) -> str:
     return prepare_headers(config, client)[HEADER].split(" ", 1)[1]
+
+
+def installation_proof(config: Path, client: str) -> str | None:
+    """The installation's proof, read without ever creating one."""
+    try:
+        return read_headers(header_path(config, client), client)[HEADER].split(" ", 1)[1]
+    except (OSError, ValueError):
+        return None
 
 
 def connect_message(client: str) -> str:

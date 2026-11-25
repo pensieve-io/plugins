@@ -25,8 +25,8 @@ HELD_LIMIT_BYTES = 2 * 1024 * 1024
 # is no longer the conversation in progress.
 HELD_MAX_AGE = timedelta(days=7)
 # A turn whose briefing never arrived keeps its events in the private spool
-# until its own Stop asks Pensieve for the marker it missed. Past this many
-# bytes it is given up early, so one long unmarked turn cannot fill the spool.
+# while it asks Pensieve for the marker it missed. Past this many bytes it is
+# given up early, so one long unmarked turn cannot fill the spool.
 UNMARKED_LIMIT_BYTES = 2 * 1024 * 1024
 
 INTERNAL_MARKER = re.compile(
@@ -107,32 +107,52 @@ def abandon_unmarked(db, state: dict) -> None:
     """Give up a turn whose marker never came: count it, and require a fresh marker.
 
     The count is what `--status` and the next prompt's notice report, since an
-    unsaved turn otherwise leaves no trace once later turns save again.
+    unsaved turn otherwise leaves no trace once later turns save again. Turns
+    held for the conversation's first company are dropped with it, and counted.
     """
     if state.get("phase") != "unmarked":
         return
     state.pop("unmarked_bytes", None)
-    state["unsaved_turns"] = state.get("unsaved_turns", 0) + 1
+    lost = 1 + len(state.get("held_turns", []))
+    state["unsaved_turns"] = state.get("unsaved_turns", 0) + lost
     block(db, state, "missing_attribution")
 
 
-def attribute_late(db, state: dict, marker: dict, client, session, configured) -> bool:
-    """Attribute the unmarked turn with the marker Pensieve gave for it at its own Stop.
+def attribute_late(db, state: dict, marker: dict, turn_id, client, session, configured) -> None:
+    """Attribute the unmarked turn with the marker Pensieve gave for it after its answer.
 
     The marker passes every check a prompt's own marker does, against the
     turn's starting position, so a key changed or removed since the prompt was
     written still refuses it. Only the turn awaiting it can take it: a later
     turn never authorises an earlier one, and a transcript marker that arrives
     after the turn's first answer is still ignored.
+
+    A late marker states sharing as it was when asked, not when the turn was
+    written, so one whose consent generation differs from the conversation's
+    newest marker for the same account and company saves nothing: sharing
+    changed since, perhaps while the turn was written. Like sharing off, that
+    is not a loss.
     """
     if state.get("phase") != "unmarked" or state.get("capture_stopped"):
-        return False
-    waited = state.pop("unmarked_bytes", 0)
+        return
+    if marker["turn_id"] != turn_id:
+        # Pensieve answered for another Codex turn: this one is lost all the same.
+        abandon_unmarked(db, state)
+        return
+    state.pop("unmarked_bytes", None)
+    scope = [marker["user_id"], marker["context_id"], marker["capture_generation"]]
+    newest = state.get("marker_scope")
+    if newest and newest[:2] == scope[:2] and newest != scope:
+        withdraw_turn(db, state)
+        state["phase"] = "ready"
+        return
     state["phase"] = "awaiting_attribution"
     apply_item(
         db,
         state,
-        {"kind": "attribution", "marker": marker},
+        # Its turn is checked above, against the turn it was asked for rather
+        # than whichever turn the transcript has reached since.
+        {"kind": "attribution", "marker": dict(marker, turn_id=None)},
         f"{state.get('turn_group')}:late",
         datetime.now(timezone.utc).isoformat(),
         client,
@@ -141,10 +161,6 @@ def attribute_late(db, state: dict, marker: dict, client, session, configured) -
         False,
         source_offset=state.get("turn_source_offset", 0),
     )
-    if state.get("phase") == "awaiting_attribution":
-        state.update(phase="unmarked", unmarked_bytes=waited)
-        return False
-    return state.get("phase") in {"capturing", "holding"}
 
 
 def withdraw_turn(db, state: dict) -> None:
@@ -249,7 +265,7 @@ def apply_item(
         record_context_use(db, state, item["context_id"])
         return
     if item["kind"] == "user":
-        # The previous turn's Stop never attributed it: it is not saved.
+        # A turn still unmarked as the next prompt begins is not saved.
         abandon_unmarked(db, state)
         state.pop("blocked_reason", None)
         if state.get("phase") == "awaiting_attribution":
@@ -299,7 +315,9 @@ def apply_item(
         previous = state.get("candidate_scope")
         previous_segment = state.get("candidate_segment")
         state.update(phase="ready", candidate_segment=None, candidate_scope=None)
-        state["scope"] = [owner, context, generation]
+        # Unlike the scope, the newest marker's survives a block: a late marker
+        # is judged against it (`attribute_late`).
+        state["scope"] = state["marker_scope"] = [owner, context, generation]
         turn_offset = state.get("turn_source_offset", source_offset)
         # The prompt's own time where the host recorded one, else this marker's.
         turn_at = state.get("turn_occurred_at") or occurred_at
@@ -398,7 +416,7 @@ def apply_item(
         block(db, state, "credential_changed")
     if item["kind"] != "user" and state.get("phase") == "awaiting_attribution":
         # The prompt's marker did not come before its answer, so its briefing
-        # failed. The turn waits, unsent, for the marker its Stop asks for.
+        # failed. The turn waits, unsent, for Pensieve to give it one.
         state.update(phase="unmarked", unmarked_bytes=0)
     if state.get("phase") not in {"capturing", "awaiting_attribution", "holding", "unmarked"}:
         return

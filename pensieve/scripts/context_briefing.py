@@ -46,6 +46,8 @@ from plugin_connection import (
 BRIEFING_ENDPOINT = "https://mcp.pensieve.uk/hooks/briefing"
 # Branch recall after a shell command (`branch_recall.py`), on the same credential.
 RECALL_ENDPOINT = "https://mcp.pensieve.uk/hooks/recall"
+# The capture marker a failed briefing missed (`conversation_capture.py`), likewise.
+MARKER_ENDPOINT = "https://mcp.pensieve.uk/hooks/marker"
 # Bumped whenever hook behaviour the service relies on changes, so a briefing
 # can ask an older installation to update its plugin.
 HOOK_REVISION = 2
@@ -67,7 +69,13 @@ HTTP_TIMEOUT_SECONDS = 3
 
 
 def checked_endpoint(value: str) -> str:
-    if value in {BRIEFING_ENDPOINT, BINDING_ENDPOINT, CONNECTION_ENDPOINT, RECALL_ENDPOINT}:
+    if value in {
+        BRIEFING_ENDPOINT,
+        BINDING_ENDPOINT,
+        CONNECTION_ENDPOINT,
+        RECALL_ENDPOINT,
+        MARKER_ENDPOINT,
+    }:
         return value
     parsed = urlsplit(value)
     try:
@@ -85,7 +93,13 @@ def checked_endpoint(value: str) -> str:
         or parsed.query
         or parsed.fragment
         or parsed.path
-        not in {"/hooks/briefing", "/hooks/tool-binding", "/hooks/connection", "/hooks/recall"}
+        not in {
+            "/hooks/briefing",
+            "/hooks/tool-binding",
+            "/hooks/connection",
+            "/hooks/recall",
+            "/hooks/marker",
+        }
         or (parsed.port is not None and parsed.port < 1)
     ):
         raise ValueError("Only the fixed Pensieve endpoint or HTTP loopback fixture is supported")
