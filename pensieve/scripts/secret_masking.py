@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 MASK = "[REDACTED_SECRET]"
 # Encoded tool results can nest JSON inside JSON strings. Past this depth the
@@ -21,48 +22,31 @@ MAX_DEPTH = 256
 # would miss a key written straight after accented or CJK text.
 A = re.ASCII
 
-CREDENTIALS = [
-    # A private key; an unterminated one is withheld up to the end of its body.
-    # The search for its end is bounded so repeated headers cannot rescan the text.
+
+def load_formats(path: Path) -> tuple[re.Pattern[str], ...]:
+    """Compile the credential formats file: an identifier, a tab, a regex per line."""
+    formats = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip() and not line.startswith("#"):
+            formats.append(re.compile(line.partition("\t")[2], A))
+    return tuple(formats)
+
+
+# Formats safe in any text, shared with the Pensieve server's source scrubbing.
+FORMATS = load_formats(Path(__file__).with_name("credential_formats.txt"))
+# Broader shapes for coding transcripts only, applied before the shared formats:
+# an unfinished private key withheld to the end of its body, any `sk-` key, and
+# GitHub tokens from 16 characters. In a business document these would misfire.
+TRANSCRIPT_FORMATS = (
     re.compile(
         r"-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----"
-        r"(?:.{0,16384}?-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----|[A-Za-z0-9+/=\s]*)",
-        A | re.IGNORECASE | re.DOTALL,
+        r"(?!(?:(?!-----BEGIN)[\s\S]){0,20000}?-----END[ A-Z0-9_-]{0,100}PRIVATE KEY)"
+        r"[A-Za-z0-9+/=\s]*",
+        A | re.IGNORECASE,
     ),
-    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{16,255}|github_pat_[A-Za-z0-9_]{82})", A),
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,255}", A),
-    re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA|A3T[A-Z0-9])[A-Z0-9]{16}\b", A),
-    re.compile(r"\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])", A),
-    re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}", A),
-    # OpenAI, Anthropic and OpenRouter keys all start `sk-`.
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}", A),
-    re.compile(r"\b(?:sk|rk)_(?:live|test|prod)_[A-Za-z0-9]{10,}", A),
-    re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{20,}", A),
-    re.compile(r"\bxapp-\d-[A-Za-z0-9-]{20,}", A),
-    re.compile(
-        r"(?:https?://)?hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/+_-]{20,}", A
-    ),
-    re.compile(r"\bnpm_[A-Za-z0-9]{36}(?![A-Za-z0-9])", A),
-    re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}", A),
-    re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])", A),
-    re.compile(r"\bkey-[a-f0-9]{32}\b", A),
-    re.compile(r"\b(?:hvs|hvb)\.[A-Za-z0-9_-]{20,}", A),
-    re.compile(r"\b(?:dop|doo|dor)_v1_[a-f0-9]{64}\b", A),
-    re.compile(
-        r"\b(?:hf_[A-Za-z0-9]{34}|AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58})\b", A
-    ),
-    # A JWT starts only where a run of token characters starts; `\b` would let
-    # every `-eyJ` inside one long run rescan it, which is quadratic.
-    re.compile(
-        r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}={0,2}",
-        A,
-    ),
-    # Formats in Pensieve's own stack: capture upload keys, Doppler, Supabase, PostHog.
-    re.compile(r"\bpcap_[A-Za-z0-9_-]{32,}", A),
-    re.compile(r"\bdp\.(?:pt|st|ct|sa|scim|audit)\.[A-Za-z0-9_.-]{20,}", A),
-    re.compile(r"\b(?:sbp_[a-f0-9]{40}\b|sb_secret_[A-Za-z0-9_-]{20,})", A),
-    re.compile(r"\bphx_[A-Za-z0-9]{30,}", A),
-]
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{16,255}", A),
+)
 AUTH_SCHEME = re.compile(r"(\b(?:Bearer|Basic)[ \t]+)([A-Za-z0-9._~+/-]{8,}=*)", A | re.IGNORECASE)
 # Whatever the scheme (`Token`, `Digest`, `SSWS`...), an Authorization header's
 # credential follows the scheme word.
@@ -71,7 +55,6 @@ AUTH_HEADER = re.compile(
     r"""([^\s"',;]+)""",
     A | re.IGNORECASE,
 )
-URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.-]{0,31}://[^\s/@:]+:)[^\s/@]+(@)", A | re.IGNORECASE)
 # A value: quoted, or bare up to a delimiter, never past the end of its line.
 # A bare value stops at `)` so a parameter's type, as in `password: string)`, is
 # read as the type.
@@ -186,12 +169,19 @@ def holds_secret(key: str, entry: object) -> bool:
     return bool(SECRET_NAME.fullmatch(key)) and is_literal(str(entry))
 
 
+def mask_format(match: re.Match) -> str:
+    """The marker, keeping a format's `keep` and `tail` groups around it."""
+    groups = match.groupdict()
+    return (groups.get("keep") or "") + MASK + (groups.get("tail") or "")
+
+
 def mask_patterns(text: str) -> str:
-    for pattern in CREDENTIALS:
+    for pattern in TRANSCRIPT_FORMATS:
         text = pattern.sub(MASK, text)
+    for pattern in FORMATS:
+        text = pattern.sub(mask_format, text)
     for pattern in (AUTH_SCHEME, AUTH_HEADER):
         text = pattern.sub(lambda m: m[1] + (MASK if is_literal(m[2]) else m[2]), text)
-    text = URL_PASSWORD.sub(lambda m: m[1] + MASK + m[2], text)
     text = ASSIGNMENT.sub(mask_assignment, text)
     return FLAG.sub(mask_assignment, text)
 

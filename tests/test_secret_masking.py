@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import json
 import time
+from pathlib import Path
 
 import capture_state
 import pytest
-from secret_masking import MASK, mask_secrets
+import secret_masking
+from secret_masking import FORMATS, MASK, mask_secrets
 
 # Synthetic format fixtures, assembled at runtime so no credential-shaped literal
 # sits in the source. None of them is a working credential.
@@ -211,3 +213,23 @@ def test_flags_and_names_ending_in_a_credential_word_are_masked(text, masked):
 )
 def test_flags_without_a_literal_credential_survive(text):
     assert mask_secrets(text) == text
+
+
+def test_the_shared_formats_file_names_and_compiles_every_rule():
+    lines = [
+        line
+        for line in Path(secret_masking.__file__)
+        .with_name("credential_formats.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    names = [line.partition("\t")[0] for line in lines]
+    assert all(name and "\t" in line for name, line in zip(names, lines))
+    assert len(names) == len(set(names))
+    assert len(lines) == len(FORMATS)
+
+
+def test_shared_formats_mask_markdown_escaped_underscores():
+    escaped = "sk\\_live\\_" + "h" * 24
+    assert mask_secrets(f"key {escaped} here") == f"key {MASK} here"
