@@ -84,8 +84,11 @@ when the shift turns up something the company should keep and does not have:
 - a Page you have verified is wrong about a channel, a segment or an experiment,
   with existing Data supporting the fix → offer a cited `edit_page`, and apply
   it with the member's agreement; do not save that evidence again.
-- a growth plan a member has accepted as the plan of record → `create_page`,
-  then offer a structure lock; never apply one they did not agree to.
+- a growth plan a member has accepted as the plan of record → `save_data` the
+  plan's text, so the company keeps it as the record. When they want it kept
+  current as a Page, `create_page` with `author: "user"` and a
+  `requested_purpose`; it takes no body, and curation writes the Page from the
+  sources. Then offer a structure lock; never apply one they did not agree to.
 
 Announce new evidence or testimony in one line and save it with `save_data`
 through the harness's normal tool permissions. If you cannot tell which
