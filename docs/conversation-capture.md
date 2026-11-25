@@ -100,8 +100,9 @@ credential-named fields or flags, including inside JSON encoded in tool
 arguments. JSON nested too deeply to check is withheld whole. There is no
 entropy rule, so an unknown format in ordinary prose can still contain a
 secret. The provider formats, private keys and URL passwords live in
-`pensieve/scripts/credential_formats.txt`, which the Pensieve server imports at a
-pinned commit to scrub source text and uploaded transcripts with the same rules;
+`pensieve/scripts/credential_formats.txt`, a copy of the list the Pensieve server
+scrubs source text and uploaded transcripts with (exported from the server's
+`backend/shared/config/credential_formats.txt`; change it there, not here);
 the field, flag, header and broad `sk-`/GitHub rules apply to transcripts only,
 because in business documents they misfire. Events are limited to 32,000 characters with explicit truncation;
 batches hold at most 100 events / 256 KiB. Raw transcript records over 1 MiB

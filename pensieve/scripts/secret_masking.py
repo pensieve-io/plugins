@@ -32,7 +32,8 @@ def load_formats(path: Path) -> tuple[re.Pattern[str], ...]:
     return tuple(formats)
 
 
-# Formats safe in any text, shared with the Pensieve server's source scrubbing.
+# Formats safe in any text: a copy of the Pensieve server's list, which is the
+# master (see the file's header). The server scrubs uploads with it too.
 FORMATS = load_formats(Path(__file__).with_name("credential_formats.txt"))
 # Broader shapes for coding transcripts only, applied before the shared formats:
 # an unfinished private key withheld to the end of its body, any `sk-` key, and
