@@ -371,3 +371,30 @@ def test_only_an_answer_from_pensieve_gives_the_turn_up_at_once(
     assert calls == []
     assert len(anchor_service["requests"]) == (1 if final else 2)
     assert unsaved(state) == int(final) and pending(state) == (0 if final else 2)
+
+
+@pytest.mark.parametrize("cloud", [True, False])
+def test_a_cloud_session_saves_the_turn_whose_pensieve_call_paired_it(tmp_path, monkeypatch, cloud):
+    """A cloud machine pairs on its first Pensieve call, after its session started."""
+    if cloud:
+        monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    else:
+        monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
+    # Pairing is the server's answer to /hooks/connection; a config holding it stands in.
+    monkeypatch.setattr(
+        capture, "paired_profiles", lambda cfg, client: capture.profiles(cfg, client)
+    )
+    path, cfg, state, calls, run = setup(tmp_path, monkeypatch, "claude", profiles=[])
+    proof(tmp_path, "claude")
+    asked = answering(monkeypatch, given(marker("claude")))
+    append(path, user("Asked before pairing", "claude"), assistant("Answered", "claude"))
+    run("UserPromptSubmit")
+    assert calls == [] and asked == []
+    config(tmp_path)  # The turn's Pensieve call paired this installation.
+    run()
+    if cloud:
+        assert contents(calls) == ["Asked before pairing", "Answered"]
+        assert asked[0]["token"] == PROOF
+    else:
+        # Locally a start no credential observed stays unproven, as before.
+        assert calls == []

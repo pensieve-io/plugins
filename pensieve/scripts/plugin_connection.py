@@ -39,8 +39,10 @@ def installation_proof(config: Path, client: str) -> str | None:
 
 def connect_message(client: str) -> str:
     return (
-        "Authenticate or reconnect the Pensieve plugin in /mcp to connect its tools and hooks. "
-        "Then send another prompt to load the company briefing. Transcript sharing is a separate choice. If revoked or switching accounts, reset the plugin connection first: https://github.com/pensieve-io/plugins#reset-a-connection"
+        "The Pensieve plugin's hooks connect on this conversation's first Pensieve tool call. "
+        "If Pensieve's tools are available, call `list_contexts` once before answering; the "
+        "company briefing then loads from the next prompt. Otherwise authenticate or reconnect "
+        "the Pensieve plugin in /mcp. Transcript sharing is a separate choice. If revoked or switching accounts, reset the plugin connection first: https://github.com/pensieve-io/plugins#reset-a-connection"
         if client == "claude"
         else "Authenticate the Pensieve plugin in the harness's MCP settings (or run `codex mcp login pensieve`), "
         "then reconnect the MCP server and send another prompt. Transcript sharing is a separate choice. If revoked or switching accounts, reset the plugin connection first: https://github.com/pensieve-io/plugins#reset-a-connection"

@@ -307,7 +307,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, client probes and release ord
 
 ### Connect conversations
 
-Native MCP sign-in authorises the installation during connection discovery.
+Native MCP sign-in authorises the installation during connection discovery. In Claude's cloud
+sessions (Claude Code on the web, Cowork, chat) it pairs on the first Pensieve tool
+call instead, with no click.
 The private header helper runs before login and shares only an installation
 proof; OAuth tokens remain in the harness. The
 plugin then asks once, on a separate Approve/Deny page, whether to save
