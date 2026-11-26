@@ -103,8 +103,9 @@ secret. The provider formats, private keys and URL passwords live in
 `pensieve/scripts/credential_formats.txt`, a copy of the list the Pensieve server
 scrubs source text and uploaded transcripts with (exported from the server's
 `backend/shared/config/credential_formats.txt`; change it there, not here);
-the field, flag, header and broad `sk-`/GitHub rules apply to transcripts only,
-because in business documents they misfire. Events are limited to 32,000 characters with explicit truncation;
+the field, flag, header and broad `sk-`/GitHub rules, and URL passwords holding
+`?` or `#`, apply to transcripts only, because in business documents they
+misfire. Events are limited to 32,000 characters with explicit truncation;
 batches hold at most 100 events / 256 KiB. Raw transcript records over 1 MiB
 are skipped without decoding their contents. The helper checkpoints that skip
 within its scan budget, even across hook runs, then waits for a fresh user prompt

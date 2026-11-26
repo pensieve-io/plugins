@@ -128,6 +128,10 @@ def test_headers_urls_and_quoted_values_keep_their_structure():
         mask_secrets("https://user:password123@host/db?api_key=opaque-token-123&limit=10")
         == f"https://user:{MASK}@host/db?api_key={MASK}&limit=10"
     )
+    for password in ("s3cret#pass", "s3cret?pass"):
+        assert mask_secrets("postgresql://app:" + password + "@db.internal/main") == (
+            f"postgresql://app:{MASK}@db.internal/main"
+        )
 
 
 def test_escaped_json_inside_tool_arguments_is_decoded_and_masked():

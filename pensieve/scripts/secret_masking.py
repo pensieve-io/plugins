@@ -36,8 +36,10 @@ def load_formats(path: Path) -> tuple[re.Pattern[str], ...]:
 # master (see the file's header). The server scrubs uploads with it too.
 FORMATS = load_formats(Path(__file__).with_name("credential_formats.txt"))
 # Broader shapes for coding transcripts only, applied before the shared formats:
-# an unfinished private key withheld to the end of its body, any `sk-` key, and
-# GitHub tokens from 16 characters. In a business document these would misfire.
+# an unfinished private key withheld to the end of its body, any `sk-` key,
+# GitHub tokens from 16 characters, and a URL password holding `?` or `#`, which
+# the shared rule reads as a query or fragment. In a business document these
+# would misfire.
 TRANSCRIPT_FORMATS = (
     re.compile(
         r"-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----"
@@ -47,6 +49,9 @@ TRANSCRIPT_FORMATS = (
     ),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}", A),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{16,255}", A),
+    re.compile(
+        r"(?P<keep>\b[a-z][a-z0-9+.-]{0,31}://[^\s/@:]+:)[^\s/@]+(?P<tail>@)", A | re.IGNORECASE
+    ),
 )
 AUTH_SCHEME = re.compile(r"(\b(?:Bearer|Basic)[ \t]+)([A-Za-z0-9._~+/-]{8,}=*)", A | re.IGNORECASE)
 # Whatever the scheme (`Token`, `Digest`, `SSWS`...), an Authorization header's
@@ -177,9 +182,7 @@ def mask_format(match: re.Match) -> str:
 
 
 def mask_patterns(text: str) -> str:
-    for pattern in TRANSCRIPT_FORMATS:
-        text = pattern.sub(MASK, text)
-    for pattern in FORMATS:
+    for pattern in TRANSCRIPT_FORMATS + FORMATS:
         text = pattern.sub(mask_format, text)
     for pattern in (AUTH_SCHEME, AUTH_HEADER):
         text = pattern.sub(lambda m: m[1] + (MASK if is_literal(m[2]) else m[2]), text)
