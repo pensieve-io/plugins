@@ -54,6 +54,9 @@ HOOK_REVISION = 2
 # Fields an older service, whose request model forbids unknown fields, refuses.
 OPTIONAL_BRIEFING_FIELDS = ("hook_revision",)
 BINDING_ENDPOINT = "https://mcp.pensieve.uk/hooks/tool-binding"
+# An unpaired installation claims the call its hook precedes; that call's own
+# OAuth then pairs it. Cloud sessions' connectors never send the plugin header.
+CLAIM_ENDPOINT = "https://mcp.pensieve.uk/hooks/tool-claim"
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -72,6 +75,7 @@ def checked_endpoint(value: str) -> str:
     if value in {
         BRIEFING_ENDPOINT,
         BINDING_ENDPOINT,
+        CLAIM_ENDPOINT,
         CONNECTION_ENDPOINT,
         RECALL_ENDPOINT,
         MARKER_ENDPOINT,
@@ -96,6 +100,7 @@ def checked_endpoint(value: str) -> str:
         not in {
             "/hooks/briefing",
             "/hooks/tool-binding",
+            "/hooks/tool-claim",
             "/hooks/connection",
             "/hooks/recall",
             "/hooks/marker",
@@ -187,6 +192,7 @@ def run_hook(
     binding_endpoint: str = BINDING_ENDPOINT,
     receipt_endpoint: str = DELIVERY_ENDPOINT,
     connection_endpoint: str = CONNECTION_ENDPOINT,
+    claim_endpoint: str = CLAIM_ENDPOINT,
 ) -> dict:
     started = time.monotonic()
     event = payload.get("hook_event_name")
@@ -218,11 +224,13 @@ def run_hook(
     key = installation_token(config, client)
     profile = connection(config, client, key, connection_endpoint, request)
     if profile is None:
-        return (
-            {}
-            if event == "PreToolUse"
-            else failure(event, client, session, connect_message(client))
+        if event != "PreToolUse":
+            return failure(event, client, session, connect_message(client))
+        # Never blocks the call: an unclaimed call only leaves the plugin unpaired.
+        request(
+            claim_endpoint, key, {"client": client, "session_id": session, "tool_use_id": tool_id}
         )
+        return {}
     if event == "PreToolUse":
         code, _ = request(
             binding_endpoint, key, {"client": client, "session_id": session, "tool_use_id": tool_id}

@@ -103,6 +103,18 @@ supplies Authorization. Authenticated initialize/list requests bind the proof to
 the OAuth user, independently of tools and conversation IDs. `/hooks/connection`
 returns the hook's authenticated identity using that proof as bearer.
 
+Claude's cloud sessions (Claude Code on the web, cloud Cowork, unified chat)
+reach Pensieve through Anthropic's connector, which never runs the header
+helper. There the installation pairs through its first Pensieve tool call: the
+unpaired `PreToolUse` hook posts `{client, session_id, tool_use_id}` to
+`/hooks/tool-claim` with the proof as bearer, and the MCP request carrying the
+same `_meta["claudecode/toolUseId"]` pairs it to that request's OAuth account.
+The claim never blocks the call. Until then the briefing asks the model to make
+one Pensieve call. With `CLAUDE_CODE_REMOTE=true` the capture hook also proves a
+fresh session's start before any credential exists, and asks
+`/hooks/connection` itself, so the turn that paired the machine is saved once its
+late marker arrives. Locally nothing changes.
+
 Before registration, hooks ask for native MCP login; they do not start a separate
 browser login or block initial tool discovery. Rejected proofs never rotate
 automatically. Explicit reset clears that harness's cached profile, fences queued

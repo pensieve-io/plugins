@@ -460,3 +460,37 @@ def test_a_422_is_retried_once_and_only_within_the_hook_budget(setup, monkeypatc
     monkeypatch.setattr(briefing, "HOOK_BUDGET_SECONDS", 0)
     briefing.run_hook(payload(), "codex", path)
     assert len(sent) == 1
+
+
+@pytest.mark.parametrize("claimed", [204, 409, "unavailable"])
+def test_an_unpaired_claude_call_claims_its_tool_use_id_and_is_never_blocked(
+    setup, monkeypatch, claimed
+):
+    path, _calls = setup
+    sent = []
+
+    def request(endpoint, key, body, **_kwargs):
+        sent.append((endpoint, key, body))
+        return (403, None) if endpoint == briefing.CONNECTION_ENDPOINT else (claimed, None)
+
+    monkeypatch.setattr(briefing, "request", request)
+    event = dict(
+        payload("PreToolUse"),
+        tool_name="mcp__plugin_pensieve_pensieve__list_contexts",
+        tool_use_id="toolu_cloud",
+    )
+    assert briefing.run_hook(event, "claude", path) == {}
+    assert sent[-1] == (
+        briefing.CLAIM_ENDPOINT,
+        KEY,
+        {"client": "claude", "session_id": SESSION, "tool_use_id": "toolu_cloud"},
+    )
+    # The proof travels only as the bearer, never in a body or hook output.
+    assert all(KEY not in json.dumps(body) for _e, _k, body in sent)
+
+
+def test_an_unpaired_prompt_asks_for_one_pensieve_call(setup, monkeypatch):
+    path, _calls = setup
+    monkeypatch.setattr(briefing, "request", lambda *_a, **_k: (403, None))
+    result = briefing.run_hook(payload(), "claude", path)
+    assert "call `list_contexts` once" in result["hookSpecificOutput"]["additionalContext"]

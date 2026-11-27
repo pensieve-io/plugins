@@ -312,7 +312,9 @@ def scan(
                 {"offset": details.st_size, "scopes": ["*"]}
             )
             block(db, state, "conversation_paused")
-        if state["offset"] is not None and previous is not None and previous != fingerprints:
+        # A start proven before any credential (a cloud session not yet paired)
+        # holds nothing a first credential could wrongly inherit.
+        if state["offset"] is not None and previous not in (None, {}) and previous != fingerprints:
             # Only changed credentials start a new capture interval. Keep scanning
             # unread work for unaffected scopes, including across bounded scans.
             state.setdefault("profile_cutovers", []).append(
@@ -1170,6 +1172,17 @@ def run_hook(
     if pause_state(state_root) is not None:
         return paused_hook(payload, client, session, state_root)
     configured = profiles(config, client)
+    # A cloud session is a fresh machine whose installation pairs on its first
+    # Pensieve tool call (`context_briefing.py`), after the session has started.
+    cloud = client == "claude" and os.environ.get("CLAUDE_CODE_REMOTE") == "true"
+    fresh = event == "SessionStart" and payload.get("source") in {None, "startup", "clear"}
+    if cloud and not configured and event != "SessionEnd":
+        configured = paired_profiles(config, client)
+    if cloud and not configured and fresh:
+        # Prove the start now, so the turns before pairing can still be saved
+        # once their markers arrive. The directory first lets the empty
+        # observation below fence before the baseline rather than after it.
+        private_directory(state_root)
     observe_credentials(state_root, client, configured)
     if event != "SessionEnd":
         from capture_onboarding import offer_connection
@@ -1178,7 +1191,7 @@ def run_hook(
             offer_connection(payload, client, session, config, configured)
         except (OSError, ValueError, KeyError, TypeError):
             pass  # Setup must never interrupt a conversation or an existing upload.
-    if not configured:
+    if not configured and not (cloud and fresh):
         # The client-wide credential observation fences every spool, including
         # dormant sessions beyond this hook's bounded recovery page.
         return {}
@@ -1193,8 +1206,7 @@ def run_hook(
         state_root,
         endpoint,
         deadline - (0.6 if ordinary else 0),
-        allow_new_file=event == "SessionStart"
-        and payload.get("source") in {None, "startup", "clear"},
+        allow_new_file=fresh,
         proof_config=config,
     )
     notice = None
@@ -1204,11 +1216,28 @@ def run_hook(
             notice = conversation_notice(payload, client, session, state_root)
         except (OSError, ValueError, sqlite3.DatabaseError):
             pass  # A busy spool shows its notice on a later prompt.
-    if ordinary:
+    if ordinary and configured:
         recover_sessions(client, session, configured, state_root, endpoint, deadline)
     if source_error is not None:
         raise source_error
     return hook_output(event, notice)
+
+
+def paired_profiles(config: Path, client: str) -> dict[str, str]:
+    """This installation's profile, if its first Pensieve call has paired it since."""
+    from context_briefing import request
+    from plugin_connection import CONNECTION_ENDPOINT, connection, installation_proof
+
+    token = installation_proof(config, client)
+    if token is None:
+        return {}
+    try:
+        connection(
+            config, client, token, CONNECTION_ENDPOINT, lambda *a, **_k: request(*a, timeout=1)
+        )
+    except (OSError, ValueError):
+        return {}
+    return profiles(config, client)
 
 
 def set_conversation_saving(
