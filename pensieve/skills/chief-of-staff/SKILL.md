@@ -83,7 +83,10 @@ when the shift turns up something the company should keep and does not have:
   offer a cited `edit_page`, and apply it with the member's agreement; do not
   save that evidence again.
 - a subject the tree genuinely lacks and a member has asked you to build →
-  `create_page`, then offer a lock; never apply one they did not agree to.
+  `create_page` with `author: "user"` and a `requested_purpose` saying what it
+  should hold. It takes no body: curation writes and cites the Page, so save any
+  text the member wants kept with `save_data` first. Then offer a structure lock;
+  never apply one they did not agree to.
 
 Announce new evidence or testimony in one line and save it with `save_data`
 through the harness's normal tool permissions. If you cannot tell which

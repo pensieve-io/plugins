@@ -87,8 +87,11 @@ when the shift turns up something the company should keep and does not have:
   supports the fix → offer a cited `edit_page`, and apply it with the member's
   agreement; do not save that evidence again.
 - a product decision a member has taken with you and wants kept as the record →
-  `create_page` or `save_data` as fits, then offer a lock; never apply one they
-  did not agree to.
+  `save_data` the decision and its reasoning, so the company keeps it as a
+  source. When they want it kept current as a Page, `create_page` with
+  `author: "user"` and a `requested_purpose`; it takes no body, and curation
+  writes the Page from the sources. Then offer a structure lock; never apply one
+  they did not agree to.
 
 Announce new evidence or testimony in one line and save it with `save_data`
 through the harness's normal tool permissions. If you cannot tell which
